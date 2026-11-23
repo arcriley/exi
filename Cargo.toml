@@ -1,0 +1,73 @@
+[package]
+name = "exi"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+description = "W3C EXI 1.0 (libexi)"
+publish = false
+
+[lib]
+crate-type = ["rlib"]
+bench = false
+
+[dependencies]
+hashbrown = { version = "0.17.1", default-features = false, features = ["equivalent"] }
+rustc-hash = { version = "2", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+markup5ever = { version = "0.40", optional = true }
+html5ever = { version = "0.40", optional = true }
+markup5ever_rcdom = { version = "0.40.1", optional = true }
+flate2 = { version = "1.1", optional = true, default-features = false, features = ["rust_backend"] }
+
+[dev-dependencies]
+lz4_flex = "0.11"
+zstd = { version = "0.13", features = ["zdict_builder"] }
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+html5ever = "0.40"
+markup5ever_rcdom = "0.40.1"
+
+[features]
+default = ["std", "xml", "bit-packed", "compression"]
+std = []
+# XML 1.0 text reader and writer (exi::xml).
+xml = []
+# The XML Schema compiler (exi::xsd): XSD documents to grammars. Reads XSD with the XML reader.
+xsd = ["xml"]
+# Schemas learned from example documents (exi::infer). Writes XSD and compiles it.
+infer = ["xsd"]
+# Layer 2: the document tree, after libxml2 (exi::dom).
+dom = []
+# HTML pages as EXI (exi::html): events from any markup5ever tree, and HTML text out.
+html = ["std", "xml", "dep:markup5ever"]
+# HTML text in, parsed as browsers do.
+html5ever = ["html", "dep:html5ever", "dep:markup5ever_rcdom"]
+# The XHTML5 profile grammars (exi::html::profile).
+xhtml5 = ["html"]
+# The C ABI (exi::capi). Needs std to catch panics at every export, and xml for EXI_FORMAT_XML.
+capi = ["std", "xml", "dom"]
+# Bit-packed bodies, the default alignment. Headers are always read and written bit-packed.
+bit-packed = []
+# Pre-compression and compression: blocks, channels, and DEFLATE through flate2 (which needs std).
+compression = ["std", "dep:flate2"]
+
+[[bin]]
+# The command-line tool. Commands that need xsd or infer say so when those are off.
+name = "exi"
+path = "src/bin/exi.rs"
+required-features = ["std", "xml"]
+doc = false
+bench = false
+
+[[bench]]
+# cargo bench --features infer (a std-only harness: no downloads needed)
+name = "exi"
+harness = false
+required-features = ["infer"]
+
+[[bench]]
+# cargo bench --bench codecs --features infer,xhtml5,html5ever: EXI codings, LZ4 and zstd
+# over XMPP stanzas and documents; CSV files for charts in target/bench.
+name = "codecs"
+harness = false
+required-features = ["infer", "xhtml5", "html5ever"]

@@ -1,0 +1,11 @@
+edition = "2024"
+
+# Vertical monitor friendly from PEP-8
+max_width = 79
+comment_width = 72
+wrap_comments = true
+
+use_small_heuristics = "Max"
+
+newline_style = "Unix"
+

@@ -1,72 +1,95 @@
-//! Global string tables: every distinct string stored once, shared by every session.
-//!
+// src/strings.rs
+//
+// Global string tables
+// Copyright © 2026 Arc Riley
+//
+// This file is free software and available for distribution by
+// the terms of the Apache 2.0 or MIT licenses. Code contrubutions
+// are welcome only if this notice remains unchanged clearly
+// communicating that changes are made under these same conditions.
+//
 //! # What this module is for
 //!
-//! An EXI stream gives each string a small number so a repeated string is sent as that
-//! number. Each stream keeps its own numbering ([`crate::tables`]). A server may hold
-//! thousands of streams at once, and most of their strings are the same: the same
-//! namespaces, element names and addresses. This module stores each distinct string once
-//! for all of them, and gives it an integer id. Two sessions that hold the same id hold the
-//! same string, so a server compares strings from different connections as integers.
+//! An EXI stream gives each string a small number so a repeated string
+//! is sent as that number. Each stream keeps its own numbering
+//! ([`crate::tables`]). A server may hold thousands of streams at once,
+//! and most of their strings are the same: the same namespaces, element
+//! names and addresses. This module stores each distinct string once
+//! for all of them, and gives it an integer id. Two sessions that hold
+//! the same id hold the same string, so a server compares strings from
+//! different connections as integers.
 //!
-//! The global tables only share storage. They never change what any stream writes: a stream
-//! encoded with shared tables is byte for byte the same as one encoded with private tables.
+//! The global tables only share storage. They never change what any
+//! stream writes: a stream encoded with shared tables is byte for byte
+//! the same as one encoded with private tables.
 //!
-//! # Four tables, one per kind (ST1)
+//! # Four tables, one per kind
 //!
-//! [`GlobalStrings`] holds four [`GlobalTable`]s: URIs, prefixes, local names and values.
-//! Strings of different kinds are never compared with each other, so they never share a
-//! table. The same text, such as `"id"`, can be in two tables with unrelated ids. Each kind
-//! has its own id type ([`UriId`], [`PrefixId`], [`LocalId`], [`ValueId`]), so the compiler
-//! rejects an id used with the wrong table (ST7).
+//! [`GlobalStrings`] holds four [`GlobalTable`]s: URIs, prefixes, local
+//! names and values. Strings of different kinds are never compared with
+//! each other, so they never share a table. The same text, such as
+//! `"id"`, can be in two tables with unrelated ids. Each kind
+//! has its own id type ([`UriId`], [`PrefixId`], [`LocalId`],
+//! [`ValueId`]), so the compiler rejects an id used with the wrong
+//! table.
 //!
-//! # References (ST5)
+//! # References
 //!
-//! Every string counts its references. A string with at least one reference keeps its id
-//! and its bytes. When the count reaches zero the string is freed: its id and its bytes may
-//! be reused by a later string. References are held by:
+//! Every string counts its references. A string with at least one
+//! reference keeps its id and its bytes. When the count reaches zero
+//! the string is freed: its id and its bytes may be reused by a later
+//! string. References are held by:
 //!
-//! - a [`Held`] handle, returned by [`GlobalTable::intern`] and [`PendingStr::finish`]. It
-//!   releases its reference when dropped. Code that keeps an id for later, such as a router
-//!   keeping a JID, keeps a `Held`;
-//! - session tables, for every entry they hold (crate-internal `retain`/`release`);
+//! - a [`Held`] handle, returned by [`GlobalTable::intern`] and
+//!   [`PendingStr::finish`]. It releases its reference when dropped.
+//!   Code that keeps an id for later, such as a router keeping a JID,
+//!   keeps a `Held`;
+//! - session tables, for every entry they hold (crate-internal
+//!   `retain`/`release`);
 //! - [`Initial`](crate::tables::Initial), for every initial entry.
 //!
-//! An id obtained with [`GlobalTable::get`] carries no reference. It names the string only
-//! while something else holds one. Kept beyond that, it may name a different string later.
+//! An id obtained with [`GlobalTable::get`] carries no reference. It
+//! names the string only while something else holds one. Kept beyond
+//! that, it may name a different string later.
 //!
-//! # Soundness rule for the implementation (ST8)
+//! # Soundness rule for the implementation
 //!
-//! Tables are shared by `&` reference and add strings through interior mutability
-//! (`UnsafeCell`). This is sound because of one rule: **the bytes of a string with at least
-//! one reference are never written.** Every `&str` this module hands out is borrowed from
-//! something that holds a reference (a [`Held`], or a session table), so no `&str` can point
-//! at bytes being reused. Consequences for the code:
+//! Tables are shared by `&` reference and add strings through interior
+//! mutability (`UnsafeCell`). This is sound because of one rule: **the
+//! bytes of a string with at least one reference are never written.**
+//! Every `&str` this module hands out is borrowed from something that
+//! holds a reference (a [`Held`], or a session table), so no `&str` can
+//! point at bytes being reused. Consequences for the code:
 //!
-//! - chunk bytes are written only through raw pointers into free or reserved space; never
-//!   form a `&mut [u8]` over a chunk that other strings live in;
-//! - chunks are separate heap allocations that never move or shrink; the `Vec` of chunk
-//!   pointers may reallocate, which does not move the chunks;
-//! - no method keeps a reference into `entries`, the index or the free lists across a call
-//!   that can modify them. No method calls back into user code;
-//! - `GlobalTable` and `GlobalStrings` are `Send` but not `Sync`: one thread at a time. A
-//!   shared form for many threads is an open question (blueprint §8, question 1).
+//! - chunk bytes are written only through raw pointers into free or
+//!   reserved space; never form a `&mut [u8]` over a chunk that other
+//!   strings live in;
+//! - chunks are separate heap allocations that never move or shrink;
+//!   the `Vec` of chunk pointers may reallocate, which does not move
+//!   the chunks;
+//! - no method keeps a reference into `entries`, the index or the free
+//!   lists across a call that can modify them. No method calls back
+//!   into user code;
+//! - `GlobalTable` and `GlobalStrings` are `Send` but not `Sync`: one
+//!   thread at a time. A shared form for many threads is an open
+//!   question.
 //!
 //! Run the tests of this module under Miri.
 //!
-//! # Representation (§5.1 of the blueprint)
+//! # Representation
 //!
 //! | Part | Representation |
 //! |---|---|
 //! | Arena | A `Vec` of chunks, each a `Box<[u8]>` of `chunk_bytes`. Each string is stored contiguously, followed by one NUL byte that its length does not count, so C callers can use it directly. A string longer than `chunk_bytes − 1` bytes gets a chunk of its own, exactly `len + 1` bytes. A string that does not fit in the rest of the current chunk starts a new chunk; the unused tail is counted in [`TableStats::free_bytes`] |
 //! | Entry, per id | `{ chunk: u32, start: u32, len: u32, cap: u32, hash: u32, refs: u32 }`. `cap` is the slot size in bytes (at least `len + 1`). `refs == 0` marks a free entry |
 //! | Index | A Swiss table (`hashbrown::HashMap`, hasher `rustc_hash::FxBuildHasher`) from the key of a string's hash to every id with that key. The key is [`hash::key16`] of [`hash::hash32`] with `hash_bits(16)`, or the full `hash32` with `hash_bits(32)`. The value is one id inline (the usual case) or a short list when keys collide |
-//! | Free lists | Freed entries by size class: class `k` holds slots with `cap` in `[2^k, 2^(k+1))`, smallest class 16 bytes. A new string of `n + 1` bytes takes a slot from the smallest non-empty class `k` with `2^k ≥ n + 1`. If no slot fits but any freed id exists, that id is reused with fresh bytes, and its old slot stays in its free list without an id. New ids are made only when no freed id exists |
+//! | Free lists | Freed entries by size class: class `k` holds slots with `cap` in `[2^k, 2^(k+1))`. A new string of `n + 1` bytes takes, in this order: a freed slot from the smallest non-empty class `k` with `2^k ≥ n + 1`, with its id; a freed id whose slot went with its chunk, with fresh bytes; a new id with fresh bytes |
 //! | Chunk release | Each chunk counts its live strings. When the count reaches 0, the chunk's slots leave the free lists and the chunk is returned to the allocator; if it is the chunk being appended to, its write position goes back to 0 instead. So memory follows the live strings without a compaction step, which could never run anyway: compacting needs `&mut`, and every holder of a reference borrows the tables |
 //!
-//! Lookup: hash the string, find its key, and for each id listed compare the length, then
-//! the bytes. Insertion: store the bytes and NUL, fill an entry, add the id under its key.
-//! Freeing: remove the id from its key's list, move the entry to its free list.
+//! Lookup: hash the string, find its key, and for each id listed
+//! compare the length, then the bytes. Insertion: store the bytes and
+//! NUL, fill an entry, add the id under its key. Freeing: remove the id
+//! from its key's list, move the entry to its free list.
 //!
 //! # Limits
 //!
@@ -82,10 +105,16 @@
 //!
 //! When a limit is exceeded, nothing is changed.
 
-use core::cell::Cell;
-use core::marker::PhantomData;
+use core::cell::{Cell, UnsafeCell};
+use core::ptr::NonNull;
 
-use crate::Result;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+use core::marker::PhantomData;
+use hashbrown::HashMap;
+use rustc_hash::FxBuildHasher;
+
+use crate::{Error, ErrorKind, Result};
 
 pub mod hash;
 
@@ -93,8 +122,18 @@ mod sealed {
     pub trait Sealed {}
 }
 
-/// The kind of string a table holds (ST1). Sealed: the four kinds below are all there are.
-pub trait Kind: sealed::Sealed + Copy + Eq + Ord + core::hash::Hash + core::fmt::Debug + 'static {}
+/// The kind of string a table holds.
+/// The four kinds below are all there are.
+pub trait Kind:
+    sealed::Sealed
+    + Copy
+    + Eq
+    + Ord
+    + core::hash::Hash
+    + core::fmt::Debug
+    + 'static
+{
+}
 
 /// Namespace URIs. Holds `""`, which is "no namespace".
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -120,9 +159,10 @@ impl Kind for Value {}
 
 /// The id of one string in a global table of kind `K`.
 ///
-/// Ids are dense integers from 0, so callers can index arrays with them. An id is the same
-/// string for as long as the string has a reference; after that it may be reused (ST5).
-/// Ids from different [`GlobalStrings`] are unrelated, and the type does not tell them
+/// Ids are dense integers from 0, so callers can index arrays with
+/// them. An id is the same string for as long as the string has a
+/// reference; after that it may be reused. Ids from different
+/// [`GlobalStrings`] are unrelated, and the type does not tell them
 /// apart: mixing them is a logic error the tables cannot detect.
 ///
 /// ```
@@ -139,7 +179,7 @@ pub struct StrId<K: Kind>(u32, PhantomData<K>);
 impl<K: Kind> StrId<K> {
     /// The id as an integer.
     pub const fn index(self) -> u32 {
-        todo!()
+        self.0
     }
 }
 
@@ -148,7 +188,8 @@ pub type PrefixId = StrId<Prefix>;
 pub type LocalId = StrId<Local>;
 pub type ValueId = StrId<Value>;
 
-/// Configuration of a global table. Every table of a [`GlobalStrings`] uses the same one.
+/// Configuration of a global table. Every table of a [`GlobalStrings`]
+/// uses the same one.
 ///
 /// | Setting | `new()` | `device()` |
 /// |---|---|---|
@@ -157,8 +198,9 @@ pub type ValueId = StrId<Value>;
 /// | `max_bytes` | `u64::MAX` (no limit) | 65 536 |
 /// | `max_strings` | `u32::MAX` (no limit) | 4 096 |
 ///
-/// The `device()` values are placeholders until the benchmark suite tunes them. Settings
-/// are checked by [`GlobalStrings::new`], not here.
+/// The `device()` values are placeholders until the benchmark suite
+/// tunes them. Settings are checked by [`GlobalStrings::new`], not
+/// here.
 ///
 /// ```
 /// use exi::strings::GlobalConfig;
@@ -179,41 +221,54 @@ pub struct GlobalConfig {
 impl GlobalConfig {
     /// Defaults for hosts and servers.
     pub const fn new() -> Self {
-        todo!()
+        GlobalConfig {
+            hash_bits: 16,
+            chunk_bytes: 16_384,
+            max_bytes: u64::MAX,
+            max_strings: u32::MAX,
+        }
     }
     /// Small bounds for microcontrollers.
     pub const fn device() -> Self {
-        todo!()
+        GlobalConfig {
+            hash_bits: 16,
+            chunk_bytes: 1_024,
+            max_bytes: 65_536,
+            max_strings: 4_096,
+        }
     }
-    /// Width of the index key: 16 (default) or 32. Beyond about 30 000 strings in one table,
-    /// 16-bit keys give collision lists of more than one id on average; 32-bit keys keep
-    /// them short for millions of strings, at the cost of a larger index.
+    /// Width of the index key: 16 (default) or 32. Beyond about 30 000
+    /// strings in one table, 16-bit keys give collision lists of more
+    /// than one id on average; 32-bit keys keep them short for millions
+    /// of strings, at the cost of a larger index.
     pub const fn hash_bits(self, bits: u8) -> Self {
-        todo!()
+        GlobalConfig { hash_bits: bits, ..self }
     }
-    /// Size of each arena chunk in bytes: a power of two from 64 to 2^30.
+    /// Size of each arena chunk in bytes: a power of two from 64 to
+    /// 2^30.
     pub const fn chunk_bytes(self, n: u32) -> Self {
-        todo!()
+        GlobalConfig { chunk_bytes: n, ..self }
     }
-    /// Most live bytes in one table, counting `len + 1` per string (the NUL included).
+    /// Most live bytes in one table, counting `len + 1` per string (the
+    /// NUL included).
     pub const fn max_bytes(self, n: u64) -> Self {
-        todo!()
+        GlobalConfig { max_bytes: n, ..self }
     }
     /// Most live strings in one table.
     pub const fn max_strings(self, n: u32) -> Self {
-        todo!()
+        GlobalConfig { max_strings: n, ..self }
     }
     pub const fn get_hash_bits(&self) -> u8 {
-        todo!()
+        self.hash_bits
     }
     pub const fn get_chunk_bytes(&self) -> u32 {
-        todo!()
+        self.chunk_bytes
     }
     pub const fn get_max_bytes(&self) -> u64 {
-        todo!()
+        self.max_bytes
     }
     pub const fn get_max_strings(&self) -> u32 {
-        todo!()
+        self.max_strings
     }
 }
 
@@ -228,34 +283,45 @@ impl Default for GlobalConfig {
 pub struct TableStats {
     /// Live strings: those with at least one reference.
     pub strings: u32,
-    /// Live bytes: the sum of `len + 1` over live strings. This is what `max_bytes` bounds.
+    /// Live bytes: the sum of `len + 1` over live strings. This is what
+    /// `max_bytes` bounds.
     pub bytes: u64,
-    /// Arena bytes allocated but not holding a live string: freed slots, unused chunk tails
-    /// and abandoned reservations. Released with the chunk when its last string is freed.
+    /// Arena bytes allocated but not holding a live string: freed
+    /// slots, unused chunk tails and abandoned reservations. Released
+    /// with the chunk when its last string is freed.
     pub free_bytes: u64,
     /// Arena chunks allocated, oversized ones included.
     pub chunks: u32,
-    /// The longest list of ids sharing one index key. 1 when no keys collide; 0 when empty.
+    /// The longest list of ids sharing one index key. 1 when no keys
+    /// collide; 0 when empty.
     pub longest_list: u32,
 }
 
-/// One global table of strings of kind `K` (see the module documentation).
+/// One global table of strings of kind `K` (see the module
+/// documentation).
 ///
 /// `Debug` shows [`TableStats`], not the strings.
 pub struct GlobalTable<K: Kind> {
-    // Representation: module documentation, "Representation". All of it inside UnsafeCell.
+    inner: UnsafeCell<Inner>,
+    cfg: GlobalConfig,
     _kind: PhantomData<K>,
     _not_sync: PhantomData<Cell<()>>,
 }
 
+// SAFETY: every byte and pointer the table holds is owned by it;
+// nothing is shared with another table or thread. `Sync` stays off (the
+// Cell marker): one thread at a time.
+unsafe impl<K: Kind> Send for GlobalTable<K> {}
+
 impl<K: Kind> core::fmt::Debug for GlobalTable<K> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        todo!()
+        f.debug_struct("GlobalTable").field("stats", &self.stats()).finish()
     }
 }
 
 impl<K: Kind> GlobalTable<K> {
-    /// The id of `s`, if the table holds it. Adds no reference (see "References").
+    /// The id of `s`, if the table holds it. Adds no reference (see
+    /// "References").
     ///
     /// ```
     /// # use exi::strings::{GlobalStrings, GlobalConfig};
@@ -267,16 +333,20 @@ impl<K: Kind> GlobalTable<K> {
     /// # Ok::<(), exi::Error>(())
     /// ```
     pub fn get(&self, s: &str) -> Option<StrId<K>> {
-        todo!()
+        let cfg = self.cfg;
+        let h = hash::hash32(s.as_bytes());
+        self.inner().find(&cfg, s.as_bytes(), h).map(|i| StrId(i, PhantomData))
     }
 
-    /// The string `s`, added if absent, with one more reference held by the returned
-    /// handle. The empty string is a string like any other: it is stored as a single NUL.
+    /// The string `s`, added if absent, with one more reference held by
+    /// the returned handle. The empty string is a string like any
+    /// other: it is stored as a single NUL.
     ///
     /// # Errors
     ///
-    /// `ErrorKind::Limit` when adding `s` would exceed `max_strings` or `max_bytes`, or no
-    /// id is left. A string already present never fails: it only gains a reference.
+    /// `ErrorKind::Limit` when adding `s` would exceed `max_strings` or
+    /// `max_bytes`, or no id is left. A string already present never
+    /// fails: it only gains a reference.
     ///
     /// ```
     /// # use exi::strings::{GlobalStrings, GlobalConfig};
@@ -311,8 +381,8 @@ impl<K: Kind> GlobalTable<K> {
     /// g.uris().refs(v.id());
     /// ```
     ///
-    /// The limit on live strings: at the limit a new string fails and an existing one
-    /// succeeds; freeing one makes room again.
+    /// The limit on live strings: at the limit a new string fails and
+    /// an existing one succeeds; freeing one makes room again.
     ///
     /// ```
     /// # use exi::strings::{GlobalStrings, GlobalConfig};
@@ -329,7 +399,8 @@ impl<K: Kind> GlobalTable<K> {
     /// # Ok::<(), exi::Error>(())
     /// ```
     ///
-    /// The limit on live bytes counts `len + 1` per string and allows exactly the limit:
+    /// The limit on live bytes counts `len + 1` per string and allows
+    /// exactly the limit:
     ///
     /// ```
     /// # use exi::strings::{GlobalStrings, GlobalConfig};
@@ -342,8 +413,8 @@ impl<K: Kind> GlobalTable<K> {
     /// # Ok::<(), exi::Error>(())
     /// ```
     ///
-    /// A string that fills a chunk exactly (with its NUL), and one larger than a chunk,
-    /// which gets a chunk of its own:
+    /// A string that fills a chunk exactly (with its NUL), and one
+    /// larger than a chunk, which gets a chunk of its own:
     ///
     /// ```
     /// # use exi::strings::{GlobalStrings, GlobalConfig};
@@ -358,20 +429,23 @@ impl<K: Kind> GlobalTable<K> {
     /// # Ok::<(), exi::Error>(())
     /// ```
     pub fn intern(&self, s: &str) -> Result<Held<'_, K>> {
-        todo!()
+        self.intern_id(s).map(|id| Held { table: self, id })
     }
 
-    /// Starts a string whose bytes arrive in pieces, such as a literal decoded across input
-    /// refills. Reserves `max_len + 1` contiguous bytes at once, so several pending strings,
-    /// from different sessions on one thread, can be built at the same time.
+    /// Starts a string whose bytes arrive in pieces, such as a literal
+    /// decoded across input refills. Reserves `max_len + 1` contiguous
+    /// bytes at once, so several pending strings, from different
+    /// sessions on one thread, can be built at the same time.
     ///
-    /// `max_len` is an upper bound in bytes. A decoder that knows a literal has `n`
-    /// characters passes `4 × n`, the most UTF-8 bytes `n` characters can take.
+    /// `max_len` is an upper bound in bytes. A decoder that knows a
+    /// literal has `n` characters passes `4 × n`, the most UTF-8 bytes
+    /// `n` characters can take.
     ///
     /// # Errors
     ///
-    /// `ErrorKind::Limit` when `max_len + 1` more live bytes would exceed `max_bytes`, or
-    /// `max_len` exceeds `u32::MAX − 1`. The reservation is counted as live bytes until
+    /// `ErrorKind::Limit` when `max_len + 1` more live bytes would
+    /// exceed `max_bytes`, or `max_len` exceeds `u32::MAX − 1`. The
+    /// reservation is counted as live bytes until
     /// [`PendingStr::finish`] or drop.
     ///
     /// ```
@@ -388,19 +462,46 @@ impl<K: Kind> GlobalTable<K> {
     /// # Ok::<(), exi::Error>(())
     /// ```
     pub fn begin(&self, max_len: u32) -> Result<PendingStr<'_, K>> {
-        todo!()
+        let cfg = self.cfg;
+        let inner = self.inner();
+        if max_len >= u32::MAX - 1 {
+            return Err(Error::new(
+                ErrorKind::Limit,
+                "reservation longer than u32::MAX - 2 bytes",
+            ));
+        }
+        let need = max_len + 1;
+        if inner.live_bytes + need as u64 > cfg.max_bytes {
+            return Err(Error::new(
+                ErrorKind::Limit,
+                "global table: max_bytes",
+            ));
+        }
+        let (chunk, start) = inner.alloc(&cfg, need);
+        inner.chunks[chunk as usize].as_mut().expect("chunk").live += 1;
+        inner.live_bytes += need as u64;
+        Ok(PendingStr {
+            table: self,
+            chunk,
+            start,
+            cap: need,
+            len: 0,
+            done: false,
+        })
     }
 
-    /// The number of references `id` has: 0 for a freed id or one never made.
+    /// The number of references `id` has: 0 for a freed id or one never
+    /// made.
     pub fn refs(&self, id: StrId<K>) -> u32 {
-        todo!()
+        self.inner().entries.get(id.0 as usize).map_or(0, |e| e.refs)
     }
 
     /// Counts describing this table.
     ///
-    /// Keys that collide are listed together and both strings are found. The first pair
-    /// of the strings "s0", "s1", … whose 16-bit keys collide is found by search here, so
-    /// the test holds for either hash function (see [`hash`]).
+    /// Keys that collide are listed together and both strings are
+    /// found. The first pair of the strings "s0", "s1", … whose 16-bit
+    /// keys collide is found by search here, so the test holds for
+    /// either hash function (see [`hash`]).
     ///
     /// ```
     /// # use exi::strings::{GlobalStrings, GlobalConfig, hash};
@@ -434,14 +535,15 @@ impl<K: Kind> GlobalTable<K> {
     /// # Ok::<(), exi::Error>(())
     /// ```
     pub fn stats(&self) -> TableStats {
-        todo!()
+        self.inner().stats()
     }
 }
 
-/// A reference to one string, released when dropped (ST5). Cloning adds a reference.
+/// A reference to one string, released when dropped (ST5). Cloning adds
+/// a reference.
 ///
-/// The string's bytes cannot change while a `Held` exists, so [`Held::as_str`] is valid for
-/// as long as the handle.
+/// The string's bytes cannot change while a `Held` exists, so
+/// [`Held::as_str`] is valid for as long as the handle.
 ///
 /// ```
 /// # use exi::strings::{GlobalStrings, GlobalConfig};
@@ -476,41 +578,45 @@ pub struct Held<'g, K: Kind> {
 
 impl<'g, K: Kind> Held<'g, K> {
     pub fn id(&self) -> StrId<K> {
-        todo!()
+        self.id
     }
     pub fn as_str(&self) -> &str {
-        todo!()
+        self.table.resolve(self.id)
     }
-    /// The table this handle belongs to, so a session can check that a handle comes from
-    /// its own global tables.
+    /// The table this handle belongs to, so a session can check that a
+    /// handle comes from its own global tables.
     pub fn table(&self) -> &'g GlobalTable<K> {
-        todo!()
+        self.table
     }
 }
 
 impl<K: Kind> core::fmt::Debug for Held<'_, K> {
     /// Shows the id and the string.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        todo!()
+        f.debug_struct("Held")
+            .field("id", &self.id.0)
+            .field("str", &self.as_str())
+            .finish()
     }
 }
 
 impl<K: Kind> Clone for Held<'_, K> {
     fn clone(&self) -> Self {
-        todo!()
+        self.table.retain(self.id);
+        Held { table: self.table, id: self.id }
     }
 }
 
 impl<K: Kind> Drop for Held<'_, K> {
     fn drop(&mut self) {
-        todo!()
+        self.table.release(self.id);
     }
 }
 
-/// A string being built in pieces (see [`GlobalTable::begin`]). Dropped without
-/// [`finish`](PendingStr::finish), it leaves the table as it was: the reservation is given
-/// back if it is the last allocation in its chunk, and is otherwise counted in
-/// [`TableStats::free_bytes`].
+/// A string being built in pieces (see [`GlobalTable::begin`]). Dropped
+/// without [`finish`](PendingStr::finish), it leaves the table as it was: the reservation is given
+/// back if it is the last allocation in its chunk, and is otherwise
+/// counted in [`TableStats::free_bytes`].
 ///
 /// ```
 /// # use exi::strings::{GlobalStrings, GlobalConfig};
@@ -527,6 +633,11 @@ impl<K: Kind> Drop for Held<'_, K> {
 /// ```
 pub struct PendingStr<'t, K: Kind> {
     table: &'t GlobalTable<K>,
+    chunk: u32,
+    start: u32,
+    cap: u32,
+    len: u32,
+    done: bool,
 }
 
 impl<'t, K: Kind> PendingStr<'t, K> {
@@ -534,8 +645,8 @@ impl<'t, K: Kind> PendingStr<'t, K> {
     ///
     /// # Errors
     ///
-    /// `ErrorKind::Arg` when the string would exceed the `max_len` given to `begin`.
-    /// Nothing is appended.
+    /// `ErrorKind::Arg` when the string would exceed the `max_len`
+    /// given to `begin`. Nothing is appended.
     ///
     /// ```
     /// # use exi::strings::{GlobalStrings, GlobalConfig};
@@ -550,27 +661,41 @@ impl<'t, K: Kind> PendingStr<'t, K> {
     /// # Ok::<(), exi::Error>(())
     /// ```
     pub fn push_str(&mut self, s: &str) -> Result<()> {
-        todo!()
+        if self.len as u64 + s.len() as u64 > self.cap as u64 - 1 {
+            return Err(Error::new(
+                ErrorKind::Arg,
+                "pending string longer than its reservation",
+            ));
+        }
+        self.table.inner().write_bytes(
+            self.chunk,
+            self.start + self.len,
+            s.as_bytes(),
+        );
+        self.len += s.len() as u32;
+        Ok(())
     }
     /// Appends one character.
     pub fn push_char(&mut self, c: char) -> Result<()> {
-        todo!()
+        let mut buf = [0u8; 4];
+        self.push_str(c.encode_utf8(&mut buf))
     }
     /// Bytes appended so far.
     pub fn len(&self) -> u32 {
-        todo!()
+        self.len
     }
     pub fn is_empty(&self) -> bool {
-        todo!()
+        self.len == 0
     }
-    /// Ends the string. If the table already holds an equal string, that string gains a
-    /// reference and this copy is abandoned; otherwise this copy is kept. Either way the
-    /// unused part of the reservation is given back as in the type's documentation.
+    /// Ends the string. If the table already holds an equal string,
+    /// that string gains a reference and this copy is abandoned;
+    /// otherwise this copy is kept. Either way the unused part of the
+    /// reservation is given back as in the type's documentation.
     ///
     /// # Errors
     ///
-    /// `ErrorKind::Limit` when keeping the string would exceed `max_strings`, or no id is
-    /// left. The copy is abandoned.
+    /// `ErrorKind::Limit` when keeping the string would exceed
+    /// `max_strings`, or no id is left. The copy is abandoned.
     ///
     /// ```
     /// # use exi::strings::{GlobalStrings, GlobalConfig};
@@ -585,25 +710,87 @@ impl<'t, K: Kind> PendingStr<'t, K> {
     /// # Ok::<(), exi::Error>(())
     /// ```
     pub fn finish(self) -> Result<Held<'t, K>> {
-        todo!()
+        let mut me = self;
+        let table = me.table;
+        let cfg = table.cfg;
+        let inner = table.inner();
+        let (chunk, start, len, cap) = (me.chunk, me.start, me.len, me.cap);
+        // SAFETY: these bytes were written by push_str from &str
+        // pieces, so they are UTF-8.
+        let bytes = {
+            let c = inner.chunks[chunk as usize].as_ref().expect("chunk");
+            unsafe {
+                core::slice::from_raw_parts(
+                    c.ptr.as_ptr().add(start as usize),
+                    len as usize,
+                )
+            }
+        };
+        let h = hash::hash32(bytes);
+        me.done = true;
+        if let Some(id) = inner.find(&cfg, bytes, h) {
+            inner.retain(id);
+            give_back(inner, chunk, start, cap, 0);
+            return Ok(Held { table, id: StrId(id, PhantomData) });
+        }
+        // Keep this copy: the reservation becomes the string's slot.
+        inner.live_bytes -= cap as u64;
+        inner.chunks[chunk as usize].as_mut().expect("chunk").live -= 1;
+        if let Err(e) = inner.check_new(&cfg, len as usize) {
+            inner.live_bytes += cap as u64;
+            inner.chunks[chunk as usize].as_mut().expect("chunk").live += 1;
+            give_back(inner, chunk, start, cap, 0);
+            return Err(e);
+        }
+        let id = match inner.slotless.pop() {
+            Some(id) => id,
+            None => {
+                inner.entries.push(Entry {
+                    chunk: NO_CHUNK,
+                    start: 0,
+                    len: 0,
+                    cap: 0,
+                    hash: 0,
+                    refs: 0,
+                });
+                (inner.entries.len() - 1) as u32
+            }
+        };
+        // Shrink the slot when it is the last allocation of the current
+        // chunk.
+        let slot_cap =
+            if chunk == inner.current && inner.write_pos == start + cap {
+                inner.write_pos = start + len + 1;
+                len + 1
+            } else {
+                cap
+            };
+        inner.commit(&cfg, id, chunk, start, slot_cap, len, h);
+        Ok(Held { table, id: StrId(id, PhantomData) })
     }
 }
 
 impl<K: Kind> core::fmt::Debug for PendingStr<'_, K> {
     /// Shows the bytes appended so far and the reservation.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        todo!()
+        f.debug_struct("PendingStr")
+            .field("len", &self.len)
+            .field("reserved", &self.cap)
+            .finish()
     }
 }
 
 impl<K: Kind> Drop for PendingStr<'_, K> {
     fn drop(&mut self) {
-        todo!()
+        if !self.done {
+            give_back(self.table.inner(), self.chunk, self.start, self.cap, 0);
+        }
     }
 }
 
-/// The four global tables (ST1). Sessions borrow one; sessions that should not share
-/// memory or timing with each other, such as different tenants, use separate ones.
+/// The four global tables (ST1). Sessions borrow one; sessions that
+/// should not share memory or timing with each other, such as different
+/// tenants, use separate ones.
 ///
 /// `Send`, not `Sync`: one thread at a time.
 ///
@@ -622,7 +809,12 @@ pub struct GlobalStrings {
 impl core::fmt::Debug for GlobalStrings {
     /// Shows the four tables' [`TableStats`].
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        todo!()
+        f.debug_struct("GlobalStrings")
+            .field("uris", &self.uris.stats())
+            .field("prefixes", &self.prefixes.stats())
+            .field("locals", &self.locals.stats())
+            .field("values", &self.values.stats())
+            .finish()
     }
 }
 
@@ -631,8 +823,8 @@ impl GlobalStrings {
     ///
     /// # Errors
     ///
-    /// `ErrorKind::Arg` when `hash_bits` is not 16 or 32, or `chunk_bytes` is not a power
-    /// of two from 64 to 2^30.
+    /// `ErrorKind::Arg` when `hash_bits` is not 16 or 32, or
+    /// `chunk_bytes` is not a power of two from 64 to 2^30.
     ///
     /// ```
     /// use exi::strings::{GlobalStrings, GlobalConfig};
@@ -647,18 +839,501 @@ impl GlobalStrings {
     /// assert_eq!(bad(GlobalConfig::new().hash_bits(8)), Some(ErrorKind::Arg));
     /// ```
     pub fn new(cfg: GlobalConfig) -> Result<Self> {
-        todo!()
+        check_config(&cfg)?;
+        Ok(GlobalStrings {
+            uris: GlobalTable::with_config(cfg),
+            prefixes: GlobalTable::with_config(cfg),
+            locals: GlobalTable::with_config(cfg),
+            values: GlobalTable::with_config(cfg),
+        })
     }
     pub fn uris(&self) -> &GlobalTable<Uri> {
-        todo!()
+        &self.uris
     }
     pub fn prefixes(&self) -> &GlobalTable<Prefix> {
-        todo!()
+        &self.prefixes
     }
     pub fn locals(&self) -> &GlobalTable<Local> {
-        todo!()
+        &self.locals
     }
     pub fn values(&self) -> &GlobalTable<Value> {
-        todo!()
+        &self.values
     }
+}
+
+// ---------------------------------------------------------------------------------------
+// Implementation
+// ---------------------------------------------------------------------------------------
+
+const NO_CHUNK: u32 = u32::MAX;
+
+struct Chunk {
+    ptr: NonNull<u8>,
+    cap: u32,
+    /// Live strings and pending reservations in this chunk.
+    live: u32,
+}
+
+impl Chunk {
+    fn new(cap: u32) -> Chunk {
+        let b: Box<[u8]> = alloc::vec![0u8; cap as usize].into_boxed_slice();
+        // SAFETY: Box::into_raw never returns null.
+        let ptr =
+            unsafe { NonNull::new_unchecked(Box::into_raw(b) as *mut u8) };
+        Chunk { ptr, cap, live: 0 }
+    }
+}
+
+impl Drop for Chunk {
+    fn drop(&mut self) {
+        // SAFETY: `ptr` came from `Box::<[u8]>::into_raw` with length
+        // `cap`, and is freed once.
+        unsafe {
+            drop(Box::from_raw(core::ptr::slice_from_raw_parts_mut(
+                self.ptr.as_ptr(),
+                self.cap as usize,
+            )))
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+struct Entry {
+    chunk: u32,
+    start: u32,
+    len: u32,
+    cap: u32,
+    hash: u32,
+    refs: u32,
+}
+
+enum Ids {
+    One(u32),
+    Many(Vec<u32>),
+}
+
+impl Ids {
+    fn as_slice(&self) -> &[u32] {
+        match self {
+            Ids::One(i) => core::slice::from_ref(i),
+            Ids::Many(v) => v,
+        }
+    }
+}
+
+struct Inner {
+    chunks: Vec<Option<Chunk>>,
+    current: u32,
+    write_pos: u32,
+    entries: Vec<Entry>,
+    index: HashMap<u32, Ids, FxBuildHasher>,
+    free_slots: [Vec<u32>; 32],
+    slotless: Vec<u32>,
+    live_strings: u32,
+    live_bytes: u64,
+}
+
+fn class_of(cap: u32) -> usize {
+    31 - cap.leading_zeros() as usize
+}
+
+fn class_needed(n: u32) -> usize {
+    if n <= 1 { 0 } else { 32 - (n - 1).leading_zeros() as usize }
+}
+
+impl Inner {
+    fn new() -> Inner {
+        Inner {
+            chunks: Vec::new(),
+            current: NO_CHUNK,
+            write_pos: 0,
+            entries: Vec::new(),
+            index: HashMap::with_hasher(FxBuildHasher),
+            free_slots: Default::default(),
+            slotless: Vec::new(),
+            live_strings: 0,
+            live_bytes: 0,
+        }
+    }
+
+    fn key(cfg: &GlobalConfig, h: u32) -> u32 {
+        if cfg.hash_bits == 16 { hash::key16(h) as u32 } else { h }
+    }
+
+    fn bytes(&self, e: &Entry) -> &[u8] {
+        let c = self.chunks[e.chunk as usize]
+            .as_ref()
+            .expect("live entry has a chunk");
+        // SAFETY: [start, start + len) lies inside the chunk and holds
+        // this entry's bytes, which are never written while the entry
+        // has a reference.
+        unsafe {
+            core::slice::from_raw_parts(
+                c.ptr.as_ptr().add(e.start as usize),
+                e.len as usize,
+            )
+        }
+    }
+
+    fn find(&self, cfg: &GlobalConfig, s: &[u8], h: u32) -> Option<u32> {
+        let ids = self.index.get(&Self::key(cfg, h))?;
+        ids.as_slice().iter().copied().find(|&id| {
+            let e = &self.entries[id as usize];
+            e.refs > 0 && e.len as usize == s.len() && self.bytes(e) == s
+        })
+    }
+
+    fn put_chunk(&mut self, c: Chunk) -> u32 {
+        if let Some(i) = self.chunks.iter().position(Option::is_none) {
+            self.chunks[i] = Some(c);
+            i as u32
+        } else {
+            self.chunks.push(Some(c));
+            (self.chunks.len() - 1) as u32
+        }
+    }
+
+    /// Fresh contiguous space of `need` bytes: (chunk, start).
+    fn alloc(&mut self, cfg: &GlobalConfig, need: u32) -> (u32, u32) {
+        if need > cfg.chunk_bytes {
+            let c = self.put_chunk(Chunk::new(need));
+            return (c, 0);
+        }
+        let fits = self.current != NO_CHUNK
+            && self.chunks[self.current as usize]
+                .as_ref()
+                .is_some_and(|c| c.cap - self.write_pos >= need);
+        if !fits {
+            if self.current != NO_CHUNK
+                && self.chunks[self.current as usize]
+                    .as_ref()
+                    .is_some_and(|c| c.live == 0)
+            {
+                // The current chunk holds nothing: release it rather
+                // than keep an empty one.
+                self.release_chunk(self.current);
+            }
+            self.current = self.put_chunk(Chunk::new(cfg.chunk_bytes));
+            self.write_pos = 0;
+        }
+        let start = self.write_pos;
+        self.write_pos += need;
+        (self.current, start)
+    }
+
+    fn release_chunk(&mut self, chunk: u32) {
+        self.chunks[chunk as usize] = None;
+        for class in self.free_slots.iter_mut() {
+            let entries = &mut self.entries;
+            let slotless = &mut self.slotless;
+            class.retain(|&id| {
+                if entries[id as usize].chunk == chunk {
+                    entries[id as usize].chunk = NO_CHUNK;
+                    slotless.push(id);
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        if self.current == chunk {
+            self.current = NO_CHUNK;
+            self.write_pos = 0;
+        }
+    }
+
+    /// One fewer live item in `chunk`; releases or resets it at zero.
+    fn chunk_dec(&mut self, chunk: u32) {
+        let c = self.chunks[chunk as usize].as_mut().expect("chunk");
+        c.live -= 1;
+        if c.live == 0 {
+            if chunk == self.current {
+                // Keep the chunk being appended to, empty: forget its
+                // free slots.
+                for class in self.free_slots.iter_mut() {
+                    let entries = &mut self.entries;
+                    let slotless = &mut self.slotless;
+                    class.retain(|&id| {
+                        if entries[id as usize].chunk == chunk {
+                            entries[id as usize].chunk = NO_CHUNK;
+                            slotless.push(id);
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                }
+                self.write_pos = 0;
+            } else {
+                self.release_chunk(chunk);
+            }
+        }
+    }
+
+    fn index_insert(&mut self, key: u32, id: u32) {
+        match self.index.get_mut(&key) {
+            None => {
+                self.index.insert(key, Ids::One(id));
+            }
+            Some(ids) => match ids {
+                Ids::One(other) => *ids = Ids::Many(alloc::vec![*other, id]),
+                Ids::Many(v) => v.push(id),
+            },
+        }
+    }
+
+    fn index_remove(&mut self, key: u32, id: u32) {
+        let remove_key = match self.index.get_mut(&key) {
+            None => false,
+            Some(Ids::One(other)) => *other == id,
+            Some(ids @ Ids::Many(_)) => {
+                if let Ids::Many(v) = ids {
+                    v.retain(|&x| x != id);
+                    if v.len() == 1 {
+                        *ids = Ids::One(v[0]);
+                    }
+                }
+                false
+            }
+        };
+        if remove_key {
+            self.index.remove(&key);
+        }
+    }
+
+    /// Checks the limits for one more string of `len` bytes.
+    fn check_new(&self, cfg: &GlobalConfig, len: usize) -> Result<()> {
+        if len as u64 >= u32::MAX as u64 - 1 {
+            return Err(Error::new(
+                ErrorKind::Limit,
+                "string longer than u32::MAX - 2 bytes",
+            ));
+        }
+        if self.live_strings >= cfg.max_strings {
+            return Err(Error::new(
+                ErrorKind::Limit,
+                "global table: max_strings",
+            ));
+        }
+        if self.live_bytes + len as u64 + 1 > cfg.max_bytes {
+            return Err(Error::new(
+                ErrorKind::Limit,
+                "global table: max_bytes",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Takes an id and space for a new string of `len` bytes (its NUL
+    /// included in `cap`).
+    fn take_slot(
+        &mut self,
+        cfg: &GlobalConfig,
+        len: u32,
+    ) -> Result<(u32, u32, u32, u32)> {
+        let need = len + 1;
+        for class in class_needed(need)..32 {
+            if let Some(pos) = self.free_slots[class]
+                .iter()
+                .position(|&id| self.entries[id as usize].cap >= need)
+            {
+                let id = self.free_slots[class].swap_remove(pos);
+                let e = self.entries[id as usize];
+                return Ok((id, e.chunk, e.start, e.cap));
+            }
+        }
+        let id = match self.slotless.pop() {
+            Some(id) => id,
+            None => {
+                if self.entries.len() as u64 >= u32::MAX as u64 {
+                    return Err(Error::new(
+                        ErrorKind::Limit,
+                        "global table: no id left",
+                    ));
+                }
+                self.entries.push(Entry {
+                    chunk: NO_CHUNK,
+                    start: 0,
+                    len: 0,
+                    cap: 0,
+                    hash: 0,
+                    refs: 0,
+                });
+                (self.entries.len() - 1) as u32
+            }
+        };
+        let (chunk, start) = self.alloc(cfg, need);
+        Ok((id, chunk, start, need))
+    }
+
+    fn write_bytes(&mut self, chunk: u32, start: u32, data: &[u8]) {
+        let c = self.chunks[chunk as usize].as_ref().expect("chunk");
+        debug_assert!(start as usize + data.len() <= c.cap as usize);
+        // SAFETY: the destination is free or reserved space inside the
+        // chunk; no `&str` points at it (module documentation,
+        // "Soundness rule").
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                data.as_ptr(),
+                c.ptr.as_ptr().add(start as usize),
+                data.len(),
+            )
+        }
+    }
+
+    /// Records a new live entry in `id` and returns it.
+    #[allow(clippy::too_many_arguments)] // the parts of one entry, kept flat for speed
+    fn commit(
+        &mut self,
+        cfg: &GlobalConfig,
+        id: u32,
+        chunk: u32,
+        start: u32,
+        cap: u32,
+        len: u32,
+        h: u32,
+    ) -> u32 {
+        self.write_bytes(chunk, start + len, &[0]);
+        self.entries[id as usize] =
+            Entry { chunk, start, len, cap, hash: h, refs: 1 };
+        self.chunks[chunk as usize].as_mut().expect("chunk").live += 1;
+        self.live_strings += 1;
+        self.live_bytes += len as u64 + 1;
+        self.index_insert(Self::key(cfg, h), id);
+        id
+    }
+
+    fn intern(&mut self, cfg: &GlobalConfig, s: &str) -> Result<u32> {
+        let h = hash::hash32(s.as_bytes());
+        if let Some(id) = self.find(cfg, s.as_bytes(), h) {
+            self.retain(id);
+            return Ok(id);
+        }
+        self.check_new(cfg, s.len())?;
+        let len = s.len() as u32;
+        let (id, chunk, start, cap) = self.take_slot(cfg, len)?;
+        self.write_bytes(chunk, start, s.as_bytes());
+        Ok(self.commit(cfg, id, chunk, start, cap, len, h))
+    }
+
+    fn retain(&mut self, id: u32) {
+        let e = &mut self.entries[id as usize];
+        assert!(e.refs > 0, "retain of a freed string id");
+        assert!(e.refs < u32::MAX - 1, "string reference count overflow");
+        e.refs += 1;
+    }
+
+    fn release(&mut self, cfg: &GlobalConfig, id: u32) {
+        let e = &mut self.entries[id as usize];
+        assert!(e.refs > 0, "release of a freed string id");
+        e.refs -= 1;
+        if e.refs > 0 {
+            return;
+        }
+        let e = *e;
+        self.index_remove(Self::key(cfg, e.hash), id);
+        self.live_strings -= 1;
+        self.live_bytes -= e.len as u64 + 1;
+        self.free_slots[class_of(e.cap)].push(id);
+        self.chunk_dec(e.chunk);
+    }
+
+    fn stats(&self) -> TableStats {
+        let allocated: u64 =
+            self.chunks.iter().flatten().map(|c| c.cap as u64).sum();
+        TableStats {
+            strings: self.live_strings,
+            bytes: self.live_bytes,
+            free_bytes: allocated - self.live_bytes,
+            chunks: self.chunks.iter().flatten().count() as u32,
+            longest_list: self
+                .index
+                .values()
+                .map(|ids| ids.as_slice().len() as u32)
+                .max()
+                .unwrap_or(0),
+        }
+    }
+}
+
+impl<K: Kind> GlobalTable<K> {
+    fn with_config(cfg: GlobalConfig) -> Self {
+        GlobalTable {
+            inner: UnsafeCell::new(Inner::new()),
+            cfg,
+            _kind: PhantomData,
+            _not_sync: PhantomData,
+        }
+    }
+
+    #[allow(clippy::mut_from_ref)]
+    fn inner(&self) -> &mut Inner {
+        // SAFETY: the table is not Sync, and no method keeps this
+        // reference across a call that obtains it again; `&str`s point
+        // into chunk memory, not into `Inner`.
+        unsafe { &mut *self.inner.get() }
+    }
+
+    /// Adds a reference to a live id. Crate-internal: sessions and
+    /// `Initial` hold ids.
+    pub(crate) fn retain(&self, id: StrId<K>) {
+        self.inner().retain(id.0)
+    }
+
+    /// Drops a reference; at zero the string is freed.
+    pub(crate) fn release(&self, id: StrId<K>) {
+        let cfg = self.cfg;
+        self.inner().release(&cfg, id.0)
+    }
+
+    /// The string of a live id. The caller must hold a reference for as
+    /// long as it uses the result.
+    pub(crate) fn resolve(&self, id: StrId<K>) -> &str {
+        let inner = self.inner();
+        let e = &inner.entries[id.0 as usize];
+        debug_assert!(e.refs > 0, "resolve of a freed string id");
+        // SAFETY: interned bytes always come from a &str or from
+        // push_str/push_char.
+        unsafe { core::str::from_utf8_unchecked(inner.bytes(e)) }
+    }
+
+    /// Interns `s` and returns the id with one reference that the
+    /// caller owns (no handle).
+    pub(crate) fn intern_id(&self, s: &str) -> Result<StrId<K>> {
+        let cfg = self.cfg;
+        self.inner().intern(&cfg, s).map(|i| StrId(i, PhantomData))
+    }
+
+    /// Wraps an id the caller holds a reference to in a handle that
+    /// will release it.
+    #[allow(dead_code)] // for readers that keep values as handles; not used yet
+    pub(crate) fn hold(&self, id: StrId<K>) -> Held<'_, K> {
+        Held { table: self, id }
+    }
+}
+
+fn check_config(cfg: &GlobalConfig) -> Result<()> {
+    if cfg.hash_bits != 16 && cfg.hash_bits != 32 {
+        return Err(Error::new(ErrorKind::Arg, "hash_bits must be 16 or 32"));
+    }
+    if !cfg.chunk_bytes.is_power_of_two()
+        || cfg.chunk_bytes < 64
+        || cfg.chunk_bytes > 1 << 30
+    {
+        return Err(Error::new(
+            ErrorKind::Arg,
+            "chunk_bytes must be a power of two from 64 to 2^30",
+        ));
+    }
+    Ok(())
+}
+
+/// Gives back a reservation of `cap` bytes at `start` (`kept` bytes of
+/// it stay in use).
+fn give_back(inner: &mut Inner, chunk: u32, start: u32, cap: u32, kept: u32) {
+    inner.live_bytes -= cap as u64;
+    if chunk == inner.current && inner.write_pos == start + cap {
+        inner.write_pos = start + kept;
+    }
+    inner.chunk_dec(chunk);
 }

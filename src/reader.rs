@@ -1,0 +1,1722 @@
+// src/reader.rs
+//
+// Pull parser for EXI Streams
+// Copyright © 2026 Arc Riley
+//
+// This file is free software and available for distribution by
+// the terms of the Apache 2.0 or MIT licenses. Code contrubutions
+// are welcome only if this notice remains unchanged clearly
+// communicating that changes are made under these same conditions.
+//
+//! # Use
+//!
+//! Give input with [`Reader::feed`] (or [`Reader::buffer`] and
+//! [`Reader::commit`]), call [`Reader::end_input`] after the last of
+//! it, and call [`Reader::next`] until it returns `Step::NeedInput`
+//! (give more) or `Step::End`. Each event is returned as soon as all
+//! its octets have been given; the reader never waits for the end of
+//! the document. With pre-compression and compression, events come a
+//! block at a time: a block's values follow its structure, so its
+//! events are returned once the whole block has arrived (EXI §9).
+//!
+//! # The header
+//!
+//! The reader reads the header first ([`crate::header`]). Options in
+//! the header govern; the options given with [`ReaderConfig::options`]
+//! are used only when the header has none. With neither,
+//! `ErrorKind::Header`.
+//!
+//! | Options of the stream | Result |
+//! |---|---|
+//! | `Coding::ByteAligned` | read |
+//! | `Coding::BitPacked` | read with the feature `bit-packed` (default); else `ErrorKind::Unsupported` |
+//! | `Coding::PreCompression`, `Coding::Compression` | read with the feature `compression` (default); else `ErrorKind::Unsupported` |
+//! | schema-informed, not `strict`, and `selfContained` | `ErrorKind::Unsupported` |
+//! | `schemaId` given but the grammars are schema-less, or `schemaId` nil but the grammars are schema-informed | `ErrorKind::Schema` |
+//!
+//! A `schemaId` that names a schema is not resolved: the reader trusts
+//! the grammars it was given. Giving the wrong schema-informed grammars
+//! does not fail; it decodes wrong data.
+//!
+//! # What the reader reports
+//!
+//! - Names carry their [`NameId`] (except names learned inside a
+//!   self-contained element) and their [`GlobalName`].
+//! - Prefixes: with `Preserve.prefixes`, names carry their prefixes and
+//!   NS events arrive. Without it, names have no prefix; writers of XML
+//!   text generate them.
+//! - `EndElement` carries the element's name.
+//! - Values are typed by their schema type;
+//!   [`EventMeta::flags`](crate::EventMeta) says when a value is
+//!   lexical.
+//! - Strings in events borrow the reader until the next call to `next`.
+//!
+//! # Stream sequences
+//!
+//! | [`Sequence`] | Input | After ED |
+//! |---|---|---|
+//! | `Single` | one stream | `End` once input has ended |
+//! | `Streams` | complete streams back to back, each with its own header | the next stream's SD, `NeedInput`, or `End` once input has ended |
+//! | `Frames` | one fragment stream given one frame at a time: each frame is fed, then [`Reader::end_frame`] | (see below) |
+//!
+//! With `Frames` the options must set `fragment` and byte alignment, or
+//! [`Reader::new`] fails with `ErrorKind::Arg`. The first frame begins
+//! with the header. After each `end_frame` the reader returns that
+//! frame's events, then `NeedInput`. A frame must hold exactly one
+//! complete top-level element: a frame that ends inside one, or holds
+//! octets after it, is `ErrorKind::Grammar`. `end_input` after a
+//! complete frame ends the stream normally without an ED (a libexi
+//! convention: long connections close without one).
+//!
+//! # Limits and errors
+//!
+//! Every [`Limits`] field the reader checks is checked before
+//! allocating. Input that ends inside an event after `end_input` is
+//! `ErrorKind::Truncated`; events already returned remain valid. After
+//! any error the reader is poisoned: every later call to `next` returns
+//! `ErrorKind::State`.
+//!
+//! # Start-tag mode
+//!
+//! With [`ReaderConfig::start_tag`] on, an SE and its NS and AT events
+//! arrive as one [`Event::StartTag`]. The reader must see the first
+//! content event after the attributes before it can return the tag, so
+//! the tag arrives one event later than in normal mode.
+//!
+//! Not implemented yet: [`Reader::new`] returns
+//! `ErrorKind::Unsupported` when it is on.
+
+use alloc::collections::VecDeque;
+use alloc::string::String;
+use alloc::vec::Vec;
+
+use crate::coding::Decoder;
+use crate::coding::body::BodyDecoder;
+use crate::engine::{
+    self, DVal, Decoded, Probe, Slot, State, Top, check_options, err,
+    value_rules,
+};
+use crate::error::Position;
+use crate::event::{Doctype, Event, EventMeta, NsDecl};
+use crate::grammar::{Grammars, Terminal};
+use crate::header::parse_header;
+use crate::input::InputRing;
+use crate::name::{GlobalName, Name};
+use crate::stream::{EventSource, Status, Step};
+use crate::tables::SessionTables;
+use crate::value::{OwnedValue, ValueFlags};
+use crate::{Coding, ErrorKind, Limits, NameId, Options, Result};
+
+/// How streams follow each other (module documentation).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum Sequence {
+    #[default]
+    Single,
+    Streams,
+    Frames,
+}
+
+/// Configuration for a [`Reader`].
+#[derive(Clone)]
+pub struct ReaderConfig<'g> {
+    grammars: &'g Grammars<'g>,
+    options: Option<Options>,
+    sequence: Sequence,
+    start_tag: bool,
+    limits: Limits,
+}
+
+impl<'g> ReaderConfig<'g> {
+    /// Reads streams informed by `grammars`, with the header's options,
+    /// as one stream, in normal mode, with default limits.
+    pub fn new(grammars: &'g Grammars<'g>) -> Self {
+        ReaderConfig {
+            grammars,
+            options: None,
+            sequence: Sequence::Single,
+            start_tag: false,
+            limits: Limits::new(),
+        }
+    }
+    /// Options agreed out of band, used only when the header carries
+    /// none.
+    pub fn options(self, o: Options) -> Self {
+        ReaderConfig { options: Some(o), ..self }
+    }
+    pub fn sequence(self, s: Sequence) -> Self {
+        ReaderConfig { sequence: s, ..self }
+    }
+    pub fn start_tag(self, on: bool) -> Self {
+        ReaderConfig { start_tag: on, ..self }
+    }
+    pub fn limits(self, l: Limits) -> Self {
+        ReaderConfig { limits: l, ..self }
+    }
+}
+
+/// A reader with an input ring of `N` octets (a power of two, at least
+/// 64).
+///
+/// Setup used by the examples: global tables, schema-less grammars, and
+/// options agreed out of band (byte-aligned), so each stream starts
+/// with the bare header `0x80`.
+///
+/// ```
+/// use exi::{Reader, ReaderConfig, Step, OwnedEvent, OwnedName, OwnedValue, Options, Coding};
+/// use exi::grammar::GrammarSet;
+/// use exi::strings::{GlobalStrings, GlobalConfig};
+/// let strings = GlobalStrings::new(GlobalConfig::new())?;
+/// let set = GrammarSet::schemaless();
+/// let grammars = set.attach(&strings)?;
+/// let byte = Options::builder().coding(Coding::ByteAligned).build()?;
+/// let mut r: Reader = Reader::new(ReaderConfig::new(&grammars).options(byte))?;
+/// // <a>hi</a>: SE(*) with URI 1 ("" hit), local miss "a"; CH as 0.3; "hi" literal; EE 0.
+/// r.feed(&[0x80, 0x01, 0x02, b'a', 0x03, 0x04, b'h', b'i', 0x00]);
+/// r.end_input();
+/// let mut events = Vec::new();
+/// loop {
+///     match r.next()? {
+///         Step::Event(e, _) => events.push(e.to_owned()),
+///         Step::NeedInput => unreachable!("all input was given"),
+///         Step::End => break,
+///     }
+/// }
+/// let a = OwnedName::new("", "a");
+/// assert_eq!(events, [
+///     OwnedEvent::StartDocument,
+///     OwnedEvent::StartElement(a.clone()),
+///     OwnedEvent::Characters(OwnedValue::Str("hi".into())),
+///     OwnedEvent::EndElement(a),
+///     OwnedEvent::EndDocument,
+/// ]);
+/// assert!(matches!(r.next()?, Step::End));          // End again: nothing more
+/// # Ok::<(), exi::Error>(())
+/// ```
+///
+/// Learned grammars: `<r><a/><a/></r>`. The second `a` is a hit in the
+/// local-name table and uses the production `r` learned for it; `a`
+/// learned its EE.
+///
+/// ```
+/// # use exi::{Reader, ReaderConfig, Step, Options, Coding, Event};
+/// # use exi::grammar::GrammarSet;
+/// # use exi::strings::{GlobalStrings, GlobalConfig};
+/// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+/// # let set = GrammarSet::schemaless();
+/// # let grammars = set.attach(&strings)?;
+/// # let byte = Options::builder().coding(Coding::ByteAligned).build()?;
+/// let mut r: Reader = Reader::new(ReaderConfig::new(&grammars).options(byte))?;
+/// r.feed(&[0x80, 0x01, 0x02, b'r', 0x02, 0x01, 0x02, b'a', 0x00,
+///          0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01]);
+/// r.end_input();
+/// let mut names = Vec::new();
+/// while let Step::Event(e, meta) = r.next()? {
+///     if let Event::StartElement(n) = e { names.push((n.local_name().to_owned(), n.id(), meta.depth)); }
+/// }
+/// assert_eq!(names, [
+///     ("r".into(), Some(exi::NameId { uri: 0, local: 0 }), 1),
+///     ("a".into(), Some(exi::NameId { uri: 0, local: 1 }), 2),
+///     ("a".into(), Some(exi::NameId { uri: 0, local: 1 }), 2),
+/// ]);
+/// # Ok::<(), exi::Error>(())
+/// ```
+///
+/// Input in pieces: every split point gives the same events, with
+/// `NeedInput` between.
+///
+/// ```
+/// # use exi::{Reader, ReaderConfig, Step, Options, Coding};
+/// # use exi::grammar::GrammarSet;
+/// # use exi::strings::{GlobalStrings, GlobalConfig};
+/// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+/// # let set = GrammarSet::schemaless();
+/// # let grammars = set.attach(&strings)?;
+/// # let byte = Options::builder().coding(Coding::ByteAligned).build()?;
+/// let stream = [0x80, 0x01, 0x02, b'a', 0x03, 0x04, b'h', b'i', 0x00];
+/// let read = |chunks: &[&[u8]]| -> exi::Result<Vec<exi::OwnedEvent>> {
+///     let mut r: Reader = Reader::new(ReaderConfig::new(&grammars).options(byte.clone()))?;
+///     let mut out = Vec::new();
+///     for (i, c) in chunks.iter().enumerate() {
+///         assert_eq!(r.feed(c), c.len());
+///         if i + 1 == chunks.len() { r.end_input(); }
+///         loop {
+///             match r.next()? {
+///                 Step::Event(e, _) => out.push(e.to_owned()),
+///                 Step::NeedInput | Step::End => break,
+///             }
+///         }
+///     }
+///     Ok(out)
+/// };
+/// let whole = read(&[&stream])?;
+/// for cut in 1..stream.len() {
+///     assert_eq!(read(&[&stream[..cut], &stream[cut..]])?, whole, "cut at {cut}");
+/// }
+/// let bytes: Vec<&[u8]> = stream.iter().map(core::slice::from_ref).collect();
+/// assert_eq!(read(&bytes)?, whole);                       // one octet at a time
+/// # Ok::<(), exi::Error>(())
+/// ```
+///
+/// Errors: truncated input, an out-of-range value, poisoning, missing
+/// options, and a limit.
+///
+/// ```
+/// # use exi::{Reader, ReaderConfig, Step, Options, Coding, ErrorKind, Limits};
+/// # use exi::grammar::GrammarSet;
+/// # use exi::strings::{GlobalStrings, GlobalConfig};
+/// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+/// # let set = GrammarSet::schemaless();
+/// # let grammars = set.attach(&strings)?;
+/// # let byte = Options::builder().coding(Coding::ByteAligned).build()?;
+/// let run = |cfg: ReaderConfig<'_>, input: &[u8]| -> exi::Result<()> {
+///     let mut r: Reader = Reader::new(cfg)?;
+///     r.feed(input);
+///     r.end_input();
+///     loop { if let Step::End = r.next()? { return Ok(()); } }
+/// };
+/// let cfg = || ReaderConfig::new(&grammars).options(byte.clone());
+/// assert_eq!(run(cfg(), &[0x80, 0x01, 0x02, b'a']).unwrap_err().kind(), ErrorKind::Truncated);
+/// assert_eq!(run(cfg(), &[0x80, 0x04]).unwrap_err().kind(), ErrorKind::Grammar);  // URI 4 of 2 bits
+/// assert_eq!(run(ReaderConfig::new(&grammars), &[0x80]).unwrap_err().kind(), ErrorKind::Header);
+/// let shallow = cfg().limits(Limits::new().max_depth(1));
+/// // <r><a/></r> needs depth 2.
+/// let nested = [0x80, 0x01, 0x02, b'r', 0x02, 0x01, 0x02, b'a', 0x00, 0x00];
+/// assert_eq!(run(shallow, &nested).unwrap_err().kind(), ErrorKind::Limit);
+///
+/// let mut r: Reader = Reader::new(cfg())?;
+/// r.feed(&[0x80, 0x04]);
+/// r.end_input();
+/// let _ = r.next();                                        // SD
+/// assert_eq!(r.next().unwrap_err().kind(), ErrorKind::Grammar);
+/// assert_eq!(r.next().unwrap_err().kind(), ErrorKind::State);   // poisoned
+/// # Ok::<(), exi::Error>(())
+/// ```
+///
+/// Options in the header govern; the stream below says byte-aligned in
+/// its own header.
+///
+/// ```
+/// # use exi::{Reader, ReaderConfig, Step, Coding};
+/// # use exi::grammar::GrammarSet;
+/// # use exi::strings::{GlobalStrings, GlobalConfig};
+/// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+/// # let set = GrammarSet::schemaless();
+/// # let grammars = set.attach(&strings)?;
+/// let mut r: Reader = Reader::new(ReaderConfig::new(&grammars))?;
+/// r.feed(&[0xA0, 0x00, 0x4A, 0x01, 0x02, b'a', 0x00]);
+/// r.end_input();
+/// assert!(r.options().is_none());                          // the header is not read yet
+/// assert!(matches!(r.next()?, Step::Event(exi::Event::StartDocument, _)));
+/// assert_eq!(r.options().unwrap().coding(), Coding::ByteAligned);
+/// # Ok::<(), exi::Error>(())
+/// ```
+///
+/// A ring size that is not a power of two does not compile:
+///
+/// ```compile_fail
+/// # use exi::grammar::GrammarSet;
+/// # use exi::strings::{GlobalStrings, GlobalConfig};
+/// # let strings = GlobalStrings::new(GlobalConfig::new()).unwrap();
+/// # let set = GrammarSet::schemaless();
+/// # let grammars = set.attach(&strings).unwrap();
+/// let r: exi::Reader<'_, 100> = exi::Reader::new(exi::ReaderConfig::new(&grammars)).unwrap();
+/// ```
+pub struct Reader<'g, const N: usize = 4096> {
+    ring: InputRing<N>,
+    cfg: ReaderConfig<'g>,
+    /// Input that did not fit the ring while one event was incomplete:
+    /// decoding reads from here until it is used up, and new input is
+    /// added here meanwhile.
+    spill: Spill,
+    spilling: bool,
+    ended: bool,
+    poisoned: bool,
+    phase: Phase,
+    sess: Option<Session<'g>>,
+    options: Option<Options>,
+    dec: Decoded,
+    out: Out,
+    /// Octets consumed and fed since the reader started (frame ends use
+    /// the same count).
+    pos: u64,
+    /// Bits already read of the first unconsumed octet: 0 unless the
+    /// body is bit-packed.
+    bit: u8,
+    fed: u64,
+    frame_ends: VecDeque<u64>,
+    events: u64,
+    skip_to: Option<u32>,
+    /// Decoded events not yet returned.
+    queue: VecDeque<(Out, EventMeta)>,
+    /// Pre-compression and compression: the block being read, and how
+    /// many events at the front of the queue belong to blocks whose
+    /// values are all read.
+    #[cfg(feature = "compression")]
+    block: Option<crate::block::BlockRead>,
+    #[cfg(feature = "compression")]
+    released: usize,
+    /// An SE is waiting for its NS events; it is at `collect_at` in the
+    /// queue.
+    collecting: bool,
+    collect_at: usize,
+    /// Self-contained elements: the next SE repeats the element (not
+    /// returned); the next ED ends its fragment (not returned); the
+    /// event just decoded is not returned.
+    sc_se: bool,
+    sc_ed: bool,
+    suppress: bool,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Phase {
+    Header,
+    Body,
+    /// After ED of the last stream.
+    End,
+}
+
+struct Session<'g> {
+    st: State<'g>,
+    tables: SessionTables<'g>,
+}
+
+/// The event `next` returns, in numbers and owned data, until the next
+/// call.
+#[derive(Debug, Default)]
+enum Out {
+    #[default]
+    None,
+    SD,
+    ED,
+    SE(NameId, Option<u32>),
+    EE(NameId, Option<u32>),
+    AT(NameId, Option<u32>, OwnedValue),
+    CH(OwnedValue),
+    NS(u32, u32, bool),
+    CM(String),
+    PI(String, String),
+    DT(String, String, String, String),
+    ER(String),
+    SC,
+}
+
+/// Input that did not fit the ring: a buffer read from `pos`. Taking
+/// octets from the front moves `pos`; the buffer is compacted only when
+/// most of it has been read, so reading a long spilled input stays
+/// linear.
+#[derive(Default)]
+struct Spill {
+    buf: Vec<u8>,
+    pos: usize,
+}
+
+impl Spill {
+    fn data(&self) -> &[u8] {
+        &self.buf[self.pos..]
+    }
+    fn len(&self) -> usize {
+        self.buf.len() - self.pos
+    }
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    fn extend(&mut self, d: &[u8]) {
+        self.buf.extend_from_slice(d);
+    }
+    fn consume(&mut self, n: usize) {
+        self.pos += n;
+        if self.pos == self.buf.len() {
+            self.buf.clear();
+            self.pos = 0;
+        } else if self.pos >= 1 << 16 && self.pos * 2 >= self.buf.len() {
+            self.buf.drain(..self.pos);
+            self.pos = 0;
+        }
+    }
+    fn clear(&mut self) {
+        self.buf.clear();
+        self.pos = 0;
+    }
+}
+
+/// The octets a decode sees: `n` octets of the input (the ring, or the
+/// spill buffer), or with compression the unread part of the inflated
+/// stream `z`.
+fn input_view<'a, const N: usize>(
+    ring: &'a InputRing<N>,
+    spill: &'a [u8],
+    spilling: bool,
+    z: Option<&'a [u8]>,
+    n: usize,
+) -> (&'a [u8], &'a [u8]) {
+    if let Some(z) = z {
+        return (z, &[]);
+    }
+    let (a, b) = if spilling { (spill, &[][..]) } else { ring.filled() };
+    if n <= a.len() { (&a[..n], &[]) } else { (a, &b[..n - a.len()]) }
+}
+
+/// A decoded value as the event carries it.
+fn owned_value(t: &SessionTables<'_>, v: DVal, text: &str) -> OwnedValue {
+    match v {
+        DVal::Str(r) => OwnedValue::Str(engine::value_str(t, &r, text).into()),
+        DVal::QName(id, p) => OwnedValue::QName(engine::owned_name(t, id, p)),
+        DVal::Nil(b) => OwnedValue::Bool(b),
+        DVal::Typed(v) => v,
+        // A value still in its channel.
+        DVal::None => OwnedValue::Str("".into()),
+    }
+}
+
+fn name<'a>(
+    t: &'a SessionTables<'_>,
+    id: NameId,
+    prefix: Option<u32>,
+) -> Name<'a> {
+    let n = Name::new(
+        t.uri_str(id.uri).unwrap_or(""),
+        t.local_str(id.uri, id.local).unwrap_or(""),
+    );
+    // The empty prefix is the default namespace: no prefix.
+    let n = match prefix.and_then(|p| t.prefix_str(id.uri, p)) {
+        Some(p) if !p.is_empty() => n.with_prefix(p),
+        _ => n,
+    };
+    let global = match (t.uri(id.uri), t.local(id.uri, id.local)) {
+        (Some(uri), Some(local)) => Some(GlobalName { uri, local }),
+        _ => None,
+    };
+    n.with_ids(Some(id), global)
+}
+
+impl<'g, const N: usize> Reader<'g, N> {
+    /// # Errors
+    ///
+    /// `ErrorKind::Arg` when the configuration is inconsistent:
+    /// `Frames` with out-of-band options that do not set `fragment` and
+    /// byte alignment.
+    pub fn new(cfg: ReaderConfig<'g>) -> Result<Self> {
+        let () = InputRing::<N>::VALID;
+        if cfg.sequence == Sequence::Frames {
+            if let Some(o) = &cfg.options {
+                if !(o.fragment() && o.coding() == Coding::ByteAligned) {
+                    return Err(err(
+                        ErrorKind::Arg,
+                        "frames need fragment and byte alignment",
+                    ));
+                }
+            }
+        }
+        if cfg.start_tag {
+            return Err(err(
+                ErrorKind::Unsupported,
+                "start-tag mode is not implemented yet",
+            ));
+        }
+        Ok(Reader {
+            ring: InputRing::new(),
+            cfg,
+            spill: Spill::default(),
+            spilling: false,
+            ended: false,
+            poisoned: false,
+            phase: Phase::Header,
+            sess: None,
+            options: None,
+            dec: Decoded::default(),
+            out: Out::None,
+            pos: 0,
+            bit: 0,
+            fed: 0,
+            frame_ends: VecDeque::new(),
+            events: 0,
+            skip_to: None,
+            queue: VecDeque::new(),
+            #[cfg(feature = "compression")]
+            block: None,
+            #[cfg(feature = "compression")]
+            released: 0,
+            collecting: false,
+            collect_at: 0,
+            sc_se: false,
+            sc_ed: false,
+            suppress: false,
+        })
+    }
+    /// Copies as much of `data` as fits into the ring and returns how
+    /// much. The caller's buffer is free as soon as this returns; feed
+    /// the rest after calling `next`.
+    pub fn feed(&mut self, data: &[u8]) -> usize {
+        let n = if self.spilling {
+            self.spill.extend(data);
+            data.len()
+        } else {
+            self.ring.feed(data)
+        };
+        self.fed += n as u64;
+        n
+    }
+    /// Free ring space to read into directly (see
+    /// [`InputRing::buffer`]).
+    pub fn buffer(&mut self) -> &mut [u8] {
+        self.ring.buffer()
+    }
+    /// Makes `n` octets written into `buffer()` visible to `next`.
+    pub fn commit(&mut self, n: usize) {
+        self.ring.commit(n);
+        self.fed += n as u64;
+        if self.spilling {
+            let (a, b) = self.ring.filled();
+            self.spill.extend(a);
+            self.spill.extend(b);
+            self.ring.clear();
+        }
+    }
+    /// Feeds from any reader until it is exhausted, decoding as space
+    /// is needed, and ends the input. The events are not returned: use
+    /// this with [`crate::drive`] or after counting, or use `feed` in a
+    /// loop.
+    #[cfg(feature = "std")]
+    pub fn fill_from(&mut self, src: &mut impl std::io::Read) -> Result<()> {
+        loop {
+            let buf = self.buffer();
+            if buf.is_empty() {
+                // Full: decode to make room. The events are not
+                // returned.
+                match self.next()? {
+                    Step::End => return Ok(()),
+                    _ => continue,
+                }
+            }
+            let n = src
+                .read(buf)
+                .map_err(|_| err(ErrorKind::Io, "read failed"))?;
+            if n == 0 {
+                self.end_input();
+                return Ok(());
+            }
+            self.commit(n);
+        }
+    }
+    /// `Sequence::Frames`: the octets fed since the last call complete
+    /// one frame.
+    pub fn end_frame(&mut self) {
+        self.frame_ends.push_back(self.fed);
+    }
+    /// No more input will come.
+    pub fn end_input(&mut self) {
+        self.ended = true;
+    }
+    /// The next event, `NeedInput`, or `End`.
+    ///
+    /// # Errors
+    ///
+    /// As the module documentation describes. After an error,
+    /// `ErrorKind::State`.
+    #[allow(clippy::should_implement_trait)] // events borrow the reader: not an Iterator
+    pub fn next(&mut self) -> Result<Step<'_>> {
+        self.step()
+    }
+    /// The stream's options, once the header has been read.
+    pub fn options(&self) -> Option<&Options> {
+        self.options.as_ref()
+    }
+    /// Where the next event starts.
+    pub fn position(&self) -> Position {
+        self.position_now()
+    }
+    /// Open elements.
+    pub fn depth(&self) -> u32 {
+        self.sess.as_ref().map_or(0, |s| s.st.depth())
+    }
+    /// Decodes the rest of the current element without returning its
+    /// events. Values are still decoded, to keep the string tables in
+    /// step, so this saves conversion, not decoding.
+    ///
+    /// Returns `Status::End` once the element's EE has been read (or
+    /// the stream ended), and `Status::NeedInput` when input runs out
+    /// first: give more and call it again.
+    pub fn skip_element(&mut self) -> Result<Status> {
+        // Returns `End` once the element is skipped (or the stream
+        // ended), `NeedInput` to be called again after more input.
+        let target = match self.skip_to {
+            Some(t) => t,
+            None => {
+                let d = self.depth();
+                if d == 0 {
+                    return Err(err(
+                        ErrorKind::State,
+                        "skip_element outside an element",
+                    ));
+                }
+                self.skip_to = Some(d - 1);
+                d - 1
+            }
+        };
+        loop {
+            match self.step()? {
+                Step::Event(..) => {
+                    if self.depth() <= target
+                        && matches!(self.out, Out::EE(..))
+                    {
+                        self.skip_to = None;
+                        return Ok(Status::End);
+                    }
+                }
+                Step::NeedInput => return Ok(Status::NeedInput),
+                Step::End => {
+                    self.skip_to = None;
+                    return Ok(Status::End);
+                }
+            }
+        }
+    }
+    /// Starts a new stream with the same configuration, keeping
+    /// allocations: for servers that read many short streams. Clears a
+    /// poisoned state.
+    pub fn reset(&mut self) {
+        self.ring.clear();
+        self.spill.clear();
+        self.spilling = false;
+        self.ended = false;
+        self.poisoned = false;
+        self.phase = Phase::Header;
+        self.sess = None;
+        self.options = None;
+        self.dec.clear();
+        self.out = Out::None;
+        self.pos = 0;
+        self.bit = 0;
+        self.fed = 0;
+        self.frame_ends.clear();
+        self.events = 0;
+        self.skip_to = None;
+        self.queue.clear();
+        #[cfg(feature = "compression")]
+        {
+            self.block = None;
+            self.released = 0;
+        }
+        self.collecting = false;
+        self.sc_se = false;
+        self.sc_ed = false;
+        self.suppress = false;
+    }
+}
+
+impl<const N: usize> EventSource for Reader<'_, N> {
+    fn next(&mut self) -> Result<Step<'_>> {
+        self.step()
+    }
+}
+
+impl<'g, const N: usize> Reader<'g, N> {
+    fn spill_cap(&self) -> usize {
+        let l = &self.cfg.limits;
+        (l.get_max_value_chars() as usize)
+            .saturating_mul(4)
+            .max(l.get_max_binary_bytes() as usize)
+            .saturating_add(1 << 16)
+    }
+
+    fn input(&self) -> (&[u8], &[u8]) {
+        if self.spilling {
+            (self.spill.data(), &[])
+        } else {
+            self.ring.filled()
+        }
+    }
+
+    fn available(&self) -> usize {
+        if self.spilling { self.spill.len() } else { self.ring.len() }
+    }
+
+    fn consume(&mut self, n: usize) {
+        if self.spilling {
+            self.spill.consume(n);
+            if self.spill.is_empty() {
+                self.spilling = false;
+            }
+        } else {
+            self.ring.consume(n);
+        }
+        self.pos += n as u64;
+    }
+
+    fn position_now(&self) -> Position {
+        Position {
+            byte: self.pos,
+            bit: self.bit,
+            event: self.events,
+            line: 0,
+            column: 0,
+        }
+    }
+
+    /// How much input the next decode may see: up to the end of the
+    /// current frame with `Frames`; `None` means "wait for more"
+    /// (frames only).
+    fn limit(&self) -> Option<(usize, bool)> {
+        let avail = self.available();
+        if self.cfg.sequence != Sequence::Frames {
+            return Some((avail, self.ended));
+        }
+        match self.frame_ends.front() {
+            Some(&end) => Some((((end - self.pos) as usize).min(avail), true)),
+            None if self.ended => Some((avail, true)),
+            None => None,
+        }
+    }
+
+    fn limited(&self, n: usize) -> (&[u8], &[u8]) {
+        let (a, b) = self.input();
+        if n <= a.len() { (&a[..n], &[]) } else { (a, &b[..n - a.len()]) }
+    }
+
+    /// Ring full while an event is incomplete: move the input to the
+    /// spill buffer.
+    fn spill_now(&mut self) {
+        if !self.spilling {
+            let (a, b) = self.ring.filled();
+            self.spill.clear();
+            self.spill.extend(a);
+            self.spill.extend(b);
+            self.ring.clear();
+            self.spilling = true;
+        }
+    }
+
+    fn read_header(&mut self) -> Result<Option<()>> {
+        let Some((n, final_input)) = self.limit() else { return Ok(None) };
+        let (a, b) = self.limited(n);
+        let mut data = Vec::with_capacity(a.len() + b.len());
+        data.extend_from_slice(a);
+        data.extend_from_slice(b);
+        let Some(h) = parse_header(&data, &self.cfg.limits)? else {
+            if final_input {
+                return Err(err(
+                    ErrorKind::Truncated,
+                    "input ends inside the header",
+                ));
+            }
+            if self.ring.free() == 0 {
+                self.spill_now();
+            }
+            return Ok(None);
+        };
+        let opts = match h.options.or_else(|| self.cfg.options.clone()) {
+            Some(o) => o,
+            None => {
+                return Err(err(
+                    ErrorKind::Header,
+                    "no options in the header and none given",
+                ));
+            }
+        };
+        if self.cfg.sequence == Sequence::Frames
+            && !(opts.fragment() && opts.coding() == Coding::ByteAligned)
+        {
+            return Err(err(
+                ErrorKind::Arg,
+                "frames need fragment and byte alignment",
+            ));
+        }
+        check_options(&opts, self.cfg.grammars)?;
+        self.consume((h.body_offset_bits / 8) as usize);
+        // A bit-packed body starts inside the header's last octet.
+        self.bit = (h.body_offset_bits % 8) as u8;
+        let st = State::new(opts.clone(), self.cfg.grammars, self.cfg.limits);
+        let tables = SessionTables::new(
+            self.cfg.grammars.initial(),
+            value_rules(&opts),
+            &self.cfg.limits,
+        );
+        // The old session, if any, drops before the new one is stored.
+        self.sess = None;
+        self.sess = Some(Session { st, tables });
+        #[cfg(feature = "compression")]
+        {
+            self.block = match opts.coding() {
+                Coding::PreCompression => Some(crate::block::BlockRead::new(
+                    false,
+                    opts.block_size(),
+                )),
+                Coding::Compression => {
+                    Some(crate::block::BlockRead::new(true, opts.block_size()))
+                }
+                _ => None,
+            };
+        }
+        self.options = Some(opts);
+        self.phase = Phase::Body;
+        self.out = Out::SD;
+        Ok(Some(()))
+    }
+
+    /// Decodes one body event into `self.out`; `None` when more input
+    /// is needed.
+    fn read_event(&mut self) -> Result<Option<()>> {
+        if self.spilling && self.spill.len() > self.spill_cap() {
+            return Err(err(
+                ErrorKind::Limit,
+                "one event is larger than the limits allow",
+            ));
+        }
+        let frames = self.cfg.sequence == Sequence::Frames;
+        let sess = self.sess.as_ref().ok_or_else(|| {
+            err(ErrorKind::Internal, "body without a session")
+        })?;
+        let at_top = sess.st.stack.is_empty();
+        if frames
+            && at_top
+            && self.frame_ends.is_empty()
+            && self.ended
+            && self.available() == 0
+        {
+            // A libexi convention: a frame sequence may end without ED.
+            self.phase = Phase::End;
+            return Ok(None);
+        }
+        // Compression: the block's structure is in a DEFLATE stream,
+        // inflated whole first.
+        let inflated = self.inflated();
+        if inflated && !self.inflate_stream()? {
+            return Ok(None);
+        }
+        let defer = self.blocks();
+        let (n, final_input) = if inflated {
+            (0, true)
+        } else {
+            let Some(l) = self.limit() else { return Ok(None) };
+            l
+        };
+        let frame_bounded = frames && !self.frame_ends.is_empty();
+        let coding =
+            self.options.as_ref().map_or(Coding::ByteAligned, |o| o.coding());
+        let bit = self.bit;
+        // Try the event against a counting view of the tables: nothing
+        // changes if the input turns out to be incomplete.
+        {
+            let Reader {
+                ring,
+                spill,
+                spilling,
+                sess,
+                #[cfg(feature = "compression")]
+                block,
+                ..
+            } = &*self;
+            #[cfg(feature = "compression")]
+            let z = block
+                .as_ref()
+                .filter(|_| inflated)
+                .map(|b| &b.z.out[b.z.pos..]);
+            #[cfg(not(feature = "compression"))]
+            let z: Option<&[u8]> = None;
+            let (a, b) = input_view(ring, spill.data(), *spilling, z, n);
+            let sess = sess.as_ref().expect("checked above");
+            let mut d = BodyDecoder::new(coding, a, b, bit);
+            let mut probe = Probe::new(&sess.tables);
+            let mut dec = Decoded::default();
+            match engine::decode(&sess.st, &mut d, &mut probe, &mut dec, defer)
+            {
+                Ok(()) => {}
+                Err(e)
+                    if e.kind() == ErrorKind::Truncated && frame_bounded =>
+                {
+                    return Err(err(
+                        ErrorKind::Grammar,
+                        "a frame ends inside an element",
+                    ));
+                }
+                Err(e) if e.kind() == ErrorKind::Truncated && !final_input => {
+                    if !self.spilling && self.ring.free() == 0 {
+                        self.spill_now();
+                    }
+                    return Ok(None);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        // The event is complete: decode it for real.
+        let used = {
+            let Reader {
+                ring,
+                spill,
+                spilling,
+                sess,
+                dec,
+                #[cfg(feature = "compression")]
+                block,
+                ..
+            } = &mut *self;
+            #[cfg(feature = "compression")]
+            let z = block
+                .as_ref()
+                .filter(|_| inflated)
+                .map(|b| &b.z.out[b.z.pos..]);
+            #[cfg(not(feature = "compression"))]
+            let z: Option<&[u8]> = None;
+            let (a, b) = input_view(ring, spill.data(), *spilling, z, n);
+            let sess = sess.as_mut().expect("checked above");
+            let mut d = BodyDecoder::new(coding, a, b, bit);
+            dec.clear();
+            engine::decode(&sess.st, &mut d, &mut sess.tables, dec, defer)?;
+            d.bit_position()
+        };
+        self.advance_input(used, inflated);
+        self.note_deferred();
+        self.apply()?;
+        // A self-contained element's fragment starts and ends on an
+        // octet, and a stream ends with padding to one.
+        if matches!(self.out, Out::SC | Out::ED) && self.bit != 0 {
+            self.consume(1);
+            self.bit = 0;
+        }
+        if frames {
+            let sess = self.sess.as_ref().expect("checked above");
+            if matches!(self.out, Out::EE(..)) && sess.st.stack.is_empty() {
+                match self.frame_ends.front() {
+                    Some(&end) if end == self.pos => {
+                        self.frame_ends.pop_front();
+                    }
+                    Some(_) => {
+                        return Err(err(
+                            ErrorKind::Grammar,
+                            "octets after the element in a frame",
+                        ));
+                    }
+                    None => {}
+                }
+            }
+        }
+        Ok(Some(()))
+    }
+
+    /// Moves the grammar state for the decoded event and fills
+    /// `self.out`.
+    fn apply(&mut self) -> Result<()> {
+        let sess = self.sess.as_mut().expect("body has a session");
+        let dec = &mut self.dec;
+        let term = dec
+            .term
+            .ok_or_else(|| err(ErrorKind::Internal, "no terminal decoded"))?;
+        let code = dec.code.ok_or_else(|| {
+            err(ErrorKind::Internal, "no event code decoded")
+        })?;
+        let value = |t: &SessionTables<'_>, dec: &mut Decoded| -> OwnedValue {
+            owned_value(t, core::mem::take(&mut dec.value), &dec.text)
+        };
+        self.out = match term {
+            Terminal::SE(_) | Terminal::SeUri(_) | Terminal::SeAny => {
+                let (id, p) = dec.name.ok_or_else(|| {
+                    err(ErrorKind::Internal, "SE without a name")
+                })?;
+                sess.st.on_se(term, code, id, p)?;
+                if self.sc_se {
+                    self.sc_se = false;
+                    self.suppress = true;
+                }
+                Out::SE(id, p)
+            }
+            Terminal::AT(_) | Terminal::AtUri(_) | Terminal::AtAny => {
+                let (id, p) = dec.name.ok_or_else(|| {
+                    err(ErrorKind::Internal, "AT without a name")
+                })?;
+                match dec.slot {
+                    Some(Slot::Nil) => {
+                        let DVal::Nil(b) = dec.value else {
+                            return Err(err(
+                                ErrorKind::Internal,
+                                "nil value expected",
+                            ));
+                        };
+                        sess.st.on_xsi_nil(b)?;
+                    }
+                    Some(Slot::NilText) => {
+                        let DVal::Str(r) = &dec.value else {
+                            return Err(err(
+                                ErrorKind::Internal,
+                                "nil text expected",
+                            ));
+                        };
+                        let s = engine::value_str(&sess.tables, r, &dec.text);
+                        let b = crate::lexical::parse_bool(s)
+                            .map(|x| x.0)
+                            .ok_or_else(|| {
+                                err(
+                                    ErrorKind::Grammar,
+                                    "xsi:nil is not a Boolean",
+                                )
+                            })?;
+                        sess.st.on_xsi_nil(b)?;
+                    }
+                    Some(Slot::TypeName) => {
+                        let DVal::QName(tid, _) = dec.value else {
+                            return Err(err(
+                                ErrorKind::Internal,
+                                "type name expected",
+                            ));
+                        };
+                        let schema = sess.st.schema.ok_or_else(|| {
+                            err(ErrorKind::Internal, "no schema")
+                        })?;
+                        let uri = sess.tables.uri_str(tid.uri).unwrap_or("");
+                        let local = sess
+                            .tables
+                            .local_str(tid.uri, tid.local)
+                            .unwrap_or("");
+                        let ty = schema.type_named(uri, local).ok_or_else(
+                            || {
+                                err(
+                                    ErrorKind::Grammar,
+                                    "xsi:type names no type of the schema",
+                                )
+                            },
+                        )?;
+                        let cur = match sess.st.stack.last().map(|f| f.kind) {
+                            Some(engine::FrameKind::Informed {
+                                ty, ..
+                            }) => ty,
+                            _ => {
+                                return Err(err(
+                                    ErrorKind::Internal,
+                                    "xsi:type outside an informed element",
+                                ));
+                            }
+                        };
+                        if !schema.ty(cur).casts.contains(&ty) {
+                            return Err(err(
+                                ErrorKind::Grammar,
+                                "xsi:type names a type that does not derive from the element's type",
+                            ));
+                        }
+                        sess.st.on_xsi_type(Some(ty))?;
+                    }
+                    // Not strict: xsi:type as a QName; the grammar
+                    // changes when it names a type of the schema.
+                    Some(Slot::QName)
+                        if term == Terminal::AT(engine::XSI_TYPE)
+                            && sess.st.deviates(code) =>
+                    {
+                        let DVal::QName(tid, _) = dec.value else {
+                            return Err(err(
+                                ErrorKind::Internal,
+                                "type name expected",
+                            ));
+                        };
+                        let schema = sess.st.schema.ok_or_else(|| {
+                            err(ErrorKind::Internal, "no schema")
+                        })?;
+                        let uri = sess.tables.uri_str(tid.uri).unwrap_or("");
+                        let local = sess
+                            .tables
+                            .local_str(tid.uri, tid.local)
+                            .unwrap_or("");
+                        sess.st.on_xsi_type(schema.type_named(uri, local))?;
+                    }
+                    _ => sess.st.on_at(term, code, id)?,
+                }
+                Out::AT(id, p, value(&sess.tables, dec))
+            }
+            Terminal::CH => {
+                sess.st.on_ch(code)?;
+                Out::CH(value(&sess.tables, dec))
+            }
+            Terminal::EE => {
+                let f = sess.st.on_ee()?;
+                if sess.st.in_sc() && sess.st.stack.is_empty() {
+                    self.sc_ed = true;
+                }
+                Out::EE(f.name, f.prefix)
+            }
+            Terminal::ED => {
+                sess.st.on_ed();
+                if self.sc_ed {
+                    self.sc_ed = false;
+                    self.suppress = true;
+                    sess.tables.end_self_contained()?;
+                    sess.st.end_sc()?;
+                }
+                Out::ED
+            }
+            Terminal::SC => {
+                sess.tables.begin_self_contained();
+                sess.st.begin_sc();
+                self.sc_se = true;
+                Out::SC
+            }
+            Terminal::NS => {
+                sess.st.on_misc(term, code)?;
+                let (u, p, l) = dec.ns.ok_or_else(|| {
+                    err(ErrorKind::Internal, "NS without content")
+                })?;
+                Out::NS(u, p, l)
+            }
+            Terminal::CM | Terminal::PI | Terminal::DT | Terminal::ER => {
+                sess.st.on_misc(term, code)?;
+                let mut t = core::mem::take(&mut dec.texts).into_iter();
+                let mut next = || t.next().unwrap_or_default();
+                match term {
+                    Terminal::CM => Out::CM(next()),
+                    Terminal::PI => Out::PI(next(), next()),
+                    Terminal::DT => Out::DT(next(), next(), next(), next()),
+                    _ => Out::ER(next()),
+                }
+            }
+            Terminal::SD => {
+                return Err(err(ErrorKind::Internal, "unexpected terminal"));
+            }
+        };
+        Ok(())
+    }
+
+    /// Advances to the next event; `Ok(false)` for need-input,
+    /// `Ok(true)` with `self.out` set, or `self.phase == End`.
+    fn advance(&mut self) -> Result<bool> {
+        loop {
+            match self.phase {
+                Phase::End => return Ok(true),
+                Phase::Header => {
+                    if self.cfg.sequence == Sequence::Streams
+                        && self.sess.is_some()
+                        && self.ended
+                        && self.available() == 0
+                    {
+                        self.phase = Phase::End;
+                        continue;
+                    }
+                    return Ok(self.read_header()?.is_some());
+                }
+                Phase::Body => {
+                    let done = self
+                        .sess
+                        .as_ref()
+                        .is_some_and(|s| s.st.top == Top::Done);
+                    if done {
+                        match self.cfg.sequence {
+                            Sequence::Streams => {
+                                self.phase = Phase::Header;
+                                continue;
+                            }
+                            _ => {
+                                if self.ended {
+                                    self.phase = Phase::End;
+                                    continue;
+                                }
+                                return Ok(false);
+                            }
+                        }
+                    }
+                    match self.read_event()? {
+                        Some(()) => return Ok(true),
+                        None if self.phase == Phase::End => continue,
+                        None => return Ok(false),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Adds a decoded event to the queue. With `Preserve.prefixes` an
+    /// SE waits for its NS events: the one marked `local_element_ns`
+    /// gives the element its prefix.
+    fn enqueue(&mut self, out: Out, pos: Position) {
+        let sess = self.sess.as_mut();
+        let mut depth = sess.as_ref().map_or(0, |s| s.st.depth());
+        if matches!(out, Out::SC) {
+            // SC belongs to the element it follows; the grammars have
+            // just moved that element aside, so it is not counted yet.
+            depth += 1;
+        }
+        let lexical = sess
+            .as_ref()
+            .is_some_and(|s| s.st.lexical() && s.st.schema.is_some());
+        let flags = if lexical && matches!(out, Out::AT(..) | Out::CH(..)) {
+            ValueFlags::LEXICAL
+        } else {
+            ValueFlags::empty()
+        };
+        let prefixes = sess.as_ref().is_some_and(|s| s.st.prefixes());
+        if self.collecting {
+            if let Out::NS(_, p, true) = out {
+                if let Some((Out::SE(_, sp), _)) =
+                    self.queue.get_mut(self.collect_at)
+                {
+                    *sp = Some(p);
+                }
+                if let Some(s) = sess {
+                    if let Some(f) = s.st.stack.last_mut() {
+                        f.prefix = Some(p);
+                    }
+                }
+            }
+            if !matches!(out, Out::NS(..)) {
+                self.collecting = false;
+            }
+        } else if prefixes && matches!(out, Out::SE(..)) {
+            self.collecting = true;
+            self.collect_at = self.queue.len();
+        }
+        self.queue.push_back((out, EventMeta { depth, position: pos, flags }));
+    }
+
+    fn step(&mut self) -> Result<Step<'_>> {
+        if self.poisoned {
+            return Err(err(
+                ErrorKind::State,
+                "the reader is poisoned by an earlier error",
+            ));
+        }
+        let meta = loop {
+            if !self.collecting {
+                if self.can_release() {
+                    if let Some((o, meta)) = self.queue.pop_front() {
+                        self.popped();
+                        self.out = o;
+                        break meta;
+                    }
+                }
+                if self.phase == Phase::End && self.queue.is_empty() {
+                    return Ok(Step::End);
+                }
+            }
+            let pos = self.position_now();
+            if self.in_values() {
+                // A block's structure is complete: its values next.
+                match self.read_values() {
+                    Ok(true) => continue,
+                    Ok(false) => return Ok(Step::NeedInput),
+                    Err(e) => {
+                        self.poisoned = true;
+                        return Err(if e.position() == Position::default() {
+                            e.at(pos)
+                        } else {
+                            e
+                        });
+                    }
+                }
+            }
+            match self.advance() {
+                Ok(true) if self.phase == Phase::End => {
+                    self.collecting = false
+                }
+                Ok(true) if self.suppress => self.suppress = false,
+                Ok(true) => {
+                    let out = core::mem::take(&mut self.out);
+                    let is_ed = matches!(out, Out::ED);
+                    self.enqueue(out, pos);
+                    if let Err(e) = self.after_enqueue(is_ed) {
+                        self.poisoned = true;
+                        return Err(e.at(pos));
+                    }
+                }
+                Ok(false) => return Ok(Step::NeedInput),
+                Err(e) => {
+                    self.poisoned = true;
+                    let e = if e.position() == Position::default() {
+                        e.at(pos)
+                    } else {
+                        e
+                    };
+                    return Err(e);
+                }
+            }
+        };
+        self.events += 1;
+        let this: &Self = self;
+        let s = this.sess.as_ref().ok_or_else(|| {
+            err(ErrorKind::Internal, "an event without a session")
+        })?;
+        let t = &s.tables;
+        let ev = match &this.out {
+            Out::None => return Err(err(ErrorKind::Internal, "no event")),
+            Out::SD => Event::StartDocument,
+            Out::ED => Event::EndDocument,
+            Out::SE(id, p) => Event::StartElement(name(t, *id, *p)),
+            Out::EE(id, p) => Event::EndElement(name(t, *id, *p)),
+            Out::AT(id, p, v) => {
+                Event::Attribute(name(t, *id, *p), v.as_value())
+            }
+            Out::CH(v) => Event::Characters(v.as_value()),
+            Out::NS(u, p, l) => Event::Namespace(NsDecl {
+                prefix: t.prefix_str(*u, *p).unwrap_or(""),
+                uri: t.uri_str(*u).unwrap_or(""),
+                local_element_ns: *l,
+            }),
+            Out::CM(c) => Event::Comment(c),
+            Out::PI(target, data) => {
+                Event::ProcessingInstruction { target, data }
+            }
+            Out::DT(n, p, sy, tx) => Event::Doctype(Doctype {
+                name: n,
+                public_id: p,
+                system_id: sy,
+                text: tx,
+            }),
+            Out::ER(n) => Event::EntityReference(n),
+            Out::SC => Event::SelfContained,
+        };
+        Ok(Step::Event(ev, meta))
+    }
+}
+
+// ----- Pre-compression and compression: blocks (EXI §9,
+// `crate::block`) -----
+//
+// The structure of a block is decoded event by event, as in other
+// codings, but the values in value channels are left as placeholders on
+// the queued events. When the block has all its values (or the stream
+// ends), the values are read in channel order and filled in,
+// and only then are the block's events returned.
+
+#[cfg(feature = "compression")]
+impl<'g, const N: usize> Reader<'g, N> {
+    fn blocks(&self) -> bool {
+        self.block.is_some()
+    }
+    fn inflated(&self) -> bool {
+        self.block.as_ref().is_some_and(|b| b.deflate)
+    }
+    fn in_values(&self) -> bool {
+        self.block.as_ref().is_some_and(|b| b.values_phase)
+    }
+    /// Events at the front of the queue may be returned.
+    fn can_release(&self) -> bool {
+        self.block.is_none() || self.released > 0
+    }
+    fn popped(&mut self) {
+        if self.block.is_some() {
+            self.released -= 1;
+        }
+    }
+    /// Consumes the octets (or bits) a decode used, from the input or
+    /// the inflated stream.
+    fn advance_input(&mut self, used_bits: u64, inflated: bool) {
+        if inflated {
+            let b = self.block.as_mut().expect("inflated implies a block");
+            b.z.pos += (used_bits / 8) as usize;
+        } else {
+            self.consume((used_bits / 8) as usize);
+            self.bit = (used_bits % 8) as u8;
+        }
+    }
+    /// Notes the value the event just decoded left in its channel: its
+    /// name and slot.
+    fn note_deferred(&mut self) {
+        if !self.dec.deferred {
+            return;
+        }
+        let name = match self.dec.term {
+            Some(Terminal::CH) => self
+                .sess
+                .as_ref()
+                .and_then(|s| s.st.stack.last())
+                .map(|f| f.name),
+            _ => self.dec.name.map(|(id, _)| id),
+        };
+        if let (Some(b), Some(name), Some(slot)) =
+            (self.block.as_mut(), name, self.dec.slot)
+        {
+            b.last_deferred = Some((name, slot));
+        }
+    }
+    /// After an event is queued: record its waiting value, and end the
+    /// structure when the block holds `blockSize` values or the stream
+    /// has ended.
+    fn after_enqueue(&mut self, is_ed: bool) -> Result<()> {
+        let Some(b) = self.block.as_mut() else { return Ok(()) };
+        if self.queue.len() as u64 > self.cfg.limits.get_max_block_events() {
+            return Err(err(
+                ErrorKind::Limit,
+                "a block holds more events than max_block_events",
+            ));
+        }
+        if let Some((name, slot)) = b.last_deferred.take() {
+            b.pending.push(crate::block::PendingValue {
+                qi: self.queue.len() - 1,
+                name,
+                slot,
+            });
+        }
+        if b.pending.len() as u64 >= b.block_size as u64 || is_ed {
+            b.end_structure();
+        }
+        Ok(())
+    }
+    /// Makes the current DEFLATE stream whole in the block's buffer;
+    /// `false` when more input is needed. No input at all after the end
+    /// of input is an empty stream: EXI writes none for a part with no
+    /// octets.
+    fn inflate_stream(&mut self) -> Result<bool> {
+        let max = self.cfg.limits.get_max_block_bytes();
+        loop {
+            let available = self.available();
+            let ended = self.ended;
+            let Reader { ring, spill, spilling, block, .. } = &mut *self;
+            let b = block.as_mut().expect("inflated implies a block");
+            if b.ready {
+                return Ok(true);
+            }
+            if !b.inflating {
+                if available == 0 {
+                    if !ended {
+                        return Ok(false);
+                    }
+                    b.z.start();
+                    b.ready = true;
+                    return Ok(true);
+                }
+                b.z.start();
+                b.inflating = true;
+            }
+            let (x, y) = if *spilling {
+                (spill.data(), &[][..])
+            } else {
+                ring.filled()
+            };
+            let part = if x.is_empty() { y } else { x };
+            if part.is_empty() {
+                if ended {
+                    return Err(err(
+                        ErrorKind::Truncated,
+                        "input ends inside a DEFLATE stream",
+                    ));
+                }
+                return Ok(false);
+            }
+            let (used, done) = b.z.feed(part, max)?;
+            if done {
+                b.inflating = false;
+                b.ready = true;
+            }
+            self.consume(used);
+            if !done && used == 0 {
+                return Ok(false);
+            }
+        }
+    }
+    /// True when every value of the current group takes no octets (a
+    /// stream with no octets is not written).
+    fn group_is_implicit(&self) -> bool {
+        let (Some(b), Some(sess)) = (self.block.as_ref(), self.sess.as_ref())
+        else {
+            return false;
+        };
+        let r = b.groups[b.group].clone();
+        let mut text = String::new();
+        b.order[r].iter().all(|&i| {
+            let p = &b.pending[i];
+            let mut d = BodyDecoder::new(Coding::ByteAligned, &[], &[], 0);
+            let mut probe = Probe::new(&sess.tables);
+            text.clear();
+            engine::decode_value(
+                &sess.st, &mut d, &mut probe, p.slot, p.name, &mut text,
+            )
+            .is_ok()
+        })
+    }
+    /// Reads the block's values in channel order and fills in their
+    /// events; `Ok(true)` when the block is complete and its events may
+    /// be returned.
+    fn read_values(&mut self) -> Result<bool> {
+        loop {
+            let b = self.block.as_mut().expect("values imply a block");
+            if b.group >= b.groups.len() {
+                b.next_block();
+                self.released = self.queue.len();
+                return Ok(true);
+            }
+            let r = b.groups[b.group].clone();
+            b.next = b.next.max(r.start);
+            if b.next >= r.end {
+                b.group += 1;
+                continue;
+            }
+            if b.separate && b.acquired != Some(b.group) {
+                // The group's own stream: the one in hand if no part
+                // has claimed it yet, else the next.
+                if self.group_is_implicit() {
+                    // Values that take no bits: EXI writes no stream
+                    // for them, EXIficient an empty one. Look at the
+                    // next stream: take it if empty, else leave it.
+                    let b = self.block.as_mut().expect("values imply a block");
+                    if !b.inflating && !(b.ready && !b.claimed) {
+                        b.ready = false;
+                        if self.available() == 0 {
+                            if !self.ended {
+                                return Ok(false);
+                            }
+                            // Nothing follows: no stream.
+                            let b = self
+                                .block
+                                .as_mut()
+                                .expect("values imply a block");
+                            b.acquired = Some(b.group);
+                            b.claimed = true;
+                            continue;
+                        }
+                    }
+                    if !self.inflate_stream()? {
+                        return Ok(false);
+                    }
+                    let b = self.block.as_mut().expect("values imply a block");
+                    b.claimed = b.z.out.is_empty();
+                } else {
+                    loop {
+                        let b =
+                            self.block.as_mut().expect("values imply a block");
+                        if !b.inflating && !(b.ready && !b.claimed) {
+                            b.ready = false;
+                        }
+                        if !self.inflate_stream()? {
+                            return Ok(false);
+                        }
+                        if !self
+                            .block
+                            .as_ref()
+                            .expect("values imply a block")
+                            .z
+                            .out
+                            .is_empty()
+                        {
+                            break;
+                        }
+                        // An empty stream cannot hold values that take
+                        // octets. EXI §9.3 says not to write one for
+                        // parts with none, but EXIficient does: skip
+                        // it.
+                        if self.available() > 0 {
+                            self.block
+                                .as_mut()
+                                .expect("values imply a block")
+                                .claimed = true;
+                            continue;
+                        }
+                        if !self.ended {
+                            return Ok(false);
+                        }
+                        // Nothing follows: reading the values reports
+                        // the truncation.
+                        break;
+                    }
+                    self.block
+                        .as_mut()
+                        .expect("values imply a block")
+                        .claimed = true;
+                }
+                let b = self.block.as_mut().expect("values imply a block");
+                b.acquired = Some(b.group);
+            }
+            if !self.read_value()? {
+                return Ok(false);
+            }
+        }
+    }
+    /// Reads the next value of the block; `false` when more input is
+    /// needed.
+    fn read_value(&mut self) -> Result<bool> {
+        let inflated = self.inflated();
+        let (n, final_input) = if inflated {
+            (0, true)
+        } else {
+            let Some(l) = self.limit() else { return Ok(false) };
+            l
+        };
+        let (qi, name, slot) = {
+            let b = self.block.as_ref().expect("values imply a block");
+            let p = &b.pending[b.order[b.next]];
+            (p.qi, p.name, p.slot)
+        };
+        let mut text = core::mem::take(&mut self.dec.text);
+        text.clear();
+        {
+            let Reader { ring, spill, spilling, sess, block, .. } = &*self;
+            let z = block
+                .as_ref()
+                .filter(|_| inflated)
+                .map(|b| &b.z.out[b.z.pos..]);
+            let (a, b) = input_view(ring, spill.data(), *spilling, z, n);
+            let sess = sess.as_ref().expect("a block has a session");
+            let mut d = BodyDecoder::new(Coding::ByteAligned, a, b, 0);
+            let mut probe = Probe::new(&sess.tables);
+            match engine::decode_value(
+                &sess.st, &mut d, &mut probe, slot, name, &mut text,
+            ) {
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::Truncated && !final_input => {
+                    self.dec.text = text;
+                    if !self.spilling && self.ring.free() == 0 {
+                        self.spill_now();
+                    }
+                    return Ok(false);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        text.clear();
+        let (value, used) = {
+            let Reader { ring, spill, spilling, sess, block, .. } = &mut *self;
+            let z = block
+                .as_ref()
+                .filter(|_| inflated)
+                .map(|b| &b.z.out[b.z.pos..]);
+            let (a, b) = input_view(ring, spill.data(), *spilling, z, n);
+            let sess = sess.as_mut().expect("a block has a session");
+            let mut d = BodyDecoder::new(Coding::ByteAligned, a, b, 0);
+            let v = engine::decode_value(
+                &sess.st,
+                &mut d,
+                &mut sess.tables,
+                slot,
+                name,
+                &mut text,
+            )?;
+            (owned_value(&sess.tables, v, &text), d.bit_position())
+        };
+        self.dec.text = text;
+        self.advance_input(used, inflated);
+        match self.queue.get_mut(qi) {
+            Some((Out::AT(_, _, v), _)) | Some((Out::CH(v), _)) => *v = value,
+            _ => {
+                return Err(err(
+                    ErrorKind::Internal,
+                    "a block value without its event",
+                ));
+            }
+        }
+        self.block.as_mut().expect("values imply a block").next += 1;
+        Ok(true)
+    }
+}
+
+#[cfg(not(feature = "compression"))]
+impl<'g, const N: usize> Reader<'g, N> {
+    fn blocks(&self) -> bool {
+        false
+    }
+    fn inflated(&self) -> bool {
+        false
+    }
+    fn in_values(&self) -> bool {
+        false
+    }
+    fn can_release(&self) -> bool {
+        true
+    }
+    fn popped(&mut self) {}
+    fn advance_input(&mut self, used_bits: u64, _inflated: bool) {
+        self.consume((used_bits / 8) as usize);
+        self.bit = (used_bits % 8) as u8;
+    }
+    fn note_deferred(&mut self) {}
+    fn after_enqueue(&mut self, _is_ed: bool) -> Result<()> {
+        Ok(())
+    }
+    fn inflate_stream(&mut self) -> Result<bool> {
+        Ok(true)
+    }
+    fn read_values(&mut self) -> Result<bool> {
+        Ok(true)
+    }
+}

@@ -117,6 +117,19 @@ fn c_programs() {
     std::fs::create_dir_all(&tmp).unwrap();
     let c = root().join("tests/c");
 
+    let layer1 = tmp.join("layer1");
+    cc(
+        &layer1,
+        &[
+            &inc_s,
+            c.join("layer1.c").to_str().unwrap(),
+            &format!("-L{lib_s}"),
+            "-lexi",
+            &rpath,
+        ],
+    );
+    run(&layer1);
+
     // The layouts: C and Rust agree.
     let layout = tmp.join("layout");
     cc(&layout, &[&inc_s, c.join("layout.c").to_str().unwrap()]);

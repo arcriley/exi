@@ -64,7 +64,7 @@ works, how the code is laid out, how to build and test it, the decisions already
 | `src/dom/` | Layer 2 document tree (feature `dom`) |
 | `src/capi/` | C ABI (feature `capi`); `dom.rs` is the libxml2-style C DOM |
 | `src/bin/exi.rs` | The `exi` command-line tool |
-| `include/` | `exi_dom.h` and `exi_libxml_compat.h` (hand-written) |
+| `include/` | Generated `exi.h` and hand-written `exi_dom.h` and `exi_libxml_compat.h` |
 | `schemas/` | `exig-1.xsd`, `xhtml5-1.xsd`, `xhtml5-1.exig` |
 | `fixtures/` | EXIficient reference fixtures and the program that makes them |
 | `tests/` | Integration tests; `tests/c/` holds C programs |
@@ -97,8 +97,8 @@ cargo doc --all-features --no-deps
 
 - The C tests (`tests/c_dom.rs`) need `cc`. They build `libexi.so` with
   `cargo rustc --crate-type cdylib` into `target/c-api`, and run under valgrind when it
-  is installed. They compare libexi's libxml2-compatible DOM with real libxml2 where it
-  is installed.
+  is installed. They link a Layer 1 round trip against the generated header and
+  compare libexi's libxml2-compatible DOM with real libxml2 where it is installed.
 - `tests/html.rs` and `tests/xhtml5.rs` also read saved web pages from the directory
   in `EXI_HTML_CORPUS` when it is set.
 - `XHTML5_REGEN=1 cargo test --features xhtml5,html5ever,xsd --test xhtml5` rewrites

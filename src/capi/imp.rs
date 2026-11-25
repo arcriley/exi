@@ -617,23 +617,23 @@ impl Scratch {
     }
 }
 
-const KINDS: [DateTimeKind; 8] = [
-    DateTimeKind::GYear,
-    DateTimeKind::GYearMonth,
-    DateTimeKind::Date,
-    DateTimeKind::DateTime,
-    DateTimeKind::GMonth,
-    DateTimeKind::GMonthDay,
-    DateTimeKind::GDay,
-    DateTimeKind::Time,
+const KINDS: [(u32, DateTimeKind); 8] = [
+    (EXI_DATETIME_G_YEAR, DateTimeKind::GYear),
+    (EXI_DATETIME_G_YEAR_MONTH, DateTimeKind::GYearMonth),
+    (EXI_DATETIME_DATE, DateTimeKind::Date),
+    (EXI_DATETIME_DATE_TIME, DateTimeKind::DateTime),
+    (EXI_DATETIME_G_MONTH, DateTimeKind::GMonth),
+    (EXI_DATETIME_G_MONTH_DAY, DateTimeKind::GMonthDay),
+    (EXI_DATETIME_G_DAY, DateTimeKind::GDay),
+    (EXI_DATETIME_TIME, DateTimeKind::Time),
 ];
 
 fn datetime_to(d: &DateTime) -> exi_datetime {
     exi_datetime {
         kind: KINDS
             .iter()
-            .position(|k| *k == d.kind)
-            .map_or(0, |i| i as u32 + 1),
+            .find(|(_, kind)| *kind == d.kind)
+            .map_or(0, |(code, _)| *code),
         tz_minutes: d.tz_minutes.unwrap_or(0) as i32,
         year: d.year,
         month: d.month,
@@ -650,7 +650,7 @@ fn datetime_to(d: &DateTime) -> exi_datetime {
 }
 
 fn datetime_from(c: &exi_datetime) -> Option<DateTime> {
-    let kind = *KINDS.get((c.kind as usize).checked_sub(1)?)?;
+    let &(_, kind) = KINDS.iter().find(|(code, _)| *code == c.kind)?;
     Some(DateTime {
         kind,
         year: c.year,

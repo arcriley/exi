@@ -84,6 +84,22 @@ typedef struct exi_writer exi_writer;
 
 #define EXI_VF_BOOL_DIGIT (1 << 4)
 
+#define EXI_DATETIME_G_YEAR 1
+
+#define EXI_DATETIME_G_YEAR_MONTH 2
+
+#define EXI_DATETIME_DATE 3
+
+#define EXI_DATETIME_DATE_TIME 4
+
+#define EXI_DATETIME_G_MONTH 5
+
+#define EXI_DATETIME_G_MONTH_DAY 6
+
+#define EXI_DATETIME_G_DAY 7
+
+#define EXI_DATETIME_TIME 8
+
 #define EXI_EV_SD 1
 
 #define EXI_EV_ED 2
@@ -307,7 +323,7 @@ typedef struct exi_bytes {
 } exi_bytes;
 
 /*
- `kind` is 1 to 8 in the order of [`crate::DateTimeKind`].
+ `kind` is an `EXI_DATETIME_*` constant.
  */
 typedef struct exi_datetime {
   uint32_t kind;

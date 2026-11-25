@@ -39,4 +39,3 @@ exclude = [
     # Rust types outside the C ABI.
     "Float", "Preserve", "ValueFlags", "LATEST",
 ]
-

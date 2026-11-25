@@ -224,7 +224,16 @@ pub const EXI_VF_UNTYPED: u32 = 1 << 2;
 pub const EXI_VF_HEX: u32 = 1 << 3;
 pub const EXI_VF_BOOL_DIGIT: u32 = 1 << 4;
 
-/// `kind` is 1 to 8 in the order of [`crate::DateTimeKind`].
+pub const EXI_DATETIME_G_YEAR: u32 = 1;
+pub const EXI_DATETIME_G_YEAR_MONTH: u32 = 2;
+pub const EXI_DATETIME_DATE: u32 = 3;
+pub const EXI_DATETIME_DATE_TIME: u32 = 4;
+pub const EXI_DATETIME_G_MONTH: u32 = 5;
+pub const EXI_DATETIME_G_MONTH_DAY: u32 = 6;
+pub const EXI_DATETIME_G_DAY: u32 = 7;
+pub const EXI_DATETIME_TIME: u32 = 8;
+
+/// `kind` is an `EXI_DATETIME_*` constant.
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct exi_datetime {

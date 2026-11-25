@@ -1,0 +1,42 @@
+# cbindgen settings for include/exi.h, the layer 1 C ABI (src/capi/mod.rs).
+#
+#   cbindgen --config cbindgen.toml --crate exi -o include/exi.h
+#
+# Layer 2, the document tree, is declared by the hand-written include/exi_dom.h; its
+# modules are marked cbindgen:ignore. tests/c_api.rs checks that exi.h is current.
+
+language = "C"
+include_guard = "EXI_H"
+cpp_compat = true
+usize_is_size_t = true
+no_includes = true
+sys_includes = ["stddef.h", "stdint.h"]
+documentation = true
+documentation_style = "c"
+documentation_length = "full"
+style = "both"
+
+header = """/* exi.h: libexi layer 1, the C ABI (feature "capi").
+ *
+ * Generated from src/capi/mod.rs by cbindgen (cbindgen.toml). Do not edit: change the
+ * Rust and generate again. The conventions (status codes, strings, config structs,
+ * threads, lifetimes) are in the documentation of src/capi/mod.rs.
+ *
+ * Layer 2, the document tree, is in exi_dom.h.
+ */"""
+
+# The opaque handles: declared, never defined, so C code holds only pointers.
+after_includes = """
+typedef struct exi_strings exi_strings;
+typedef struct exi_grammar_set exi_grammar_set;
+typedef struct exi_reader exi_reader;
+typedef struct exi_writer exi_writer;"""
+
+[export]
+exclude = [
+    # Opaque handles, declared above.
+    "exi_strings", "exi_grammar_set", "exi_reader", "exi_writer",
+    # Rust types outside the C ABI.
+    "Float", "Preserve", "ValueFlags", "LATEST",
+]
+

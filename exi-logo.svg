@@ -1,42 +1,21 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 400" width="640" height="400" role="img" aria-labelledby="title desc">
-  <title id="title">exi</title>
-  <desc id="desc">Efficient XML Interchange (EXI) library for Rust: XML in, EXI out.</desc>
-  <defs>
-    <linearGradient id="blue" x1="0" y1="1" x2="1" y2="0">
-      <stop offset="0" stop-color="#0a3f80"/>
-      <stop offset="1" stop-color="#1f7fd6"/>
-    </linearGradient>
-    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#ffffff"/>
-      <stop offset="1" stop-color="#eef3f8"/>
-    </linearGradient>
-  </defs>
-  <rect width="640" height="400" rx="24" fill="url(#paper)"/>
-  <g id="mark">
-    <!-- The angle bracket behind the XML side. -->
-    <path d="M 238 66 L 176 140 L 238 214" fill="none" stroke="#c5ced9" stroke-width="14" stroke-linejoin="round"/>
-    <!-- The stroke going down: XML into the encoder. -->
-    <path d="M 226 70 C 300 70 320 120 350 160 C 380 200 400 214 440 214" fill="none" stroke="url(#blue)" stroke-width="28" stroke-linecap="round"/>
-    <!-- The stroke going up: EXI out, ending in an arrow. -->
-    <path d="M 240 216 C 300 216 320 170 350 130 C 372 100 392 84 418 74" fill="none" stroke="url(#blue)" stroke-width="28" stroke-linecap="round"/>
-    <path d="M 404 50 L 458 58 L 424 100 Z" fill="#1f7fd6"/>
-    <path d="M 290 186 L 300 176 M 312 160 L 322 150 M 334 134 L 344 124 M 356 110 L 366 100" stroke="#ffffff" stroke-width="5" stroke-linecap="round"/>
-    <!-- Events leaving as EXI. -->
-    <g fill="#e87722">
-      <rect x="388" y="132" width="14" height="10" rx="2"/>
-      <rect x="408" y="132" width="14" height="10" rx="2"/>
-      <path d="M 428 124 L 452 137 L 428 150 Z"/>
-    </g>
-    <g stroke="#9fb0c4" stroke-width="4" stroke-linecap="round">
-      <path d="M 392 112 L 418 112"/>
-      <path d="M 392 162 L 418 162"/>
-    </g>
-    <text x="150" y="150" font-family="Poppins, Montserrat, Arial, sans-serif" font-size="34" font-weight="700" fill="#0a3f80" text-anchor="end">&lt;xml</text>
-    <text x="462" y="150" font-family="Poppins, Montserrat, Arial, sans-serif" font-size="34" font-weight="700" fill="#0a3f80">exi</text>
-  </g>
-  <g id="name">
-    <text x="320" y="318" font-family="Poppins, Montserrat, Arial, sans-serif" font-size="96" font-weight="800" fill="#0a3f80" text-anchor="middle" letter-spacing="-2">exi</text>
-    <text x="408" y="270" font-family="Poppins, Montserrat, Arial, sans-serif" font-size="20" font-weight="700" fill="#e87722">Rust Native</text>
-    <text x="320" y="360" font-family="Inter, Helvetica, Arial, sans-serif" font-size="18" fill="#5b6b7d" text-anchor="middle">Efficient XML Interchange (EXI) Library for Rust</text>
-  </g>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="110 -24 450 450" width="450" height="450" role="img" aria-labelledby="title desc">
+<title id="title">EXI — Rust Native</title>
+<desc id="desc">Vector reconstruction of the supplied EXI logo.</desc>
+<g id="crossed-ribbons">
+<path fill="#064679" d="M134 77C158 55 200 52 236 63 272 74 293 107 329 151L284 200 225 128C193 88 167 67 134 77Z"/>
+<path fill="#0875B4" d="M164 61C190 54 218 56 241 65 275 78 296 112 329 151L304 178 238 103C211 73 186 62 164 61Z"/>
+<path fill="#BAC8D1" d="M185 59C215 64 235 82 259 109L286 142 294 132 298 166 265 154 277 148 246 111C222 84 205 70 185 59Z"/>
+<path fill="#064679" d="M344 274 391 220 449 290C483 330 505 355 539 346 513 371 459 371 424 352 396 335 374 308 344 274Z"/>
+<path fill="#0875B4" d="M391 220 408 239 458 298C489 335 513 352 539 346 514 359 486 354 464 340 439 324 416 296 376 252Z"/>
+<path fill="#BAC8D1" d="M373 254 408 264 396 272 425 307C456 344 492 356 539 346 510 367 471 359 444 341 424 326 403 302 385 280L375 291Z"/>
+<path fill="#07548A" d="M134 346C159 354 184 342 204 319L371 111C399 77 426 64 467 47L450 25 539 21 518 106 499 85C472 102 452 124 427 153L277 328C250 360 212 370 174 366 157 364 143 358 134 346Z"/>
+<path fill="#0875B4" d="M134 346C161 353 184 341 204 319L371 111C399 77 426 64 467 47L450 25 539 21C491 61 459 90 424 131L251 331C225 360 190 368 163 361 151 358 141 352 134 346Z"/>
+<path fill="#BAC8D1" d="M286 249.5 295.5 240H311V256.25L301.0 265V250.0H286Z"/>
+<path fill="#BAC8D1" d="M313 216.78 324.78 205H344V225.15L331.6 236V217.4H313Z"/>
+<path fill="#BAC8D1" d="M345 180.26 355.26 170H372V187.55L361.2 197V180.8H345Z"/>
+<path fill="#BAC8D1" d="M372 149.12 381.12 140H396V155.6L386.4 164V149.6H372Z"/>
+<path fill="#BAC8D1" d="M403 117.74 411.74 109H426V123.95L416.8 132V118.2H403Z"/>
+<path fill="#BAC8D1" d="M425 93.5 434.5 84H450V100.25L440.0 109V94.0H425Z"/>
+</g>
+
 </svg>

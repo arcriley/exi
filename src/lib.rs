@@ -22,7 +22,7 @@
 //! | Schema-informed streams, with or without `strict` | |
 //! | Self-contained elements, fragments, frames | EXI Profile, datatype maps |
 //! | Canonical EXI (`canonical`, [`WriterConfig::canonical`]) | |
-//! | `.exig` grammar files (`grammar::exig`) | |
+//! | `.exig` grammar files (feature `exig`) | |
 //! | The XSD compiler (`xsd`) | |
 //! | Schemas learned from example documents (`infer`) | |
 //! | Layer 2: the document tree, after libxml2's (`dom`) | |

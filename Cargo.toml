@@ -14,7 +14,7 @@ bench = false
 [dependencies]
 hashbrown = { version = "0.17.1", default-features = false, features = ["equivalent"] }
 rustc-hash = { version = "2", default-features = false }
-sha2 = { version = "0.10", default-features = false }
+sha2 = { version = "0.10", optional = true, default-features = false }
 markup5ever = { version = "0.40", optional = true }
 html5ever = { version = "0.40", optional = true }
 markup5ever_rcdom = { version = "0.40.1", optional = true }
@@ -28,8 +28,10 @@ html5ever = "0.40"
 markup5ever_rcdom = "0.40.1"
 
 [features]
-default = ["std", "xml", "bit-packed", "compression"]
+default = ["std", "xml", "bit-packed", "compression", "exig"]
 std = []
+# Load and save .exig files, and generate Rust from them at build time.
+exig = ["dep:sha2"]
 # XML 1.0 text reader and writer (exi::xml).
 xml = []
 # The XML Schema compiler (exi::xsd): XSD documents to grammars. Reads XSD with the XML reader.
@@ -43,9 +45,9 @@ html = ["std", "xml", "dep:markup5ever"]
 # HTML text in, parsed as browsers do.
 html5ever = ["html", "dep:html5ever", "dep:markup5ever_rcdom"]
 # The XHTML5 profile grammars (exi::html::profile).
-xhtml5 = ["html"]
+xhtml5 = ["html", "exig"]
 # The C ABI (exi::capi). Needs std to catch panics at every export, and xml for EXI_FORMAT_XML.
-capi = ["std", "xml", "dom"]
+capi = ["std", "xml", "dom", "exig"]
 # Bit-packed bodies, the default alignment. Headers are always read and written bit-packed.
 bit-packed = []
 # Pre-compression and compression: blocks, channels, and DEFLATE through flate2 (which needs std).
@@ -55,7 +57,7 @@ compression = ["std", "dep:flate2"]
 # The command-line tool. Commands that need xsd or infer say so when those are off.
 name = "exi"
 path = "src/bin/exi.rs"
-required-features = ["std", "xml"]
+required-features = ["std", "xml", "exig"]
 doc = false
 bench = false
 
@@ -75,4 +77,4 @@ required-features = ["infer", "xhtml5", "html5ever"]
 [[bench]]
 name = "device"
 harness = false
-required-features = ["std", "bit-packed"]
+required-features = ["std", "bit-packed", "exig"]

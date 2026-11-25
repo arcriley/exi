@@ -512,7 +512,7 @@ fn check(schemas: bool) {
 
 /// `.exig` files are portable: EXIficient, given the EXIG schema and the XML form of an
 /// EXIG document, writes the same octets this crate's `to_exig` writes.
-#[cfg(feature = "xsd")]
+#[cfg(all(feature = "xsd", feature = "exig"))]
 #[test]
 fn exig_matches_exificient() {
     let dir = Path::new("fixtures");

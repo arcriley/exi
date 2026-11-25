@@ -72,7 +72,7 @@ works, how the code is laid out, how to build and test it, the decisions already
 
 ## Features
 
-Defaults: `std`, `xml`, `bit-packed`, `compression`.
+Defaults: `std`, `xml`, `bit-packed`, `compression`, `exig`.
 
 | Feature | Adds |
 |---|---|
@@ -80,11 +80,12 @@ Defaults: `std`, `xml`, `bit-packed`, `compression`.
 | `xml` | XML text reader and writer |
 | `bit-packed` | Bit-packed bodies. Headers are always bit-packed |
 | `compression` | Pre-compression and compression; DEFLATE through flate2 (needs `std`) |
+| `exig` | Grammar file I/O and host-side Rust generation |
 | `xsd` | XSD compiler |
 | `infer` | Schema inference (implies `xsd`) |
 | `dom` | Layer 2 tree |
 | `html`, `html5ever`, `xhtml5` | HTML input, HTML text parsing, XHTML5 profile grammars |
-| `capi` | C ABI (implies `std`, `xml`, `dom`) |
+| `capi` | C ABI (implies `std`, `xml`, `dom`, `exig`) |
 
 ## Build and test
 

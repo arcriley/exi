@@ -33,6 +33,49 @@ exi exig schema.exig                    # .exig as XML text
 exi digest schema.exig                  # the sha256: name
 ```
 
+## Build a fixed grammar into firmware
+
+A firmware crate can put `.exig` support on its host build dependency and leave it
+off its target dependency. Use Cargo resolver 2 or later. Edition 2024 uses resolver
+3 by default for a standalone crate.
+
+```toml
+[dependencies]
+exi = { path = "../exi", default-features = false, features = ["bit-packed"] }
+
+[build-dependencies]
+exi = { path = "../exi", default-features = false, features = ["std", "exig"] }
+```
+
+Omit `bit-packed` when the firmware uses only byte-aligned bodies. In the firmware
+crate's `build.rs`:
+
+```rust
+fn main() {
+    let input = "sensor.exig";
+    println!("cargo:rerun-if-changed={input}");
+    let bytes = std::fs::read(input).expect("read sensor.exig");
+    let source = exi::grammar::exig::compile_to_rust(&bytes)
+        .expect("compile sensor.exig");
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    std::fs::write(out.join("sensor_grammar.rs"), source)
+        .expect("write generated grammar");
+}
+```
+
+In the firmware crate:
+
+```rust
+fn sensor_grammar() -> exi::Result<exi::grammar::GrammarSet> {
+    include!(concat!(env!("OUT_DIR"), "/sensor_grammar.rs"))
+}
+```
+
+Call `sensor_grammar()` once, then attach the result to the firmware's string pool
+and reuse the attachment. The target constructs the regular owned grammar tables
+and still needs an allocator. The generated Rust does not embed the `.exig` file
+or require the `.exig` decoder or SHA-256 at runtime.
+
 ## An example
 
 This schema has one global element with a required enumerated attribute, an optional

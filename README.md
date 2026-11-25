@@ -81,7 +81,7 @@ public item has an example.
 
 ## Features
 
-The defaults are `std`, `xml`, `bit-packed` and `compression`.
+The defaults are `std`, `xml`, `bit-packed`, `compression` and `exig`.
 
 | Feature | Adds |
 |---|---|
@@ -89,11 +89,18 @@ The defaults are `std`, `xml`, `bit-packed` and `compression`.
 | `xml` | XML text reader and writer |
 | `bit-packed` | bit-packed bodies |
 | `compression` | pre-compression and DEFLATE compression |
+| `exig` | load and save grammar files, and generate Rust from them at build time |
 | `xsd` | the XML Schema compiler |
 | `infer` | schemas learned from example documents |
 | `dom` | the document tree |
 | `html`, `html5ever`, `xhtml5` | HTML in and out, HTML parsing, the XHTML5 profile |
 | `capi` | the C ABI (`libexi.so`) |
+
+## Fixed grammar in firmware
+
+Use the host build script in [EXIG.md](EXIG.md#build-a-fixed-grammar-into-firmware)
+to turn one `.exig` file into Rust. The firmware can use the generated grammar
+with default features disabled, so it can omit the XML and `.exig` loaders.
 
 ## C
 

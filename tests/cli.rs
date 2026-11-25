@@ -9,7 +9,7 @@
 // communicating that changes are made under these same conditions.
 //
 //! The `exi` command-line tool, run as a user would.
-#![cfg(feature = "infer")]
+#![cfg(all(feature = "infer", feature = "std", feature = "exig"))]
 
 use std::io::Write;
 use std::process::{Command, Output, Stdio};

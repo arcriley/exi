@@ -11,7 +11,7 @@
 //! Host baseline for fixed-schema firmware.
 //!
 //!     cargo bench --bench device --no-default-features --features
-//! std,bit-packed
+//! std,bit-packed,exig
 //!
 //! Add `-- --server` to measure many streams sharing one attachment.
 //!

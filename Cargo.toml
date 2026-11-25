@@ -71,3 +71,8 @@ required-features = ["infer"]
 name = "codecs"
 harness = false
 required-features = ["infer", "xhtml5", "html5ever"]
+
+[[bench]]
+name = "device"
+harness = false
+required-features = ["std", "bit-packed"]

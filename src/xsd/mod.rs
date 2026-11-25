@@ -202,8 +202,17 @@ impl<'a> XsdCompiler<'a> {
     /// Reads `main` and every document it includes or imports, and
     /// builds the grammars.
     pub fn compile(self, main: &str) -> Result<GrammarSet> {
+        self.compile_documents([main])
+    }
+
+    pub(crate) fn compile_documents<'m>(
+        self,
+        roots: impl IntoIterator<Item = &'m str>,
+    ) -> Result<GrammarSet> {
         let mut schema = Schema::default();
-        schema.load(&self, &normalize_path(main), None)?;
+        for root in roots {
+            schema.load(&self, &normalize_path(root), None)?;
+        }
         schema.index()?;
         let mut c = Compiler::new(&schema, self.max_states);
         c.run()?;

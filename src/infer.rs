@@ -150,6 +150,11 @@ const XSI: &str = "http://www.w3.org/2001/XMLSchema-instance";
 const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 
 /// How closely the schema follows the examples. See the [module documentation](self).
+///
+/// ```
+/// use exi::infer::Fit;
+/// assert_eq!(Fit::default(), Fit::General);
+/// ```
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum Fit {
     /// Built-in types only.
@@ -169,12 +174,12 @@ pub struct InferredSchema {
 }
 
 /// Learns a schema from example documents. See the [module documentation](self).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SchemaInference {
     fit: Fit,
     max_enum: usize,
     elements: Vec<ElemStats>,
-    index: BTreeMap<(String, String), usize>,
+    index: BTreeMap<String, BTreeMap<String, usize>>,
     /// Global attributes (namespaced): their values over every element.
     globals: BTreeMap<(String, String), Values>,
     /// The first document element's namespace.
@@ -182,6 +187,21 @@ pub struct SchemaInference {
     /// Prefixes the examples used, by URI, first one seen.
     prefixes: BTreeMap<String, String>,
     stack: Vec<Frame>,
+}
+
+impl Default for SchemaInference {
+    fn default() -> Self {
+        Self {
+            fit: Fit::default(),
+            max_enum: 16,
+            elements: Vec::new(),
+            index: BTreeMap::new(),
+            globals: BTreeMap::new(),
+            first_root: None,
+            prefixes: BTreeMap::new(),
+            stack: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -255,15 +275,15 @@ const DATETIME: u8 = 16;
 const DATE: u8 = 32;
 const TIME: u8 = 64;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct Values {
     count: u64,
     fits: u8,
     /// Integer range; `None` once a value is beyond i64.
     range: Option<(i64, i64)>,
     negative: bool,
-    /// Distinct values and their counts, while there are few.
-    distinct: BTreeMap<String, u64>,
+    /// Candidate enumeration values, while there are few.
+    distinct: BTreeSet<String>,
     many: bool,
 }
 
@@ -274,7 +294,7 @@ impl Default for Values {
             fits: 0x7F,
             range: None,
             negative: false,
-            distinct: BTreeMap::new(),
+            distinct: BTreeSet::new(),
             many: false,
         }
     }
@@ -307,6 +327,7 @@ impl Values {
                 self.negative |= neg;
                 self.range = None;
                 self.many = true;
+                self.distinct.clear();
             }
             None => {}
         }
@@ -330,35 +351,8 @@ impl Values {
             self.range = None;
         }
         if !self.many {
-            *self.distinct.entry(v.to_string()).or_insert(0) += 1;
-            if self.distinct.len() > max_enum {
-                self.many = true;
-                self.distinct.clear();
-            }
-        }
-    }
-
-    fn merge(&mut self, o: &Values, max_enum: usize) {
-        if o.count == 0 {
-            return;
-        }
-        if self.count == 0 {
-            *self = o.clone();
-            return;
-        }
-        self.count += o.count;
-        self.fits &= o.fits;
-        self.negative |= o.negative;
-        self.range = match (self.range, o.range) {
-            (Some((a, b)), Some((c, d))) if self.fits & INT != 0 => {
-                Some((a.min(c), b.max(d)))
-            }
-            _ => None,
-        };
-        self.many |= o.many;
-        if !self.many {
-            for (k, n) in &o.distinct {
-                *self.distinct.entry(k.clone()).or_insert(0) += n;
+            if !self.distinct.contains(v) {
+                self.distinct.insert(v.to_string());
             }
             if self.distinct.len() > max_enum {
                 self.many = true;
@@ -376,11 +370,30 @@ enum Simple {
 }
 
 impl SchemaInference {
+    /// Starts with no examples and the default inference policy.
+    ///
+    /// ```
+    /// use exi::{ErrorKind, infer::SchemaInference};
+    /// let learned = SchemaInference::new();
+    /// assert!(learned.schemas().is_empty());
+    /// assert_eq!(learned.grammars().unwrap_err().kind(), ErrorKind::State);
+    /// ```
     pub fn new() -> Self {
-        SchemaInference { max_enum: 16, ..SchemaInference::default() }
+        Self::default()
     }
 
     /// How closely to follow the examples. Default [`Fit::General`].
+    /// The fit is applied when the schemas are emitted.
+    ///
+    /// ```
+    /// use exi::infer::{Fit, SchemaInference};
+    /// let mut learned = SchemaInference::new();
+    /// learned.document(b"<temperature>21</temperature>")?;
+    /// assert!(learned.schemas()[0].text.contains(r#"type="xs:unsignedInt""#));
+    /// let exact = learned.fit(Fit::Exact);
+    /// assert!(exact.schemas()[0].text.contains(r#"<xs:maxInclusive value="21"/>"#));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn fit(mut self, f: Fit) -> Self {
         self.fit = f;
         self
@@ -388,8 +401,19 @@ impl SchemaInference {
 
     /// The most distinct values an enumeration may have under
     /// [`Fit::Exact`]. Default 16. A slot with more values is not an
-    /// enumeration; one whose values do not repeat (each seen once on
-    /// average) is not either.
+    /// enumeration. Candidates must occur at least twice on average.
+    ///
+    /// ```
+    /// use exi::infer::{Fit, SchemaInference};
+    /// let xml = br#"<log><e level="info"/><e level="warn"/><e level="info"/><e level="warn"/></log>"#;
+    /// let mut default = SchemaInference::default().fit(Fit::Exact);
+    /// let mut capped = SchemaInference::new().fit(Fit::Exact).max_enumeration(1);
+    /// default.document(xml)?;
+    /// capped.document(xml)?;
+    /// assert!(default.schemas()[0].text.contains(r#"<xs:enumeration value="info"/>"#));
+    /// assert!(capped.schemas()[0].text.contains(r#"name="level" type="xs:string""#));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn max_enumeration(mut self, n: usize) -> Self {
         self.max_enum = n;
         self
@@ -400,7 +424,16 @@ impl SchemaInference {
     /// # Errors
     ///
     /// The XML reader's errors (`ErrorKind::Xml` for a document that is
-    /// not well-formed).
+    /// not well-formed). Inference consumes events as they arrive, so
+    /// an error can leave partial statistics. Discard the learner if
+    /// the failed document must have no effect.
+    ///
+    /// ```
+    /// use exi::{ErrorKind, infer::SchemaInference};
+    /// let mut learned = SchemaInference::new();
+    /// let error = learned.document(b"<reading></other>").unwrap_err();
+    /// assert_eq!(error.kind(), ErrorKind::Xml);
+    /// ```
     pub fn document(&mut self, xml: &[u8]) -> Result<()> {
         let strings = GlobalStrings::new(GlobalConfig::new())?;
         let set = GrammarSet::schemaless();
@@ -426,7 +459,9 @@ impl SchemaInference {
     }
 
     fn elem(&mut self, uri: &str, local: &str) -> usize {
-        if let Some(&i) = self.index.get(&(uri.into(), local.into())) {
+        if let Some(&i) =
+            self.index.get(uri).and_then(|names| names.get(local))
+        {
             return i;
         }
         self.elements.push(ElemStats {
@@ -435,7 +470,7 @@ impl SchemaInference {
             ..ElemStats::default()
         });
         let i = self.elements.len() - 1;
-        self.index.insert((uri.into(), local.into()), i);
+        self.index.entry(uri.into()).or_default().insert(local.into(), i);
         i
     }
 
@@ -484,19 +519,22 @@ impl SchemaInference {
 
     /// The schema documents, the first one for the first document
     /// element's namespace.
+    ///
+    /// ```
+    /// use exi::infer::SchemaInference;
+    /// let mut learned = SchemaInference::new();
+    /// learned.document(br#"<root xmlns="urn:root" xmlns:none="urn:child"><item xmlns=""/><none:item/></root>"#)?;
+    /// let docs = learned.schemas();
+    /// assert_eq!(docs[0].namespace, "urn:root");
+    /// assert_eq!(docs.len(), 3);
+    /// let files: std::collections::BTreeSet<_> = docs.iter().map(|d| &d.location).collect();
+    /// assert_eq!(files.len(), docs.len());
+    /// learned.grammars()?;
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn schemas(&self) -> Vec<InferredSchema> {
-        // Namespaces: of elements and of global attributes.
-        let mut spaces: BTreeSet<String> =
-            self.elements.iter().map(|e| e.uri.clone()).collect();
-        spaces.extend(self.globals.keys().map(|(u, _)| u.clone()));
-        let mut order: Vec<String> = Vec::new();
-        if let Some(f) = &self.first_root {
-            order.push(f.clone());
-        }
-        order.extend(
-            spaces.into_iter().filter(|s| Some(s) != self.first_root.as_ref()),
-        );
-        let prefix = self.prefix_map();
+        let order = self.namespace_order();
+        let prefix = self.prefix_map(&order);
         let location = |ns: &str, i: usize| -> String {
             if i == 0 {
                 "schema.xsd".into()
@@ -569,7 +607,7 @@ impl SchemaInference {
                 &format!("{l}-value"),
                 &mut types,
                 &mut type_names,
-                ns,
+                prefix.get(ns).map(String::as_str),
             );
             body.push_str("/>\n");
         }
@@ -633,7 +671,7 @@ impl SchemaInference {
                 &format!("{}-value", e.local),
                 types,
                 names,
-                &e.uri,
+                prefix.get(&e.uri).map(String::as_str),
             );
             out.push_str("/>\n");
             return;
@@ -661,7 +699,7 @@ impl SchemaInference {
                     &format!("{}-{}", e.local, a.local),
                     types,
                     names,
-                    &e.uri,
+                    prefix.get(&e.uri).map(String::as_str),
                 );
                 let _ = writeln!(attr_text, "{required}/>");
             } else {
@@ -680,7 +718,7 @@ impl SchemaInference {
                 &format!("{}-value", e.local),
                 types,
                 names,
-                &e.uri,
+                prefix.get(&e.uri).map(String::as_str),
             );
             let _ = writeln!(
                 out,
@@ -743,9 +781,9 @@ impl SchemaInference {
         name: &str,
         types: &mut String,
         names: &mut BTreeSet<String>,
-        ns: &str,
+        prefix: Option<&str>,
     ) {
-        let t = self.simple_name(v, name, types, names, ns);
+        let t = self.simple_name(v, name, types, names, prefix);
         let _ = write!(out, " type=\"{}\"", esc(&t));
     }
 
@@ -757,7 +795,7 @@ impl SchemaInference {
         name: &str,
         types: &mut String,
         names: &mut BTreeSet<String>,
-        ns: &str,
+        prefix: Option<&str>,
     ) -> String {
         let (base, facets) = match self.simple(v) {
             Simple::Builtin(b) => return format!("xs:{b}"),
@@ -790,17 +828,14 @@ impl SchemaInference {
             types,
             "  <xs:simpleType name=\"{n}\">\n    <xs:restriction base=\"xs:{base}\">\n{facets}    </xs:restriction>\n  </xs:simpleType>\n"
         );
-        if ns.is_empty() { n } else { format!("{}:{n}", self.prefix_of(ns)) }
+        match prefix {
+            Some(prefix) => format!("{prefix}:{n}"),
+            None => n,
+        }
     }
 
-    fn prefix_of(&self, ns: &str) -> String {
-        self.prefix_map().get(ns).cloned().unwrap_or_default()
-    }
-
-    /// The prefix of each namespace in the schema documents: the
-    /// examples' prefix where it is free and usable, else `ns1`, `ns2`,
-    /// …
-    fn prefix_map(&self) -> BTreeMap<String, String> {
+    fn namespace_order(&self) -> Vec<String> {
+        // Namespaces: of elements and of global attributes.
         let mut spaces: BTreeSet<String> =
             self.elements.iter().map(|e| e.uri.clone()).collect();
         spaces.extend(self.globals.keys().map(|(u, _)| u.clone()));
@@ -811,14 +846,25 @@ impl SchemaInference {
         order.extend(
             spaces.into_iter().filter(|s| Some(s) != self.first_root.as_ref()),
         );
+        order
+    }
+
+    /// The prefix of each namespace in the schema documents: the
+    /// examples' prefix where it is free and usable, else `ns1`, `ns2`,
+    /// …
+    fn prefix_map(&self, order: &[String]) -> BTreeMap<String, String> {
         let mut prefix = BTreeMap::new();
         prefix.insert(XML_NS.to_string(), "xml".to_string());
         let mut used: BTreeSet<String> = ["xs", "xml", "xmlns", "xsi"]
             .iter()
             .map(|s| s.to_string())
             .collect();
+        // The non-primary no-namespace document uses schema-none.xsd.
+        if order.iter().skip(1).any(String::is_empty) {
+            used.insert("none".into());
+        }
         let mut k = 1;
-        for ns in &order {
+        for ns in order {
             if ns.is_empty() || ns == XML_NS {
                 continue;
             }
@@ -893,7 +939,7 @@ impl SchemaInference {
             && !v.distinct.is_empty()
             && v.count >= 2 * v.distinct.len() as u64
         {
-            let trimmed = v.distinct.keys().all(|k| {
+            let trimmed = v.distinct.iter().all(|k| {
                 !k.is_empty()
                     && k.trim_matches(|c| {
                         matches!(c, ' ' | '\t' | '\n' | '\r')
@@ -901,7 +947,7 @@ impl SchemaInference {
             });
             if trimmed {
                 return Simple::Enumeration(
-                    v.distinct.keys().cloned().collect(),
+                    v.distinct.iter().cloned().collect(),
                 );
             }
         }
@@ -910,6 +956,17 @@ impl SchemaInference {
 
     /// The learned schema compiled: grammars for strict streams of
     /// documents like the examples.
+    ///
+    /// ```
+    /// use exi::infer::SchemaInference;
+    /// let mut learned = SchemaInference::new();
+    /// learned.document(br#"<temperature xmlns="urn:sensor">21</temperature>"#)?;
+    /// learned.document(br#"<alarm xmlns="urn:alarm">true</alarm>"#)?;
+    /// let grammars = learned.grammars()?;
+    /// assert!(grammars.name_id("urn:sensor", "temperature").is_some());
+    /// assert!(grammars.name_id("urn:alarm", "alarm").is_some());
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn grammars(&self) -> Result<GrammarSet> {
         let docs = self.schemas();
         if docs.is_empty() {
@@ -922,7 +979,7 @@ impl SchemaInference {
         for d in &docs {
             c = c.document(&d.location, d.text.as_bytes());
         }
-        c.compile(&docs[0].location)
+        c.compile_documents(docs.iter().map(|d| d.location.as_str()))
     }
 }
 
@@ -983,6 +1040,24 @@ fn esc(s: &str) -> String {
 }
 
 impl EventSink for SchemaInference {
+    /// Learns from the events of a complete document.
+    ///
+    /// ```
+    /// use exi::{Event, EventSink, infer::SchemaInference};
+    /// let mut learned = SchemaInference::new();
+    /// learned.event(&Event::StartDocument)?;
+    /// learned.start_element("sensor")?;
+    /// learned.attribute("id", 42_i64)?;
+    /// learned.start_element("online")?;
+    /// learned.text("true")?;
+    /// learned.end_element()?;
+    /// learned.end_element()?;
+    /// learned.event(&Event::EndDocument)?;
+    /// let text = &learned.schemas()[0].text;
+    /// assert!(text.contains(r#"name="id" type="xs:unsignedInt" use="required""#));
+    /// assert!(text.contains(r#"name="online" type="xs:boolean""#));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     fn event(&mut self, ev: &Event<'_>) -> Result<()> {
         match *ev {
             Event::StartElement(n) => {
@@ -1049,14 +1124,13 @@ impl EventSink for SchemaInference {
                     f.attrs.push(ai);
                     e.attrs[ai].count += 1;
                 }
-                e.attrs[ai].values.add(&text, max_enum);
-                if !n.uri().is_empty() {
-                    let mut one = Values::default();
-                    one.add(&text, max_enum);
+                if n.uri().is_empty() {
+                    e.attrs[ai].values.add(&text, max_enum);
+                } else {
                     self.globals
                         .entry((n.uri().into(), n.local_name().into()))
                         .or_default()
-                        .merge(&one, max_enum);
+                        .add(&text, max_enum);
                 }
             }
             Event::Characters(v) => {

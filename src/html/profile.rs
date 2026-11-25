@@ -58,7 +58,7 @@ pub const SCHEMA_V1: &str = "urn:libexi:xhtml5:1";
 /// The SHA-256 of version 1's `.exig`: the grammars every
 /// implementation must hold under [`SCHEMA_V1`].
 pub const DIGEST_V1: &str =
-    "sha256:f19fdbf13de843e287fc30dc57ca8b1066f5260b179374452fa005f535c50b28";
+    "sha256:454f9171af8192722ec302b50db120c312b53ca530a5dc6b6fe5975cb6998fcc";
 
 /// Version 1's coding schema, as XSD.
 pub const XSD_V1: &str = include_str!("../../schemas/xhtml5-1.xsd");

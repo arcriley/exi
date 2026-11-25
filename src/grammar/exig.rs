@@ -154,7 +154,8 @@ impl Model {
             smap: alloc::vec![None; s.simple.len()],
             ..Walk::default()
         };
-        // Named types first, by URI then local name.
+        // Named types first: the XML Schema built-in types by local
+        // name, then the others by URI then local name.
         let mut named: Vec<usize> = (0..s.types.len())
             .filter(|&i| s.types[i].name.is_some())
             .collect();
@@ -163,14 +164,24 @@ impl Model {
                 s.types[a].name.as_ref().expect("named"),
                 s.types[b].name.as_ref().expect("named"),
             );
-            (&*x.uri, &*x.local).cmp(&(&*y.uri, &*y.local))
+            (&*x.uri != XS, &*x.uri, &*x.local).cmp(&(
+                &*y.uri != XS,
+                &*y.uri,
+                &*y.local,
+            ))
         });
         for &t in &named {
             w.tmap[t] = Some(w.torder.len() as u32);
             w.torder.push(t);
         }
-        // Then a depth-first walk from the globals, then from the named
-        // types.
+        // Then a depth-first walk from the built-in types (so their
+        // simple types come first too), the globals, then the other
+        // named types.
+        for &t in &named {
+            if s.types[t].name.as_ref().is_some_and(|n| &*n.uri == XS) {
+                w.ty(s, t);
+            }
+        }
         let mut globals: Vec<ElementId> = s.globals.clone();
         globals.sort_by(|a, b| {
             let (x, y) = (&s.elem(*a).name, &s.elem(*b).name);
@@ -422,8 +433,14 @@ impl Walk {
 }
 
 // =======================================================================================
-// Names of representations and events in the EXIG vocabulary
+// Names of representations in the EXIG vocabulary
 // =======================================================================================
+
+/// The XML Schema namespace: its types are the built-in ones.
+const XS: &str = "http://www.w3.org/2001/XMLSchema";
+
+/// Most productions an `.exig` may expand to, over all its types.
+const MAX_PRODUCTIONS: usize = 1 << 24;
 
 fn rep_name(r: &Representation) -> &'static str {
     use DateTimeKind::*;
@@ -453,54 +470,855 @@ fn rep_name(r: &Representation) -> &'static str {
     }
 }
 
-/// Facts collected for one `simpleType` element.
-#[derive(Default)]
-struct SimpleFacts {
-    rep: String,
-    min: Option<i64>,
-    max: Option<i64>,
-    item: Option<u32>,
-    base: Option<u32>,
-    values: Vec<Box<str>>,
-    charset: Option<String>,
+// =======================================================================================
+// The document form
+// =======================================================================================
+
+/// An attribute use in the pool: name numbers, simple type, required.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AttrUse {
+    uri: u32,
+    local: u32,
+    ty: u32,
+    required: bool,
 }
 
-fn rep_from(f: SimpleFacts) -> Result<Representation> {
-    use DateTimeKind::*;
-    let bad = || {
-        schema_err("a simple type whose facets do not fit its representation")
+/// A production of a content state as written. `next: None` is the
+/// state it is in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DProd {
+    Se { element: u32, next: Option<u32> },
+    SeSet { set: u32, next: Option<u32> },
+    SeUri { uri: u32, next: Option<u32> },
+    SeAny { next: Option<u32> },
+    EE,
+    Ch { ty: u32, next: Option<u32> },
+    At { uri: u32, local: u32, ty: u32, next: Option<u32> },
+    AtUri { uri: u32, next: Option<u32> },
+    AtAny { next: Option<u32> },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DContent {
+    Empty,
+    Scalar(u32),
+    States(Vec<Vec<DProd>>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DType {
+    name: Option<(u32, u32)>,
+    castable: bool,
+    base: Option<u32>,
+    /// Whether the shared attribute set is added, and the type's own
+    /// pool numbers; `None` without attribute uses.
+    attrs: Option<(bool, Vec<u32>)>,
+    /// Attribute wildcards: `None` is AT(*), `Some(uri)` AT(uri:*).
+    wild: Vec<Option<u32>>,
+    content: DContent,
+}
+
+/// An EXIG document as written.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+struct Doc {
+    schema_id: Option<String>,
+    builtin_types: bool,
+    all_global: bool,
+    strings: Vec<(String, Vec<String>)>,
+    simple: Vec<Representation>,
+    sets: Vec<Vec<u32>>,
+    pool: Vec<AttrUse>,
+    shared: Option<Vec<u32>>,
+    types: Vec<DType>,
+    elements: Vec<(u32, u32, u32, bool)>,
+    globals: Vec<u32>,
+}
+
+/// The initial string table of a grammar set: names as numbers.
+struct Names {
+    uris: Vec<String>,
+    locals: Vec<Vec<String>>,
+}
+
+impl Names {
+    fn new(strings: &[(String, Vec<String>)]) -> Result<Names> {
+        let mut b = InitialEntries::schema();
+        for (u, ls) in strings {
+            b = b.uri(u);
+            for l in ls {
+                b = b.local(u, l);
+            }
+        }
+        let e = b.build()?;
+        let uris: Vec<String> =
+            e.uris().iter().map(|u| u.to_string()).collect();
+        let locals = (0..uris.len() as u32)
+            .map(|u| e.locals(u).iter().map(|l| l.to_string()).collect())
+            .collect();
+        Ok(Names { uris, locals })
+    }
+
+    fn uri(&self, u: &str) -> Result<u32> {
+        self.uris
+            .iter()
+            .position(|x| x == u)
+            .map(|i| i as u32)
+            .ok_or_else(|| schema_err("a URI not in the string table"))
+    }
+
+    fn name(&self, n: &OwnedName) -> Result<(u32, u32)> {
+        let u = self.uri(&n.uri)?;
+        let l = self.locals[u as usize]
+            .iter()
+            .position(|x| **x == *n.local)
+            .ok_or_else(|| schema_err("a name not in the string table"))?;
+        Ok((u, l as u32))
+    }
+
+    fn uri_str(&self, u: u32) -> Result<&str> {
+        self.uris
+            .get(u as usize)
+            .map(String::as_str)
+            .ok_or_else(|| schema_err("a URI number out of range"))
+    }
+
+    fn get(&self, u: u32, l: u32) -> Result<OwnedName> {
+        let local = self
+            .locals
+            .get(u as usize)
+            .and_then(|ls| ls.get(l as usize))
+            .ok_or_else(|| schema_err("a name number out of range"))?;
+        Ok(OwnedName::new(&self.uris[u as usize], local))
+    }
+
+    /// The sort key of the attribute pool: local name, then URI.
+    fn key(&self, u: u32, l: u32) -> (&str, &str) {
+        (&self.locals[u as usize][l as usize], &self.uris[u as usize])
+    }
+}
+
+/// The built-in types: the reference table every `builtinTypes`
+/// document shares, taken from the EXIG schema's own grammars.
+struct Builtins {
+    simple: Vec<Representation>,
+    /// The types without casts.
+    types: Vec<TypeModel>,
+    /// Their casts among themselves.
+    casts: Vec<Vec<u32>>,
+    base: Vec<Option<u32>>,
+}
+
+fn builtins() -> Result<Builtins> {
+    let m = super::exig_tables::model();
+    let n = m
+        .types
+        .iter()
+        .take_while(|t| t.name.as_ref().is_some_and(|x| &*x.uri == XS))
+        .count();
+    let mut k = 0usize;
+    for t in &m.types[..n] {
+        for p in t.states.iter().flatten() {
+            if let Prod::At { ty, .. } | Prod::Ch { ty, .. } = p {
+                k = k.max(ty.0 as usize + 1);
+            }
+        }
+    }
+    let casts: Vec<Vec<u32>> = m.types[..n]
+        .iter()
+        .map(|t| {
+            t.casts.iter().copied().filter(|&c| (c as usize) < n).collect()
+        })
+        .collect();
+    let base = bases(&casts, &m.types[..n])?;
+    let types = m.types[..n]
+        .iter()
+        .map(|t| TypeModel { casts: Vec::new(), ..t.clone() })
+        .collect();
+    Ok(Builtins { simple: m.simple[..k].to_vec(), types, casts, base })
+}
+
+/// Each named type's base: of the types that may be cast to it, the one
+/// with the fewest casts. Fails unless the casts are exactly the
+/// descendants under these bases.
+fn bases(casts: &[Vec<u32>], types: &[TypeModel]) -> Result<Vec<Option<u32>>> {
+    let n = casts.len();
+    let mut base = alloc::vec![None; n];
+    for (i, b) in base.iter_mut().enumerate() {
+        if types[i].name.is_none() {
+            continue;
+        }
+        *b = (0..n)
+            .filter(|&a| casts[a].contains(&(i as u32)))
+            .min_by_key(|&a| (casts[a].len(), a))
+            .map(|a| a as u32);
+    }
+    if descendants(&base)? != casts {
+        return Err(Error::new(
+            ErrorKind::Arg,
+            "xsi:type casts that do not follow one base per type have no .exig form",
+        ));
+    }
+    Ok(base)
+}
+
+/// The descendants of every type under `base`, ascending.
+fn descendants(base: &[Option<u32>]) -> Result<Vec<Vec<u32>>> {
+    let n = base.len();
+    let mut out = alloc::vec![Vec::new(); n];
+    for i in 0..n {
+        // Up the chain from i; a chain longer than n is a cycle.
+        let mut a = base[i];
+        let mut steps = 0;
+        while let Some(b) = a {
+            let b = b as usize;
+            if b >= n || steps > n {
+                return Err(schema_err(
+                    "a base that does not exist or a cycle of bases",
+                ));
+            }
+            out[b].push(i as u32);
+            a = base[b];
+            steps += 1;
+        }
+    }
+    for d in &mut out {
+        d.sort_unstable();
+    }
+    Ok(out)
+}
+
+/// `p` with its next state replaced.
+fn with_next(p: &Prod, n: u32) -> Prod {
+    let mut p = p.clone();
+    match &mut p {
+        Prod::At { next, .. }
+        | Prod::AtUri { next, .. }
+        | Prod::AtAny { next }
+        | Prod::Se { next, .. }
+        | Prod::SeUri { next, .. }
+        | Prod::SeAny { next }
+        | Prod::Ch { next, .. } => *next = n,
+        Prod::EE => {}
+    }
+    p
+}
+
+fn next_of(p: &Prod) -> Option<u32> {
+    match p {
+        Prod::At { next, .. }
+        | Prod::AtUri { next, .. }
+        | Prod::AtAny { next }
+        | Prod::Se { next, .. }
+        | Prod::SeUri { next, .. }
+        | Prod::SeAny { next }
+        | Prod::Ch { next, .. } => Some(*next),
+        Prod::EE => None,
+    }
+}
+
+fn is_at(p: &Prod) -> bool {
+    matches!(p, Prod::At { .. } | Prod::AtUri { .. } | Prod::AtAny { .. })
+}
+
+fn is_wild(p: &Prod) -> bool {
+    matches!(p, Prod::AtUri { .. } | Prod::AtAny { .. })
+}
+
+/// A type grammar as attribute uses, wildcards and content states.
+#[derive(Clone)]
+struct Shape {
+    attrs: Vec<(OwnedName, SimpleTypeId, bool)>,
+    wild: Vec<Option<Box<str>>>,
+    /// Content states; `next` numbers content states.
+    content: Vec<Vec<Prod>>,
+}
+
+/// The states of a shape, numbered breadth-first from state 0 (the
+/// schema's rules for attribute states).
+fn expand(s: &Shape) -> Result<Vec<Vec<Prod>>> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Node {
+        A(usize),
+        C(usize),
+    }
+    let k = s.attrs.len();
+    let nattr = k + usize::from(!s.wild.is_empty());
+    if s.content.is_empty() {
+        return Err(schema_err("a type with no content state"));
+    }
+    for p in s.content.iter().flatten() {
+        if next_of(p).is_some_and(|n| n as usize >= s.content.len()) {
+            return Err(schema_err(
+                "a production to a state that does not exist",
+            ));
+        }
+    }
+    let prods = |n: Node| -> Vec<(Prod, Option<Node>)> {
+        let content = |j: usize| {
+            s.content[j]
+                .iter()
+                .map(|p| (p.clone(), next_of(p).map(|t| Node::C(t as usize))))
+        };
+        match n {
+            Node::C(j) => content(j).collect(),
+            Node::A(i) => {
+                let mut v = Vec::new();
+                let mut j = i;
+                while j < k {
+                    let (name, ty, req) = &s.attrs[j];
+                    let to = if j + 1 < nattr {
+                        Node::A(j + 1)
+                    } else {
+                        Node::C(0)
+                    };
+                    v.push((
+                        Prod::At { name: name.clone(), ty: *ty, next: 0 },
+                        Some(to),
+                    ));
+                    if *req {
+                        break;
+                    }
+                    j += 1;
+                }
+                for w in &s.wild {
+                    let p = match w {
+                        None => Prod::AtAny { next: 0 },
+                        Some(u) => Prod::AtUri { uri: u.clone(), next: 0 },
+                    };
+                    v.push((p, Some(Node::A(i))));
+                }
+                if !s.attrs[i..].iter().any(|a| a.2) {
+                    v.extend(content(0));
+                }
+                v
+            }
+        }
     };
-    Ok(match f.rep.as_str() {
-        "string" => Representation::String {
-            charset: f.charset.map(|c| c.chars().collect()),
-        },
-        "boolean" => Representation::Boolean { pattern: false },
-        "booleanPattern" => Representation::Boolean { pattern: true },
-        "integer" => Representation::Integer(IntegerRep::Signed),
-        "unsignedInteger" => Representation::Integer(IntegerRep::Unsigned),
-        "boundedInteger" => Representation::Integer(IntegerRep::Bounded {
-            min: f.min.ok_or_else(bad)?,
-            max: f.max.ok_or_else(bad)?,
-        }),
-        "decimal" => Representation::Decimal,
-        "float" => Representation::Float,
-        "hexBinary" => Representation::Binary(BinaryKind::Hex),
-        "base64Binary" => Representation::Binary(BinaryKind::Base64),
-        "gYear" => Representation::DateTime(GYear),
-        "gYearMonth" => Representation::DateTime(GYearMonth),
-        "date" => Representation::DateTime(Date),
-        "dateTime" => Representation::DateTime(DateTime),
-        "gMonth" => Representation::DateTime(GMonth),
-        "gMonthDay" => Representation::DateTime(GMonthDay),
-        "gDay" => Representation::DateTime(GDay),
-        "time" => Representation::DateTime(Time),
-        "list" => Representation::List(SimpleTypeId(f.item.ok_or_else(bad)?)),
-        "enumeration" => Representation::Enumeration {
-            values: f.values.into(),
-            base: SimpleTypeId(f.base.ok_or_else(bad)?),
-        },
-        _ => return Err(bad()),
-    })
+    let first = if nattr > 0 { Node::A(0) } else { Node::C(0) };
+    let mut order = alloc::vec![first];
+    let mut i = 0;
+    while i < order.len() {
+        for (_, to) in prods(order[i]) {
+            if let Some(to) = to {
+                if !order.contains(&to) {
+                    order.push(to);
+                }
+            }
+        }
+        i += 1;
+    }
+    let num =
+        |n: Node| order.iter().position(|&x| x == n).expect("ordered") as u32;
+    Ok(order
+        .iter()
+        .map(|&n| {
+            prods(n)
+                .into_iter()
+                .map(|(p, to)| match to {
+                    Some(to) => with_next(&p, num(to)),
+                    None => p,
+                })
+                .collect()
+        })
+        .collect())
+}
+
+/// The shape of a type grammar: attribute uses and content when the
+/// states follow the schema's rules, otherwise every state as content.
+fn shape(states: &[Vec<Prod>]) -> Shape {
+    let explicit = Shape {
+        attrs: Vec::new(),
+        wild: Vec::new(),
+        content: states.to_vec(),
+    };
+    let mut attrs: Vec<(OwnedName, SimpleTypeId, bool)> = Vec::new();
+    while attrs.len() < states.len() {
+        match states[attrs.len()].first() {
+            Some(Prod::At { name, ty, next })
+                if *next as usize == attrs.len() + 1 =>
+            {
+                attrs.push((name.clone(), *ty, false))
+            }
+            _ => break,
+        }
+    }
+    let wild: Vec<Option<Box<str>>> = states[0]
+        .iter()
+        .filter_map(|p| match p {
+            Prod::AtAny { .. } => Some(None),
+            Prod::AtUri { uri, .. } => Some(Some(uri.clone())),
+            _ => None,
+        })
+        .collect();
+    let k = attrs.len();
+    let nattr = k + usize::from(!wild.is_empty());
+    if k >= states.len() {
+        return explicit;
+    }
+    // A state that does not offer the content start ends at a required
+    // use.
+    for (i, st) in states[..k].iter().enumerate() {
+        let ats = st.iter().filter(|p| matches!(p, Prod::At { .. })).count();
+        let last = i + ats - 1;
+        if last >= k {
+            return explicit;
+        }
+        if last + 1 < k || st.iter().all(is_at) {
+            attrs[last].2 = true;
+        }
+    }
+    // The content start.
+    let (start, c0) = if wild.is_empty() {
+        (Some(k), states[k].clone())
+    } else {
+        let c0: Vec<Prod> =
+            states[k].iter().filter(|p| !is_wild(p)).cloned().collect();
+        ((nattr..states.len()).find(|&i| states[i] == c0), c0)
+    };
+    // Content states, breadth-first from the start.
+    let mut ids: Vec<Option<u32>> = alloc::vec![None; states.len()];
+    if let Some(s) = start {
+        ids[s] = Some(0);
+    }
+    let mut order: Vec<Vec<Prod>> = alloc::vec![c0];
+    let mut i = 0;
+    while i < order.len() {
+        let targets: Vec<u32> = order[i].iter().filter_map(next_of).collect();
+        for t in targets {
+            let t = t as usize;
+            if t < nattr || t >= states.len() {
+                return explicit;
+            }
+            if ids[t].is_none() {
+                ids[t] = Some(order.len() as u32);
+                order.push(states[t].clone());
+            }
+        }
+        i += 1;
+    }
+    if (nattr..states.len()).any(|i| ids[i].is_none()) {
+        return explicit;
+    }
+    let content = order
+        .iter()
+        .map(|st| {
+            st.iter()
+                .map(|p| match next_of(p) {
+                    Some(t) => {
+                        with_next(p, ids[t as usize].expect("numbered"))
+                    }
+                    None => p.clone(),
+                })
+                .collect()
+        })
+        .collect();
+    let s = Shape { attrs, wild, content };
+    match expand(&s) {
+        Ok(back) if back == states => s,
+        _ => explicit,
+    }
+}
+
+impl Doc {
+    /// The document form of a model in canonical order.
+    fn from_model(m: &Model) -> Result<Doc> {
+        let names = Names::new(&m.strings)?;
+        let bi = builtins()?;
+        let (nb, ns) = (bi.types.len(), bi.simple.len());
+        let casts: Vec<Vec<u32>> =
+            m.types.iter().map(|t| t.casts.clone()).collect();
+        let base = bases(&casts, &m.types)?;
+        let builtin = m.types.len() >= nb
+            && m.simple.len() >= ns
+            && m.simple[..ns] == bi.simple[..]
+            && (0..nb).all(|i| {
+                let t = &m.types[i];
+                t.name == bi.types[i].name
+                    && t.castable == bi.types[i].castable
+                    && t.states == bi.types[i].states
+                    && t.casts
+                        .iter()
+                        .copied()
+                        .filter(|&c| (c as usize) < nb)
+                        .collect::<Vec<_>>()
+                        == bi.casts[i]
+            });
+        let (t0, s0) = if builtin { (nb, ns) } else { (0, 0) };
+        let mut d = Doc {
+            schema_id: m.schema_id.clone(),
+            builtin_types: builtin,
+            strings: m.strings.clone(),
+            simple: m.simple[s0..].to_vec(),
+            ..Doc::default()
+        };
+
+        // Shapes, and the attribute pool: a type whose uses are not in
+        // pool order is written state by state.
+        let mut shapes: Vec<Shape> =
+            m.types[t0..].iter().map(|t| shape(&t.states)).collect();
+        let use_of = |a: &(OwnedName, SimpleTypeId, bool)| -> Result<AttrUse> {
+            let (uri, local) = names.name(&a.0)?;
+            Ok(AttrUse { uri, local, ty: a.1 .0, required: a.2 })
+        };
+        let pool = |shapes: &[Shape]| -> Result<Vec<AttrUse>> {
+            let mut pool: Vec<AttrUse> = Vec::new();
+            for a in shapes.iter().flat_map(|s| s.attrs.iter()) {
+                let u = use_of(a)?;
+                if !pool.contains(&u) {
+                    pool.push(u);
+                }
+            }
+            pool.sort_by(|a, b| {
+                (names.key(a.uri, a.local), a.ty, a.required).cmp(&(
+                    names.key(b.uri, b.local),
+                    b.ty,
+                    b.required,
+                ))
+            });
+            Ok(pool)
+        };
+        let numbers = |pool: &[AttrUse], s: &Shape| -> Result<Vec<u32>> {
+            s.attrs
+                .iter()
+                .map(|a| {
+                    let u = use_of(a)?;
+                    Ok(pool.iter().position(|x| *x == u).expect("pooled")
+                        as u32)
+                })
+                .collect()
+        };
+        let p = pool(&shapes)?;
+        for (i, s) in shapes.iter_mut().enumerate() {
+            let ns = numbers(&p, s)?;
+            if ns.windows(2).any(|w| w[0] >= w[1]) {
+                *s = Shape {
+                    attrs: Vec::new(),
+                    wild: Vec::new(),
+                    content: m.types[t0 + i].states.clone(),
+                };
+            }
+        }
+        d.pool = pool(&shapes)?;
+        let lists: Vec<Vec<u32>> = shapes
+            .iter()
+            .map(|s| numbers(&d.pool, s))
+            .collect::<Result<_>>()?;
+        // The shared set: the uses the most types have, when that pays.
+        let mut count = alloc::vec![0usize; d.pool.len()];
+        for l in &lists {
+            for &u in l {
+                count[u as usize] += 1;
+            }
+        }
+        let top = count.iter().copied().max().unwrap_or(0);
+        let shared: Vec<u32> = (0..count.len() as u32)
+            .filter(|&u| count[u as usize] == top)
+            .collect();
+        if top >= 3 && shared.len() >= 2 {
+            d.shared = Some(shared);
+        }
+
+        for (i, (s, l)) in shapes.iter().zip(&lists).enumerate() {
+            let t = &m.types[t0 + i];
+            let attrs = if l.is_empty() {
+                None
+            } else {
+                match &d.shared {
+                    Some(sh) if sh.iter().all(|u| l.contains(u)) => Some((
+                        true,
+                        l.iter()
+                            .copied()
+                            .filter(|u| !sh.contains(u))
+                            .collect(),
+                    )),
+                    _ => Some((false, l.clone())),
+                }
+            };
+            let wild = s
+                .wild
+                .iter()
+                .map(|w| w.as_deref().map(|u| names.uri(u)).transpose())
+                .collect::<Result<_>>()?;
+            let content = d.content(&s.content, &names)?;
+            d.types.push(DType {
+                name: t.name.as_ref().map(|n| names.name(n)).transpose()?,
+                castable: t.castable,
+                base: base[t0 + i],
+                attrs,
+                wild,
+                content,
+            });
+        }
+        for (name, ty, nil) in &m.elements {
+            let (u, l) = names.name(name)?;
+            d.elements.push((u, l, *ty, *nil));
+        }
+        let order = global_order(&m.elements);
+        if !m.globals.is_empty() && m.globals == order {
+            d.all_global = true;
+        } else {
+            d.globals = m.globals.clone();
+        }
+        Ok(d)
+    }
+
+    /// Content states as written: element sets, `next` left out for the
+    /// state itself, and the empty and scalar forms.
+    fn content(
+        &mut self,
+        states: &[Vec<Prod>],
+        names: &Names,
+    ) -> Result<DContent> {
+        match states {
+            [s] if *s == [Prod::EE] => return Ok(DContent::Empty),
+            [a, b] if *b == [Prod::EE] => {
+                if let [Prod::Ch { ty, next: 1 }] = a[..] {
+                    return Ok(DContent::Scalar(ty.0));
+                }
+            }
+            _ => {}
+        }
+        let mut out = Vec::with_capacity(states.len());
+        for (si, st) in states.iter().enumerate() {
+            let nx = |n: u32| (n as usize != si).then_some(n);
+            let mut ps = Vec::new();
+            let mut i = 0;
+            while i < st.len() {
+                if let Prod::Se { next, .. } = st[i] {
+                    let mut j = i;
+                    while j < st.len()
+                        && matches!(st[j], Prod::Se { next: n, .. } if n == next)
+                    {
+                        j += 1;
+                    }
+                    if j - i >= 3 {
+                        let set: Vec<u32> = st[i..j]
+                            .iter()
+                            .map(|p| match p {
+                                Prod::Se { element, .. } => element.0,
+                                _ => unreachable!(),
+                            })
+                            .collect();
+                        let n = match self.sets.iter().position(|s| *s == set)
+                        {
+                            Some(n) => n,
+                            None => {
+                                self.sets.push(set);
+                                self.sets.len() - 1
+                            }
+                        };
+                        ps.push(DProd::SeSet {
+                            set: n as u32,
+                            next: nx(next),
+                        });
+                        i = j;
+                        continue;
+                    }
+                }
+                ps.push(match &st[i] {
+                    Prod::Se { element, next } => {
+                        DProd::Se { element: element.0, next: nx(*next) }
+                    }
+                    Prod::SeUri { uri, next } => {
+                        DProd::SeUri { uri: names.uri(uri)?, next: nx(*next) }
+                    }
+                    Prod::SeAny { next } => DProd::SeAny { next: nx(*next) },
+                    Prod::EE => DProd::EE,
+                    Prod::Ch { ty, next } => {
+                        DProd::Ch { ty: ty.0, next: nx(*next) }
+                    }
+                    Prod::At { name, ty, next } => {
+                        let (uri, local) = names.name(name)?;
+                        DProd::At { uri, local, ty: ty.0, next: nx(*next) }
+                    }
+                    Prod::AtUri { uri, next } => {
+                        DProd::AtUri { uri: names.uri(uri)?, next: nx(*next) }
+                    }
+                    Prod::AtAny { next } => DProd::AtAny { next: nx(*next) },
+                });
+                i += 1;
+            }
+            out.push(ps);
+        }
+        Ok(DContent::States(out))
+    }
+
+    /// The model this document describes; [`Model::build`] checks it.
+    fn to_model(&self) -> Result<Model> {
+        let names = Names::new(&self.strings)?;
+        let mut m = Model {
+            schema_id: self.schema_id.clone(),
+            strings: self.strings.clone(),
+            ..Model::default()
+        };
+        let mut base: Vec<Option<u32>> = Vec::new();
+        if self.builtin_types {
+            let bi = builtins()?;
+            m.simple = bi.simple;
+            m.types = bi.types;
+            base = bi.base;
+        }
+        m.simple.extend(self.simple.iter().cloned());
+        let shared = self.shared.as_deref().unwrap_or(&[]);
+        let mut total = 0usize;
+        for t in &self.types {
+            let mut uses: Vec<u32> = match &t.attrs {
+                None => Vec::new(),
+                Some((with_set, own)) => {
+                    if *with_set && self.shared.is_none() {
+                        return Err(schema_err(
+                            "a type uses an attribute set that is not given",
+                        ));
+                    }
+                    let mut l = own.clone();
+                    if *with_set {
+                        l.extend_from_slice(shared);
+                    }
+                    l
+                }
+            };
+            uses.sort_unstable();
+            if uses.windows(2).any(|w| w[0] == w[1]) {
+                return Err(schema_err("an attribute use given twice"));
+            }
+            let attrs = uses
+                .iter()
+                .map(|&u| {
+                    let a = self.pool.get(u as usize).ok_or_else(|| {
+                        schema_err("an attribute use that does not exist")
+                    })?;
+                    Ok((
+                        names.get(a.uri, a.local)?,
+                        SimpleTypeId(a.ty),
+                        a.required,
+                    ))
+                })
+                .collect::<Result<_>>()?;
+            let wild = t
+                .wild
+                .iter()
+                .map(|w| {
+                    w.map(|u| names.uri_str(u).map(Box::from)).transpose()
+                })
+                .collect::<Result<_>>()?;
+            let content = match &t.content {
+                DContent::Empty => alloc::vec![alloc::vec![Prod::EE]],
+                DContent::Scalar(ty) => alloc::vec![
+                    alloc::vec![Prod::Ch { ty: SimpleTypeId(*ty), next: 1 }],
+                    alloc::vec![Prod::EE],
+                ],
+                DContent::States(ss) => {
+                    let mut out = Vec::with_capacity(ss.len());
+                    for (si, st) in ss.iter().enumerate() {
+                        let nx = |n: Option<u32>| n.unwrap_or(si as u32);
+                        let mut ps = Vec::new();
+                        for p in st {
+                            match p {
+                                DProd::SeSet { set, next } => {
+                                    let set = self
+                                        .sets
+                                        .get(*set as usize)
+                                        .ok_or_else(|| schema_err("an element set that does not exist"))?;
+                                    total += set.len();
+                                    if total > MAX_PRODUCTIONS {
+                                        return Err(Error::new(
+                                            ErrorKind::Limit,
+                                            "an .exig with too many productions",
+                                        ));
+                                    }
+                                    ps.extend(set.iter().map(|&e| Prod::Se {
+                                        element: ElementId(e),
+                                        next: nx(*next),
+                                    }));
+                                }
+                                DProd::Se { element, next } => {
+                                    ps.push(Prod::Se {
+                                        element: ElementId(*element),
+                                        next: nx(*next),
+                                    })
+                                }
+                                DProd::SeUri { uri, next } => {
+                                    ps.push(Prod::SeUri {
+                                        uri: names.uri_str(*uri)?.into(),
+                                        next: nx(*next),
+                                    })
+                                }
+                                DProd::SeAny { next } => {
+                                    ps.push(Prod::SeAny { next: nx(*next) })
+                                }
+                                DProd::EE => ps.push(Prod::EE),
+                                DProd::Ch { ty, next } => ps.push(Prod::Ch {
+                                    ty: SimpleTypeId(*ty),
+                                    next: nx(*next),
+                                }),
+                                DProd::At { uri, local, ty, next } => {
+                                    ps.push(Prod::At {
+                                        name: names.get(*uri, *local)?,
+                                        ty: SimpleTypeId(*ty),
+                                        next: nx(*next),
+                                    })
+                                }
+                                DProd::AtUri { uri, next } => {
+                                    ps.push(Prod::AtUri {
+                                        uri: names.uri_str(*uri)?.into(),
+                                        next: nx(*next),
+                                    })
+                                }
+                                DProd::AtAny { next } => {
+                                    ps.push(Prod::AtAny { next: nx(*next) })
+                                }
+                            }
+                        }
+                        out.push(ps);
+                    }
+                    out
+                }
+            };
+            let states = expand(&Shape { attrs, wild, content })?;
+            total += states.iter().map(Vec::len).sum::<usize>();
+            if total > MAX_PRODUCTIONS {
+                return Err(Error::new(
+                    ErrorKind::Limit,
+                    "an .exig with too many productions",
+                ));
+            }
+            m.types.push(TypeModel {
+                name: t.name.map(|(u, l)| names.get(u, l)).transpose()?,
+                castable: t.castable,
+                casts: Vec::new(),
+                states,
+            });
+            base.push(t.base);
+        }
+        for (i, b) in base.iter().enumerate() {
+            if b.is_some() && m.types[i].name.is_none() {
+                return Err(schema_err("an anonymous type with a base"));
+            }
+        }
+        for (t, casts) in m.types.iter_mut().zip(descendants(&base)?) {
+            t.casts = casts;
+        }
+        for &(u, l, ty, nil) in &self.elements {
+            m.elements.push((names.get(u, l)?, ty, nil));
+        }
+        m.globals = if self.all_global {
+            global_order(&m.elements)
+        } else {
+            self.globals.clone()
+        };
+        Ok(m)
+    }
+}
+
+/// Every element declaration, by local name then URI: the order of
+/// global elements.
+fn global_order(elements: &[(OwnedName, u32, bool)]) -> Vec<u32> {
+    let mut order: Vec<u32> = (0..elements.len() as u32).collect();
+    order.sort_by(|&a, &b| {
+        let (x, y) = (&elements[a as usize].0, &elements[b as usize].0);
+        (&*x.local, &*x.uri).cmp(&(&*y.local, &*y.uri))
+    });
+    order
 }
 
 // =======================================================================================
@@ -541,10 +1359,11 @@ impl GrammarSet {
     /// # Errors
     ///
     /// `ErrorKind::Arg` for schema-less grammars, which have nothing to
-    /// save.
+    /// save, and for xsi:type casts that do not follow one base per
+    /// type.
     pub fn to_exig(&self) -> Result<Vec<u8>> {
-        let m = Model::from_set(self)?;
-        with_exig(|g| write_model(g, &m))
+        let d = Doc::from_model(&Model::from_set(self)?)?;
+        with_exig(|g| write_doc(g, &d))
     }
 
     /// Reads an `.exig` file and checks it (C.6) under default limits.
@@ -554,8 +1373,8 @@ impl GrammarSet {
 
     /// [`from_exig`](Self::from_exig) under `limits`.
     pub fn from_exig_with(exig: &[u8], limits: Limits) -> Result<GrammarSet> {
-        let m = with_exig(|g| read_model(g, exig, limits))?;
-        m.build()
+        let d = with_exig(|g| read_doc(g, exig, limits))?;
+        d.to_model()?.build()
     }
 
     /// `sha256:` and the 64 lowercase hex digits of the SHA-256 of [`to_exig`](Self::to_exig):
@@ -575,33 +1394,45 @@ impl GrammarSet {
     }
 }
 
-/// Writes the EXIG document of `m` with the EXIG grammars `g`.
-fn write_model(g: &GrammarSet, m: &Model) -> Result<Vec<u8>> {
+fn numbers(v: &[u32]) -> OwnedValue {
+    OwnedValue::List(v.iter().map(|&x| OwnedValue::Int(x as i64)).collect())
+}
+
+/// Writes the EXIG document `d` with the EXIG grammars `g`.
+fn write_doc(g: &GrammarSet, d: &Doc) -> Result<Vec<u8>> {
     let strings = GlobalStrings::new(GlobalConfig::new())?;
     let grammars = g.attach(&strings)?;
     let cfg = WriterConfig::new(exig_options(), &grammars)
         .header(Header::WithOptions { cookie: false });
     let mut w = Writer::new(Vec::new(), cfg)?;
-    let el = |w: &mut Writer<'_, Vec<u8>>, local: &str| {
-        w.start_element((EXIG_NS, local))
-    };
-    let int = |w: &mut Writer<'_, Vec<u8>>, name: &str, v: u64| {
+    type W<'a> = Writer<'a, Vec<u8>>;
+    let el = |w: &mut W<'_>, local: &str| w.start_element((EXIG_NS, local));
+    let int = |w: &mut W<'_>, name: &str, v: u32| {
         w.attribute(name, OwnedValue::Int(v as i64).as_value())
     };
-    let leaf = |w: &mut Writer<'_, Vec<u8>>,
-                local: &str,
-                v: OwnedValue|
-     -> Result<()> {
+    let next = |w: &mut W<'_>, n: Option<u32>| -> Result<()> {
+        match n {
+            Some(n) => int(w, "next", n),
+            None => Ok(()),
+        }
+    };
+    let leaf = |w: &mut W<'_>, local: &str, v: OwnedValue| -> Result<()> {
         w.start_element((EXIG_NS, local))?;
         w.text(v.as_value())?;
         w.end_element()
     };
     el(&mut w, "grammars")?;
-    if let Some(id) = &m.schema_id {
+    if d.all_global {
+        w.attribute("allGlobal", true)?;
+    }
+    if d.builtin_types {
+        w.attribute("builtinTypes", true)?;
+    }
+    if let Some(id) = &d.schema_id {
         w.attribute("schemaId", id.as_str())?;
     }
     el(&mut w, "strings")?;
-    for (u, locals) in &m.strings {
+    for (u, locals) in &d.strings {
         el(&mut w, "uri")?;
         w.attribute("value", u.as_str())?;
         for l in locals {
@@ -610,98 +1441,160 @@ fn write_model(g: &GrammarSet, m: &Model) -> Result<Vec<u8>> {
         w.end_element()?;
     }
     w.end_element()?;
-    for r in &m.simple {
-        el(&mut w, "simpleType")?;
-        w.attribute("representation", rep_name(r))?;
+    el(&mut w, "simpleTypes")?;
+    for r in &d.simple {
+        el(&mut w, rep_name(r))?;
         match r {
             Representation::Integer(IntegerRep::Bounded { min, max }) => {
-                w.attribute("minInclusive", OwnedValue::Int(*min).as_value())?;
                 w.attribute("maxInclusive", OwnedValue::Int(*max).as_value())?;
+                w.attribute("minInclusive", OwnedValue::Int(*min).as_value())?;
             }
-            Representation::List(i) => int(&mut w, "itemType", i.0 as u64)?,
-            Representation::Enumeration { base, .. } => {
-                int(&mut w, "base", base.0 as u64)?
+            Representation::List(i) => int(&mut w, "itemType", i.0)?,
+            Representation::Enumeration { base, values } => {
+                int(&mut w, "base", base.0)?;
+                for v in values.iter() {
+                    leaf(&mut w, "value", OwnedValue::Str(v.clone()))?;
+                }
             }
-            _ => {}
-        }
-        if let Representation::Enumeration { values, .. } = r {
-            for v in values.iter() {
-                leaf(&mut w, "enumeration", OwnedValue::Str(v.clone()))?;
-            }
-        }
-        if let Representation::String { charset: Some(cs) } = r {
-            leaf(
+            Representation::String { charset: Some(cs) } => leaf(
                 &mut w,
                 "charset",
                 OwnedValue::Str(cs.iter().collect::<String>().into()),
-            )?;
+            )?,
+            _ => {}
         }
         w.end_element()?;
     }
-    for t in &m.types {
+    w.end_element()?;
+    el(&mut w, "elementSets")?;
+    for s in &d.sets {
+        leaf(&mut w, "set", numbers(s))?;
+    }
+    w.end_element()?;
+    el(&mut w, "attributes")?;
+    for a in &d.pool {
+        el(&mut w, "attribute")?;
+        int(&mut w, "local", a.local)?;
+        if a.required {
+            w.attribute("required", true)?;
+        }
+        int(&mut w, "type", a.ty)?;
+        int(&mut w, "uri", a.uri)?;
+        w.end_element()?;
+    }
+    w.end_element()?;
+    if let Some(s) = &d.shared {
+        leaf(&mut w, "attributeSet", numbers(s))?;
+    }
+    el(&mut w, "types")?;
+    for t in &d.types {
         el(&mut w, "type")?;
-        if let Some(n) = &t.name {
-            w.attribute("uri", &*n.uri)?;
-            w.attribute("local", &*n.local)?;
+        if let Some(b) = t.base {
+            int(&mut w, "base", b)?;
         }
         if t.castable {
             w.attribute("castable", true)?;
         }
-        for st in &t.states {
-            el(&mut w, "state")?;
-            for p in st {
-                el(&mut w, "production")?;
-                let (event, next) = match p {
-                    Prod::At { name, ty, next } => {
-                        w.attribute("uri", &*name.uri)?;
-                        w.attribute("local", &*name.local)?;
-                        int(&mut w, "type", ty.0 as u64)?;
-                        ("AT", Some(*next))
-                    }
-                    Prod::AtUri { uri, next } => {
-                        w.attribute("uri", &**uri)?;
-                        ("ATuri", Some(*next))
-                    }
-                    Prod::AtAny { next } => ("ATany", Some(*next)),
-                    Prod::Se { element, next } => {
-                        int(&mut w, "element", element.0 as u64)?;
-                        ("SE", Some(*next))
-                    }
-                    Prod::SeUri { uri, next } => {
-                        w.attribute("uri", &**uri)?;
-                        ("SEuri", Some(*next))
-                    }
-                    Prod::SeAny { next } => ("SEany", Some(*next)),
-                    Prod::EE => ("EE", None),
-                    Prod::Ch { ty, next } => {
-                        int(&mut w, "type", ty.0 as u64)?;
-                        ("CH", Some(*next))
-                    }
-                };
-                w.attribute("event", event)?;
-                if let Some(n) = next {
-                    int(&mut w, "next", n as u64)?;
-                }
-                w.end_element()?;
+        if let Some((u, l)) = t.name {
+            int(&mut w, "local", l)?;
+            int(&mut w, "uri", u)?;
+        }
+        if let Some((with_set, own)) = &t.attrs {
+            el(&mut w, "attributes")?;
+            if *with_set {
+                int(&mut w, "set", 0)?;
+            }
+            w.text(numbers(own).as_value())?;
+            w.end_element()?;
+        }
+        for wc in &t.wild {
+            el(&mut w, "anyAttribute")?;
+            if let Some(u) = wc {
+                int(&mut w, "uri", *u)?;
             }
             w.end_element()?;
         }
-        for &c in &t.casts {
-            leaf(&mut w, "cast", OwnedValue::Int(c as i64))?;
+        match &t.content {
+            DContent::Empty => {
+                el(&mut w, "empty")?;
+                w.end_element()?;
+            }
+            DContent::Scalar(ty) => {
+                el(&mut w, "scalar")?;
+                int(&mut w, "type", *ty)?;
+                w.end_element()?;
+            }
+            DContent::States(ss) => {
+                el(&mut w, "content")?;
+                for st in ss {
+                    el(&mut w, "state")?;
+                    for p in st {
+                        match p {
+                            DProd::Se { element, next: n } => {
+                                el(&mut w, "se")?;
+                                int(&mut w, "element", *element)?;
+                                next(&mut w, *n)?;
+                            }
+                            DProd::SeSet { set, next: n } => {
+                                el(&mut w, "seSet")?;
+                                next(&mut w, *n)?;
+                                int(&mut w, "set", *set)?;
+                            }
+                            DProd::SeUri { uri, next: n } => {
+                                el(&mut w, "seUri")?;
+                                next(&mut w, *n)?;
+                                int(&mut w, "uri", *uri)?;
+                            }
+                            DProd::SeAny { next: n } => {
+                                el(&mut w, "seAny")?;
+                                next(&mut w, *n)?;
+                            }
+                            DProd::EE => el(&mut w, "ee")?,
+                            DProd::Ch { ty, next: n } => {
+                                el(&mut w, "ch")?;
+                                next(&mut w, *n)?;
+                                int(&mut w, "type", *ty)?;
+                            }
+                            DProd::At { uri, local, ty, next: n } => {
+                                el(&mut w, "at")?;
+                                int(&mut w, "local", *local)?;
+                                next(&mut w, *n)?;
+                                int(&mut w, "type", *ty)?;
+                                int(&mut w, "uri", *uri)?;
+                            }
+                            DProd::AtUri { uri, next: n } => {
+                                el(&mut w, "atUri")?;
+                                next(&mut w, *n)?;
+                                int(&mut w, "uri", *uri)?;
+                            }
+                            DProd::AtAny { next: n } => {
+                                el(&mut w, "atAny")?;
+                                next(&mut w, *n)?;
+                            }
+                        }
+                        w.end_element()?;
+                    }
+                    w.end_element()?;
+                }
+                w.end_element()?;
+            }
         }
         w.end_element()?;
     }
-    for (name, ty, nillable) in &m.elements {
+    w.end_element()?;
+    el(&mut w, "elements")?;
+    for &(u, l, ty, nil) in &d.elements {
         el(&mut w, "element")?;
-        w.attribute("uri", &*name.uri)?;
-        w.attribute("local", &*name.local)?;
-        int(&mut w, "type", *ty as u64)?;
-        if *nillable {
+        int(&mut w, "local", l)?;
+        if nil {
             w.attribute("nillable", true)?;
         }
+        int(&mut w, "type", ty)?;
+        int(&mut w, "uri", u)?;
         w.end_element()?;
     }
-    for &gl in &m.globals {
+    w.end_element()?;
+    for &gl in &d.globals {
         leaf(&mut w, "global", OwnedValue::Int(gl as i64))?;
     }
     w.end_element()?;
@@ -709,13 +1602,50 @@ fn write_model(g: &GrammarSet, m: &Model) -> Result<Vec<u8>> {
     Ok(w.into_sink())
 }
 
-/// Reads an EXIG document into a model; [`Model::build`] checks it.
-fn read_model(g: &GrammarSet, exig: &[u8], limits: Limits) -> Result<Model> {
+/// An element of a decoded EXIG document.
+#[derive(Default)]
+struct Node {
+    name: String,
+    attrs: Vec<(String, OwnedValue)>,
+    text: Option<OwnedValue>,
+    kids: Vec<Node>,
+}
+
+impl Node {
+    fn get(&self, k: &str) -> Option<&OwnedValue> {
+        self.attrs.iter().find(|(n, _)| n == k).map(|(_, v)| v)
+    }
+    fn uint(&self, k: &str) -> Result<u32> {
+        uint(self.get(k).ok_or_else(|| schema_err("an attribute missing"))?)
+    }
+    fn opt(&self, k: &str) -> Result<Option<u32>> {
+        self.get(k).map(uint).transpose()
+    }
+    fn flag(&self, k: &str) -> bool {
+        matches!(self.get(k), Some(OwnedValue::Bool(true)))
+    }
+    fn kid(&self, k: &str) -> Option<&Node> {
+        self.kids.iter().find(|n| n.name == k)
+    }
+    fn numbers(&self) -> Result<Vec<u32>> {
+        match &self.text {
+            None => Ok(Vec::new()),
+            Some(OwnedValue::List(items)) => items.iter().map(uint).collect(),
+            Some(_) => Err(schema_err("a list of numbers expected")),
+        }
+    }
+}
+
+/// Reads an EXIG document; [`Doc::to_model`] and [`Model::build`] check
+/// it.
+fn read_doc(g: &GrammarSet, exig: &[u8], limits: Limits) -> Result<Doc> {
     let strings = GlobalStrings::new(GlobalConfig::new())?;
     let grammars = g.attach(&strings)?;
     let mut r: Reader =
         Reader::new(ReaderConfig::new(&grammars).limits(limits))?;
-    let mut events = Vec::new();
+    // The strict EXIG grammars hold the document to the EXIG schema, so
+    // this only collects it into a tree.
+    let mut stack: Vec<Node> = alloc::vec![Node::default()];
     let mut rest = exig;
     loop {
         rest = &rest[r.feed(rest)..];
@@ -723,7 +1653,29 @@ fn read_model(g: &GrammarSet, exig: &[u8], limits: Limits) -> Result<Model> {
             r.end_input();
         }
         match r.next()? {
-            Step::Event(e, _) => events.push(e.to_owned()),
+            Step::Event(e, _) => match e.to_owned() {
+                OwnedEvent::StartElement(n) => stack.push(Node {
+                    name: n.as_name().local_name().to_string(),
+                    ..Node::default()
+                }),
+                OwnedEvent::Attribute(n, v) => stack
+                    .last_mut()
+                    .expect("open")
+                    .attrs
+                    .push((n.as_name().local_name().to_string(), v)),
+                OwnedEvent::Characters(v) => {
+                    stack.last_mut().expect("open").text = Some(v)
+                }
+                OwnedEvent::EndElement(_) => {
+                    let done = stack.pop().expect("open");
+                    stack
+                        .last_mut()
+                        .ok_or_else(|| schema_err("unbalanced"))?
+                        .kids
+                        .push(done);
+                }
+                _ => {}
+            },
             Step::NeedInput if rest.is_empty() => {
                 return Err(Error::new(
                     ErrorKind::Truncated,
@@ -743,7 +1695,11 @@ fn read_model(g: &GrammarSet, exig: &[u8], limits: Limits) -> Result<Model> {
             "an .exig that is not strict",
         ));
     }
-    parse_events(&events)
+    let root = stack
+        .pop()
+        .and_then(|mut n| n.kids.pop())
+        .ok_or_else(|| schema_err("an empty .exig"))?;
+    doc_of(&root)
 }
 
 fn uint(v: &OwnedValue) -> Result<u32> {
@@ -763,200 +1719,207 @@ fn text(v: &OwnedValue) -> Result<String> {
     }
 }
 
-/// The model of a decoded EXIG document's events. The strict grammars
-/// already hold the document to the EXIG schema, so this only collects.
-fn parse_events(events: &[OwnedEvent]) -> Result<Model> {
-    let mut m = Model::default();
-    // The open elements, by local name.
-    let mut path: Vec<String> = Vec::new();
-    let mut facts = SimpleFacts::default();
-    let mut ty = TypeModel {
-        name: None,
-        castable: false,
-        casts: Vec::new(),
-        states: Vec::new(),
+fn node_text(n: &Node) -> Result<String> {
+    n.text.as_ref().map_or(Ok(String::new()), text)
+}
+
+fn doc_of(root: &Node) -> Result<Doc> {
+    let mut d = Doc {
+        schema_id: root.get("schemaId").map(text).transpose()?,
+        builtin_types: root.flag("builtinTypes"),
+        all_global: root.flag("allGlobal"),
+        ..Doc::default()
     };
-    let mut tname: (Option<String>, Option<String>) = (None, None);
-    let mut prod: Vec<(String, OwnedValue)> = Vec::new();
-    let mut elem: Vec<(String, OwnedValue)> = Vec::new();
-    for e in events {
-        match e {
-            OwnedEvent::StartElement(n) => {
-                let local = n.as_name().local_name().to_string();
-                match local.as_str() {
-                    "simpleType" => facts = SimpleFacts::default(),
-                    "type" => {
-                        ty = TypeModel {
-                            name: None,
-                            castable: false,
-                            casts: Vec::new(),
-                            states: Vec::new(),
-                        };
-                        tname = (None, None);
-                    }
-                    "state" => ty.states.push(Vec::new()),
-                    "production" => prod.clear(),
-                    "element" => elem.clear(),
-                    "uri" => m.strings.push((String::new(), Vec::new())),
-                    _ => {}
+    for k in &root.kids {
+        match k.name.as_str() {
+            "strings" => {
+                for u in &k.kids {
+                    let uri = text(u.get("value").ok_or_else(|| {
+                        schema_err("a URI without a value")
+                    })?)?;
+                    let locals =
+                        u.kids.iter().map(node_text).collect::<Result<_>>()?;
+                    d.strings.push((uri, locals));
                 }
-                path.push(local);
             }
-            OwnedEvent::Attribute(n, v) => {
-                let a = n.as_name().local_name();
-                match path.last().map(String::as_str) {
-                    Some("grammars") if a == "schemaId" => {
-                        m.schema_id = Some(text(v)?)
-                    }
-                    Some("uri") if a == "value" => {
-                        m.strings.last_mut().expect("pushed").0 = text(v)?
-                    }
-                    Some("simpleType") => match a {
-                        "representation" => facts.rep = text(v)?,
-                        "minInclusive" | "maxInclusive" => {
-                            let OwnedValue::Int(i) = v else {
-                                return Err(schema_err("a number expected"));
-                            };
-                            if a == "minInclusive" {
-                                facts.min = Some(*i);
-                            } else {
-                                facts.max = Some(*i);
+            "simpleTypes" => {
+                for s in &k.kids {
+                    d.simple.push(simple_of(s)?);
+                }
+            }
+            "elementSets" => {
+                for s in &k.kids {
+                    d.sets.push(s.numbers()?);
+                }
+            }
+            "attributes" => {
+                for a in &k.kids {
+                    d.pool.push(AttrUse {
+                        uri: a.uint("uri")?,
+                        local: a.uint("local")?,
+                        ty: a.uint("type")?,
+                        required: a.flag("required"),
+                    });
+                }
+            }
+            "attributeSet" => d.shared = Some(k.numbers()?),
+            "types" => {
+                for t in &k.kids {
+                    d.types.push(type_of(t)?);
+                }
+            }
+            "elements" => {
+                for e in &k.kids {
+                    d.elements.push((
+                        e.uint("uri")?,
+                        e.uint("local")?,
+                        e.uint("type")?,
+                        e.flag("nillable"),
+                    ));
+                }
+            }
+            "global" => d.globals.push(uint(
+                k.text
+                    .as_ref()
+                    .ok_or_else(|| schema_err("an empty global"))?,
+            )?),
+            _ => {}
+        }
+    }
+    Ok(d)
+}
+
+fn simple_of(s: &Node) -> Result<Representation> {
+    use DateTimeKind::*;
+    let bad = || {
+        schema_err("a simple type whose facets do not fit its representation")
+    };
+    let long = |k: &str| match s.get(k) {
+        Some(OwnedValue::Int(i)) => Ok(*i),
+        _ => Err(bad()),
+    };
+    Ok(match s.name.as_str() {
+        "string" => Representation::String {
+            charset: s
+                .kid("charset")
+                .map(|c| node_text(c).map(|t| t.chars().collect()))
+                .transpose()?,
+        },
+        "boolean" => Representation::Boolean { pattern: false },
+        "booleanPattern" => Representation::Boolean { pattern: true },
+        "integer" => Representation::Integer(IntegerRep::Signed),
+        "unsignedInteger" => Representation::Integer(IntegerRep::Unsigned),
+        "boundedInteger" => Representation::Integer(IntegerRep::Bounded {
+            min: long("minInclusive")?,
+            max: long("maxInclusive")?,
+        }),
+        "decimal" => Representation::Decimal,
+        "float" => Representation::Float,
+        "hexBinary" => Representation::Binary(BinaryKind::Hex),
+        "base64Binary" => Representation::Binary(BinaryKind::Base64),
+        "gYear" => Representation::DateTime(GYear),
+        "gYearMonth" => Representation::DateTime(GYearMonth),
+        "date" => Representation::DateTime(Date),
+        "dateTime" => Representation::DateTime(DateTime),
+        "gMonth" => Representation::DateTime(GMonth),
+        "gMonthDay" => Representation::DateTime(GMonthDay),
+        "gDay" => Representation::DateTime(GDay),
+        "time" => Representation::DateTime(Time),
+        "list" => Representation::List(SimpleTypeId(s.uint("itemType")?)),
+        "enumeration" => Representation::Enumeration {
+            values: s
+                .kids
+                .iter()
+                .map(|v| node_text(v).map(Box::from))
+                .collect::<Result<Vec<Box<str>>>>()?
+                .into(),
+            base: SimpleTypeId(s.uint("base")?),
+        },
+        _ => return Err(bad()),
+    })
+}
+
+fn type_of(t: &Node) -> Result<DType> {
+    let name = match (t.opt("uri")?, t.opt("local")?) {
+        (Some(u), Some(l)) => Some((u, l)),
+        (None, None) => None,
+        _ => {
+            return Err(schema_err(
+                "a type name without its URI or local name",
+            ));
+        }
+    };
+    let mut d = DType {
+        name,
+        castable: t.flag("castable"),
+        base: t.opt("base")?,
+        attrs: None,
+        wild: Vec::new(),
+        content: DContent::Empty,
+    };
+    for k in &t.kids {
+        match k.name.as_str() {
+            "attributes" => {
+                d.attrs = Some((k.get("set").is_some(), k.numbers()?))
+            }
+            "anyAttribute" => d.wild.push(k.opt("uri")?),
+            "empty" => d.content = DContent::Empty,
+            "scalar" => d.content = DContent::Scalar(k.uint("type")?),
+            "content" => {
+                let mut states = Vec::with_capacity(k.kids.len());
+                for s in &k.kids {
+                    let mut ps = Vec::with_capacity(s.kids.len());
+                    for p in &s.kids {
+                        let next = p.opt("next")?;
+                        ps.push(match p.name.as_str() {
+                            "se" => {
+                                DProd::Se { element: p.uint("element")?, next }
                             }
-                        }
-                        "itemType" => facts.item = Some(uint(v)?),
-                        "base" => facts.base = Some(uint(v)?),
-                        _ => {}
-                    },
-                    Some("type") => match a {
-                        "uri" => tname.0 = Some(text(v)?),
-                        "local" => tname.1 = Some(text(v)?),
-                        "castable" => {
-                            ty.castable = matches!(v, OwnedValue::Bool(true))
-                        }
-                        _ => {}
-                    },
-                    Some("production") => {
-                        prod.push((a.to_string(), v.clone()))
-                    }
-                    Some("element") => elem.push((a.to_string(), v.clone())),
-                    _ => {}
-                }
-            }
-            OwnedEvent::Characters(v) => match path.last().map(String::as_str)
-            {
-                Some("local") => m
-                    .strings
-                    .last_mut()
-                    .ok_or_else(|| schema_err("a local name outside a URI"))?
-                    .1
-                    .push(text(v)?),
-                Some("enumeration") => facts.values.push(text(v)?.into()),
-                Some("charset") => facts.charset = Some(text(v)?),
-                Some("cast") => ty.casts.push(uint(v)?),
-                Some("global") => m.globals.push(uint(v)?),
-                _ => {}
-            },
-            OwnedEvent::EndElement(_) => {
-                let local = path.pop().unwrap_or_default();
-                match local.as_str() {
-                    "simpleType" => {
-                        m.simple.push(rep_from(core::mem::take(&mut facts))?)
-                    }
-                    "type" => {
-                        ty.name = match core::mem::take(&mut tname) {
-                            (Some(u), Some(l)) => Some(OwnedName::new(&u, &l)),
-                            (None, None) => None,
+                            "seSet" => {
+                                DProd::SeSet { set: p.uint("set")?, next }
+                            }
+                            "seUri" => {
+                                DProd::SeUri { uri: p.uint("uri")?, next }
+                            }
+                            "seAny" => DProd::SeAny { next },
+                            "ee" => DProd::EE,
+                            "ch" => DProd::Ch { ty: p.uint("type")?, next },
+                            "at" => DProd::At {
+                                uri: p.uint("uri")?,
+                                local: p.uint("local")?,
+                                ty: p.uint("type")?,
+                                next,
+                            },
+                            "atUri" => {
+                                DProd::AtUri { uri: p.uint("uri")?, next }
+                            }
+                            "atAny" => DProd::AtAny { next },
                             _ => {
                                 return Err(schema_err(
-                                    "a type name without its URI or local name",
+                                    "an unknown production",
                                 ));
                             }
-                        };
-                        m.types.push(core::mem::replace(
-                            &mut ty,
-                            TypeModel {
-                                name: None,
-                                castable: false,
-                                casts: Vec::new(),
-                                states: Vec::new(),
-                            },
-                        ));
+                        });
                     }
-                    "production" => {
-                        let p = production(&prod)?;
-                        ty.states
-                            .last_mut()
-                            .ok_or_else(|| {
-                                schema_err("a production outside a state")
-                            })?
-                            .push(p);
-                    }
-                    "element" => {
-                        let get = |k: &str| {
-                            elem.iter().find(|(n, _)| n == k).map(|(_, v)| v)
-                        };
-                        let name = OwnedName::new(
-                            &text(get("uri").ok_or_else(|| {
-                                schema_err("an element without a URI")
-                            })?)?,
-                            &text(get("local").ok_or_else(|| {
-                                schema_err("an element without a name")
-                            })?)?,
-                        );
-                        let t = uint(get("type").ok_or_else(|| {
-                            schema_err("an element without a type")
-                        })?)?;
-                        m.elements.push((
-                            name,
-                            t,
-                            matches!(
-                                get("nillable"),
-                                Some(OwnedValue::Bool(true))
-                            ),
-                        ));
-                    }
-                    _ => {}
+                    states.push(ps);
                 }
+                d.content = DContent::States(states);
             }
             _ => {}
         }
     }
-    Ok(m)
-}
-
-fn production(a: &[(String, OwnedValue)]) -> Result<Prod> {
-    let get = |k: &str| a.iter().find(|(n, _)| n == k).map(|(_, v)| v);
-    let need = |k: &str| {
-        get(k).ok_or_else(|| {
-            schema_err("a production without an attribute its event needs")
-        })
-    };
-    let next = || uint(need("next")?);
-    let event = text(need("event")?)?;
-    Ok(match event.as_str() {
-        "AT" => Prod::At {
-            name: OwnedName::new(&text(need("uri")?)?, &text(need("local")?)?),
-            ty: SimpleTypeId(uint(need("type")?)?),
-            next: next()?,
-        },
-        "ATuri" => {
-            Prod::AtUri { uri: text(need("uri")?)?.into(), next: next()? }
+    if let Some((true, _)) = &d.attrs {
+        // `set` names the one shared set.
+        if t.kid("attributes")
+            .and_then(|a| a.get("set"))
+            .map(uint)
+            .transpose()?
+            != Some(0)
+        {
+            return Err(schema_err("an attribute set that does not exist"));
         }
-        "ATany" => Prod::AtAny { next: next()? },
-        "SE" => Prod::Se {
-            element: ElementId(uint(need("element")?)?),
-            next: next()?,
-        },
-        "SEuri" => {
-            Prod::SeUri { uri: text(need("uri")?)?.into(), next: next()? }
-        }
-        "SEany" => Prod::SeAny { next: next()? },
-        "EE" => Prod::EE,
-        "CH" => {
-            Prod::Ch { ty: SimpleTypeId(uint(need("type")?)?), next: next()? }
-        }
-        _ => return Err(schema_err("an unknown event")),
-    })
+    }
+    Ok(d)
 }
 
 // =======================================================================================
@@ -981,10 +1944,7 @@ pub(crate) fn render_tables(m: &Model) -> String {
     ));
     let q = |s: &str| format!("{s:?}");
     let name = |n: &OwnedName| format!("n({}, {})", q(&n.uri), q(&n.local));
-    let _ = writeln!(
-        o,
-        "//! Generated from `schemas/exig-1.xsd` by"
-    );
+    let _ = writeln!(o, "//! Generated from `schemas/exig-1.xsd` by");
     let _ = writeln!(
         o,
         "//! `cargo test --features xsd exig_tables -- --ignored` (EXIG_REGEN=1 writes this file)."

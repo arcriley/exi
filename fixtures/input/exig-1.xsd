@@ -7,14 +7,33 @@
   An .exig file is an EXIG document encoded as EXI: schema-informed under this schema,
   strict, byte-aligned, with the options in the header.
 
-  Numbers are positions: simple types, types and elements are numbered from 0 in document
-  order, and states from 0 within their type. Everything is listed in a canonical order, so
-  equal grammars give equal documents:
-    - types: named ones sorted by URI then local name, then anonymous ones in the order a
-      depth-first walk first reaches them (global elements sorted by local name then URI,
-      then the named types; within a type, states in order, productions in order);
+  The document gives what EXI derives grammars from, and the reader derives the rest:
+
+    - Names are numbers into the initial string table EXI builds for the grammars
+      (EXI §7.3.1, Appendix D): the fixed entries plus those under <strings>, each
+      partition sorted. A name is a URI number and a local-name number within that URI.
+    - Built-in types: with builtinTypes="true", simple types 0-45 and types 0-45 are the
+      XML Schema built-in types, in the order this schema's own grammars give them (the
+      reference table), and the lists below continue from 46.
+    - A named type gives its base type; the types xsi:type may name for a type are the
+      named types derived from it, directly or not.
+    - A type's attribute uses come from the attribute pool, in EXI order; the attribute
+      states are derived from them and the attribute wildcards (EXI §8.5.4.1.3.1): one
+      state per attribute use, offering it and each later one up to the first required
+      one, then the wildcards (to the same state), then, when no required use remains,
+      the content start. With a wildcard there is one more state, after every use.
+    - Content states are numbered breadth-first from the content start (state 0). A
+      production without next goes to the state it is in. A type whose grammar does not
+      have this shape lists no attributes and gives every state as a content state.
+    - The type grammar is then numbered breadth-first from state 0, following
+      productions in order; states nothing reaches are left out.
+
+  Everything is in a canonical order, so equal grammars give equal documents:
+    - types: the built-in types, then other named types sorted by URI then local name,
+      then anonymous types in the order a depth-first walk first reaches them (global
+      elements sorted by local name then URI, then the named types);
     - elements and simple types: in the order the same walk first reaches them;
-    - states: in breadth-first order from state 0, following productions in order;
+    - attribute pool: by local name, then URI, type and required;
     - productions: in event-code order (EXI §8.5.4.3).
   Only strict grammars are written: a receiver adds the productions of non-strict streams
   as EXI §8.5.4.4 specifies.
@@ -28,22 +47,76 @@
   <xs:element name="grammars">
     <xs:complexType>
       <xs:sequence>
-        <!-- The initial string table beyond the entries EXI always has (EXI §7.3.1, App. D). -->
+        <!-- The initial string table beyond the entries EXI always has. -->
         <xs:element name="strings" type="g:Strings"/>
-        <xs:element name="simpleType" type="g:SimpleType" minOccurs="0" maxOccurs="unbounded"/>
-        <xs:element name="type" type="g:Type" maxOccurs="unbounded"/>
-        <xs:element name="element" type="g:Element" minOccurs="0" maxOccurs="unbounded"/>
-        <!-- The global element declarations: the SE(qname) productions of DocContent. -->
+        <!-- Simple types after the built-in ones. -->
+        <xs:element name="simpleTypes" type="g:SimpleTypes"/>
+        <!-- Ordered lists of element declarations, used by seSet. -->
+        <xs:element name="elementSets">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="set" type="g:Numbers" minOccurs="0" maxOccurs="unbounded"/>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+        <!-- Attribute uses, referred to by number. -->
+        <xs:element name="attributes">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="attribute" minOccurs="0" maxOccurs="unbounded">
+                <xs:complexType>
+                  <xs:attribute name="uri" type="xs:unsignedInt" use="required"/>
+                  <xs:attribute name="local" type="xs:unsignedInt" use="required"/>
+                  <xs:attribute name="type" type="xs:unsignedInt" use="required"/>
+                  <xs:attribute name="required" type="xs:boolean"/>
+                </xs:complexType>
+              </xs:element>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+        <!-- Attribute uses many types share; a type adds them with set="0". -->
+        <xs:element name="attributeSet" type="g:Numbers" minOccurs="0"/>
+        <!-- Types after the built-in ones. -->
+        <xs:element name="types">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="type" type="g:Type" minOccurs="0" maxOccurs="unbounded"/>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+        <xs:element name="elements">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="element" minOccurs="0" maxOccurs="unbounded">
+                <xs:complexType>
+                  <xs:attribute name="uri" type="xs:unsignedInt" use="required"/>
+                  <xs:attribute name="local" type="xs:unsignedInt" use="required"/>
+                  <xs:attribute name="type" type="xs:unsignedInt" use="required"/>
+                  <xs:attribute name="nillable" type="xs:boolean"/>
+                </xs:complexType>
+              </xs:element>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+        <!-- The global element declarations, unless allGlobal. -->
         <xs:element name="global" type="xs:unsignedInt" minOccurs="0" maxOccurs="unbounded"/>
       </xs:sequence>
       <!-- The schemaId the grammars are published under (EXI §5.4), when there is one. -->
       <xs:attribute name="schemaId" type="xs:string"/>
+      <!-- The XML Schema built-in types come first and are not listed. -->
+      <xs:attribute name="builtinTypes" type="xs:boolean"/>
+      <!-- Every element declaration is global, in order of local name then URI. -->
+      <xs:attribute name="allGlobal" type="xs:boolean"/>
     </xs:complexType>
   </xs:element>
 
+  <xs:simpleType name="Numbers">
+    <xs:list itemType="xs:unsignedInt"/>
+  </xs:simpleType>
+
   <xs:complexType name="Strings">
     <xs:sequence>
-      <!-- URIs in table order; for each, its local names in table order. -->
+      <!-- URIs; for each, its local names. -->
       <xs:element name="uri" minOccurs="0" maxOccurs="unbounded">
         <xs:complexType>
           <xs:sequence>
@@ -55,99 +128,157 @@
     </xs:sequence>
   </xs:complexType>
 
-  <!-- How a simple type's values are coded (EXI §7.1, §7.2): only what changes the coding. -->
-  <xs:complexType name="SimpleType">
-    <xs:sequence>
-      <!-- Enumeration values, in ordinal order. -->
-      <xs:element name="enumeration" type="xs:string" minOccurs="0" maxOccurs="unbounded"/>
-      <!-- A restricted character set (EXI §7.1.10.1): its characters, sorted. -->
-      <xs:element name="charset" type="xs:string" minOccurs="0"/>
-    </xs:sequence>
-    <xs:attribute name="representation" type="g:Representation" use="required"/>
-    <!-- boundedInteger -->
-    <xs:attribute name="minInclusive" type="xs:long"/>
-    <xs:attribute name="maxInclusive" type="xs:long"/>
-    <!-- list: the item type; enumeration: the type its values are of. -->
-    <xs:attribute name="itemType" type="xs:unsignedInt"/>
-    <xs:attribute name="base" type="xs:unsignedInt"/>
-  </xs:complexType>
-
-  <xs:simpleType name="Representation">
-    <xs:restriction base="xs:string">
-      <xs:enumeration value="string"/>
-      <xs:enumeration value="boolean"/>
-      <xs:enumeration value="booleanPattern"/>
-      <xs:enumeration value="integer"/>
-      <xs:enumeration value="unsignedInteger"/>
-      <xs:enumeration value="boundedInteger"/>
-      <xs:enumeration value="decimal"/>
-      <xs:enumeration value="float"/>
-      <xs:enumeration value="hexBinary"/>
-      <xs:enumeration value="base64Binary"/>
-      <xs:enumeration value="gYear"/>
-      <xs:enumeration value="gYearMonth"/>
-      <xs:enumeration value="date"/>
-      <xs:enumeration value="dateTime"/>
-      <xs:enumeration value="gMonth"/>
-      <xs:enumeration value="gMonthDay"/>
-      <xs:enumeration value="gDay"/>
-      <xs:enumeration value="time"/>
-      <xs:enumeration value="list"/>
-      <xs:enumeration value="enumeration"/>
-    </xs:restriction>
-  </xs:simpleType>
-
-  <!-- A type grammar (EXI §8.5.4.1.3): its states, and the xsi:type targets it allows. -->
-  <xs:complexType name="Type">
-    <xs:sequence>
-      <xs:element name="state" maxOccurs="unbounded">
+  <!-- One element per EXI datatype representation (EXI §7.1, §7.2). -->
+  <xs:complexType name="SimpleTypes">
+    <xs:choice minOccurs="0" maxOccurs="unbounded">
+      <xs:element name="string">
         <xs:complexType>
           <xs:sequence>
-            <xs:element name="production" type="g:Production" maxOccurs="unbounded"/>
+            <!-- A restricted character set (EXI §7.1.10.1): its characters, sorted. -->
+            <xs:element name="charset" type="xs:string" minOccurs="0"/>
           </xs:sequence>
         </xs:complexType>
       </xs:element>
-      <!-- Named types other than this one that xsi:type may name for it. -->
-      <xs:element name="cast" type="xs:unsignedInt" minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="boolean" type="g:Empty"/>
+      <xs:element name="booleanPattern" type="g:Empty"/>
+      <xs:element name="integer" type="g:Empty"/>
+      <xs:element name="unsignedInteger" type="g:Empty"/>
+      <xs:element name="boundedInteger">
+        <xs:complexType>
+          <xs:attribute name="minInclusive" type="xs:long" use="required"/>
+          <xs:attribute name="maxInclusive" type="xs:long" use="required"/>
+        </xs:complexType>
+      </xs:element>
+      <xs:element name="decimal" type="g:Empty"/>
+      <xs:element name="float" type="g:Empty"/>
+      <xs:element name="hexBinary" type="g:Empty"/>
+      <xs:element name="base64Binary" type="g:Empty"/>
+      <xs:element name="gYear" type="g:Empty"/>
+      <xs:element name="gYearMonth" type="g:Empty"/>
+      <xs:element name="date" type="g:Empty"/>
+      <xs:element name="dateTime" type="g:Empty"/>
+      <xs:element name="gMonth" type="g:Empty"/>
+      <xs:element name="gMonthDay" type="g:Empty"/>
+      <xs:element name="gDay" type="g:Empty"/>
+      <xs:element name="time" type="g:Empty"/>
+      <xs:element name="list">
+        <xs:complexType>
+          <xs:attribute name="itemType" type="xs:unsignedInt" use="required"/>
+        </xs:complexType>
+      </xs:element>
+      <!-- Values in ordinal order; base is the simple type the values are of. -->
+      <xs:element name="enumeration">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="value" type="xs:string" minOccurs="0" maxOccurs="unbounded"/>
+          </xs:sequence>
+          <xs:attribute name="base" type="xs:unsignedInt" use="required"/>
+        </xs:complexType>
+      </xs:element>
+    </xs:choice>
+  </xs:complexType>
+
+  <xs:complexType name="Empty"/>
+
+  <xs:complexType name="Type">
+    <xs:sequence>
+      <!-- Attribute uses: numbers into the pool, ascending; set="0" adds the shared set. -->
+      <xs:element name="attributes" minOccurs="0">
+        <xs:complexType>
+          <xs:simpleContent>
+            <xs:extension base="g:Numbers">
+              <xs:attribute name="set" type="xs:unsignedInt"/>
+            </xs:extension>
+          </xs:simpleContent>
+        </xs:complexType>
+      </xs:element>
+      <!-- Attribute wildcards: AT(*) without uri, AT(uri:*) with one. -->
+      <xs:element name="anyAttribute" minOccurs="0" maxOccurs="unbounded">
+        <xs:complexType>
+          <xs:attribute name="uri" type="xs:unsignedInt"/>
+        </xs:complexType>
+      </xs:element>
+      <xs:choice>
+        <!-- Content that is only EE. -->
+        <xs:element name="empty" type="g:Empty"/>
+        <!-- Content that is CH of one simple type, then EE. -->
+        <xs:element name="scalar">
+          <xs:complexType>
+            <xs:attribute name="type" type="xs:unsignedInt" use="required"/>
+          </xs:complexType>
+        </xs:element>
+        <xs:element name="content">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="state" type="g:State" maxOccurs="unbounded"/>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+      </xs:choice>
     </xs:sequence>
     <!-- A named type's name. -->
-    <xs:attribute name="uri" type="xs:string"/>
-    <xs:attribute name="local" type="xs:string"/>
+    <xs:attribute name="uri" type="xs:unsignedInt"/>
+    <xs:attribute name="local" type="xs:unsignedInt"/>
     <!-- Strict adds AT(xsi:type) to elements of this type (EXI §8.5.4.4.1). -->
     <xs:attribute name="castable" type="xs:boolean"/>
+    <!-- The named type this one derives from. -->
+    <xs:attribute name="base" type="xs:unsignedInt"/>
   </xs:complexType>
 
-  <xs:complexType name="Production">
-    <xs:attribute name="event" type="g:Event" use="required"/>
-    <!-- AT: the attribute's name; ATuri and SEuri: the URI. -->
-    <xs:attribute name="uri" type="xs:string"/>
-    <xs:attribute name="local" type="xs:string"/>
-    <!-- AT and CH: the value's simple type. -->
-    <xs:attribute name="type" type="xs:unsignedInt"/>
-    <!-- SE: the element declaration. -->
-    <xs:attribute name="element" type="xs:unsignedInt"/>
-    <!-- Every event but EE: the state that follows. -->
-    <xs:attribute name="next" type="xs:unsignedInt"/>
-  </xs:complexType>
-
-  <xs:simpleType name="Event">
-    <xs:restriction base="xs:string">
-      <xs:enumeration value="AT"/>
-      <xs:enumeration value="ATuri"/>
-      <xs:enumeration value="ATany"/>
-      <xs:enumeration value="SE"/>
-      <xs:enumeration value="SEuri"/>
-      <xs:enumeration value="SEany"/>
-      <xs:enumeration value="EE"/>
-      <xs:enumeration value="CH"/>
-    </xs:restriction>
-  </xs:simpleType>
-
-  <!-- An element declaration: its grammar is its type's, with xsi:nil when nillable. -->
-  <xs:complexType name="Element">
-    <xs:attribute name="uri" type="xs:string" use="required"/>
-    <xs:attribute name="local" type="xs:string" use="required"/>
-    <xs:attribute name="type" type="xs:unsignedInt" use="required"/>
-    <xs:attribute name="nillable" type="xs:boolean"/>
+  <!-- A state's productions, in event-code order. -->
+  <xs:complexType name="State">
+    <xs:choice maxOccurs="unbounded">
+      <xs:element name="se">
+        <xs:complexType>
+          <xs:attribute name="element" type="xs:unsignedInt" use="required"/>
+          <xs:attribute name="next" type="xs:unsignedInt"/>
+        </xs:complexType>
+      </xs:element>
+      <!-- SE for each element of a set, in its order, all to the same state. -->
+      <xs:element name="seSet">
+        <xs:complexType>
+          <xs:attribute name="set" type="xs:unsignedInt" use="required"/>
+          <xs:attribute name="next" type="xs:unsignedInt"/>
+        </xs:complexType>
+      </xs:element>
+      <xs:element name="seUri">
+        <xs:complexType>
+          <xs:attribute name="uri" type="xs:unsignedInt" use="required"/>
+          <xs:attribute name="next" type="xs:unsignedInt"/>
+        </xs:complexType>
+      </xs:element>
+      <xs:element name="seAny">
+        <xs:complexType>
+          <xs:attribute name="next" type="xs:unsignedInt"/>
+        </xs:complexType>
+      </xs:element>
+      <xs:element name="ee" type="g:Empty"/>
+      <xs:element name="ch">
+        <xs:complexType>
+          <xs:attribute name="type" type="xs:unsignedInt" use="required"/>
+          <xs:attribute name="next" type="xs:unsignedInt"/>
+        </xs:complexType>
+      </xs:element>
+      <!-- Attribute events, only in types given state by state. -->
+      <xs:element name="at">
+        <xs:complexType>
+          <xs:attribute name="uri" type="xs:unsignedInt" use="required"/>
+          <xs:attribute name="local" type="xs:unsignedInt" use="required"/>
+          <xs:attribute name="type" type="xs:unsignedInt" use="required"/>
+          <xs:attribute name="next" type="xs:unsignedInt"/>
+        </xs:complexType>
+      </xs:element>
+      <xs:element name="atUri">
+        <xs:complexType>
+          <xs:attribute name="uri" type="xs:unsignedInt" use="required"/>
+          <xs:attribute name="next" type="xs:unsignedInt"/>
+        </xs:complexType>
+      </xs:element>
+      <xs:element name="atAny">
+        <xs:complexType>
+          <xs:attribute name="next" type="xs:unsignedInt"/>
+        </xs:complexType>
+      </xs:element>
+    </xs:choice>
   </xs:complexType>
 </xs:schema>

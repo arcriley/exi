@@ -97,8 +97,8 @@ The defaults are `std`, `xml`, `bit-packed` and `compression`.
 
 ## C
 
-With the `capi` feature, exi builds as `libexi.so`. `include/exi_dom.h` declares the
-document tree, and `include/exi_libxml_compat.h` maps libxml2's tree API onto it. The
+With the `capi` feature, exi builds as `libexi.so`. `include/exi.h` declares the
+reader, writer and grammar API, `include/exi_dom.h` the document tree, and `include/exi_libxml_compat.h` maps libxml2's tree API onto it. The
 C ABI is at version 0.11 and is not frozen.
 
 ## Building and testing

@@ -317,6 +317,7 @@ pub struct Float {
     pub exponent: i16,
 }
 
+/// cbindgen:ignore
 impl Float {
     pub const SPECIAL_EXPONENT: i16 = -16384;
     pub const MAX_EXPONENT: i16 = 16383;

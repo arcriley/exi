@@ -118,6 +118,7 @@ pub mod canonical;
 #[cfg(feature = "capi")]
 pub mod capi;
 pub mod coding;
+/// cbindgen:ignore
 #[cfg(feature = "dom")]
 pub mod dom;
 mod engine;

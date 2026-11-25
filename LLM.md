@@ -177,14 +177,15 @@ Findings so far (synthetic XMPP data):
   `ErrorKind`.
 - Strings are `exi_str { ptr, len }`, UTF-8. Strings libexi returns also end with a NUL
   that `len` does not count.
-- `include/exi.h` does not exist yet. It is to be generated from `src/capi/mod.rs` by
-  cbindgen and committed.
+- `include/exi.h` is generated from `src/capi/mod.rs` by cbindgen and committed:
+  `cbindgen --config cbindgen.toml --crate exi -o include/exi.h`. `tests/c_api.rs`
+  fails when it is out of date. The `dom` modules and `impl Float` are marked
+  `cbindgen:ignore`.
 
 ## Unfinished work
 
 ### In the code
 
-- `include/exi.h`: generate with cbindgen and commit.
 - Start-tag reader mode (`ReaderConfig::start_tag`) returns `ErrorKind::Unsupported`.
 - These options or streams return `ErrorKind::Unsupported`:
   - `schemaId ""` (built-in types only);

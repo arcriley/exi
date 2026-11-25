@@ -8,10 +8,10 @@
 // are welcome only if this notice remains unchanged clearly
 // communicating that changes are made under these same conditions.
 //
-//! `include/exi.h` is to be generated from this module by cbindgen and
-//! committed (not yet done). Names, numbers and layouts here are the
-//! ABI. Layer 2, the document tree, is [`dom`], declared by the
-//! hand-written `include/exi_dom.h`.
+//! `include/exi.h` is generated from this module by cbindgen
+//! (`cbindgen.toml`) and committed; `tests/c_api.rs` checks it.
+//! Names, numbers and layouts here are the ABI. Layer 2, the document
+//! tree, is [`dom`], declared by the hand-written `include/exi_dom.h`.
 //!
 //! # Conventions
 //!
@@ -61,6 +61,7 @@
 
 use core::ffi::{c_char, c_int, c_void};
 
+/// cbindgen:ignore
 #[cfg(feature = "dom")]
 pub mod dom;
 mod imp;

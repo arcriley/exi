@@ -13,6 +13,8 @@
 //!     cargo bench --bench device --no-default-features --features
 //! std,bit-packed
 //!
+//! Add `-- --server` to measure many streams sharing one attachment.
+//!
 //! Heap figures count live requested Rust allocation bytes above each
 //! phase's starting point. They exclude inline buffers, allocator
 //! overhead, transient allocator-internal reallocation space and
@@ -127,7 +129,11 @@ fn record_live_heap() {
     }
 }
 
-fn run<T>(label: &str, mut work: impl FnMut() -> T) -> T {
+fn run<T>(label: &str, work: impl FnMut() -> T) -> T {
+    run_batch(label, 1, work)
+}
+
+fn run_batch<T>(label: &str, count: usize, mut work: impl FnMut() -> T) -> T {
     let warmup = Instant::now();
     let mut runs = 0;
     while warmup.elapsed() < Duration::from_millis(50) {
@@ -151,9 +157,10 @@ fn run<T>(label: &str, mut work: impl FnMut() -> T) -> T {
     let heap = HEAP.replace(None).unwrap();
     println!(
         "{label:34} {:>10.2} µs {:>8} B {:>8} B",
-        samples[2].as_secs_f64() * 1e6,
-        heap.peak,
-        heap.checkpoint.unwrap_or(heap.live),
+        samples[2].as_secs_f64() * 1e6 / count as f64,
+        (heap.peak as f64 / count as f64).round() as isize,
+        (heap.checkpoint.unwrap_or(heap.live) as f64 / count as f64).round()
+            as isize,
     );
     result
 }
@@ -218,7 +225,95 @@ fn decode<const N: usize>(
     }
 }
 
+fn start_stream<'g>(cfg: ReaderConfig<'g>) -> Reader<'g> {
+    let mut r = Reader::<4096>::new(cfg).unwrap();
+    assert_eq!(r.feed(&[0x80]), 1);
+    assert!(matches!(r.next().unwrap(), Step::Event(Event::StartDocument, _)));
+    r
+}
+
+fn server() {
+    let set = sensor_grammar();
+    let global = GlobalStrings::new(GlobalConfig::new()).unwrap();
+    let g = set.attach(&global).unwrap();
+    let options = Options::builder()
+        .coding(Coding::BitPacked)
+        .strict(true)
+        .value_partition_capacity(Some(0))
+        .build()
+        .unwrap();
+    let cfg = ReaderConfig::new(&g).options(options.clone());
+    let samples = [0x5A; 64];
+    let stream = encode(&g, &options, &samples);
+    let body = &stream[1..]; // The bare header was consumed during setup.
+    drop(start_stream(cfg.clone())); // Report steady-state setup with a warm attachment.
+    println!(
+        "One worker, one attachment, {} B inline reader per connection",
+        core::mem::size_of::<Reader>()
+    );
+    println!(
+        "Times and requested heap bytes are per stream; live heap includes the reader vector."
+    );
+    println!(
+        "{:34} {:>13} {:>10} {:>10}",
+        "Phase", "Median", "Peak heap", "Live at end"
+    );
+    for count in [1000, 10000] {
+        let mut readers = run_batch(
+            &format!("{count} streams: open and idle"),
+            count,
+            || {
+                let mut readers = Vec::with_capacity(count);
+                readers.extend((0..count).map(|_| start_stream(cfg.clone())));
+                readers
+            },
+        );
+        run_batch(
+            &format!("{count} streams: decode and reopen"),
+            count,
+            || {
+                for r in &mut readers {
+                    assert_eq!(r.feed(black_box(body)), body.len());
+                    r.end_input();
+                    let mut values = 0;
+                    loop {
+                        match r.next().unwrap() {
+                            Step::Event(
+                                Event::Characters(Value::Int(215)),
+                                _,
+                            ) => values += 1,
+                            Step::Event(
+                                Event::Characters(Value::Binary(data, _)),
+                                _,
+                            ) => {
+                                assert_eq!(data, samples);
+                                values += 1;
+                            }
+                            Step::Event(_, _) => {}
+                            Step::End => break,
+                            Step::NeedInput => panic!(
+                                "complete sensor stream needs more input"
+                            ),
+                        }
+                    }
+                    assert_eq!(values, 2);
+                    r.reset();
+                    assert_eq!(r.feed(&[0x80]), 1);
+                    assert!(matches!(
+                        r.next().unwrap(),
+                        Step::Event(Event::StartDocument, _)
+                    ));
+                }
+            },
+        );
+    }
+}
+
 fn main() {
+    if std::env::args().any(|arg| arg == "--server") {
+        server();
+        return;
+    }
     let set = sensor_grammar();
     assert!(set.is_closed());
     let exig = set.to_exig().unwrap();

@@ -315,6 +315,17 @@ impl Table<'_> {
     }
 }
 
+/// Content event codes, their corresponding element declarations,
+/// and the document-end event codes.
+type InformedTop = (CodeTable, Vec<Option<ElementId>>, CodeTable);
+
+/// Immutable document or fragment tables shared within a grammar
+/// attachment. A built-in fragment becomes private when it learns.
+pub(crate) struct TopTables {
+    builtin: TopLevel,
+    informed: Option<InformedTop>,
+}
+
 pub(crate) struct State<'g> {
     pub schema: Option<&'g Schema>,
     #[cfg(feature = "std")]
@@ -326,10 +337,13 @@ pub(crate) struct State<'g> {
     pub keep: Keep,
     pub limits: Limits,
     pub budget: u64,
-    builtin_top: TopLevel,
-    /// Schema-informed top level: the content table and the declaration
-    /// of each of its entries, then the DocEnd table.
-    informed_top: Option<(CodeTable, Vec<Option<ElementId>>, CodeTable)>,
+    #[cfg(feature = "std")]
+    top_tables: alloc::sync::Arc<TopTables>,
+    #[cfg(not(feature = "std"))]
+    informed_top: Option<InformedTop>,
+    /// Built-in tables owned by this stream. With std, these are needed
+    /// only inside SC or after a fragment learns.
+    builtin_top: Option<TopLevel>,
     pub top: Top,
     elems: Map<NameId, ElementGrammar>,
     pub stack: Vec<Frame>,
@@ -341,35 +355,33 @@ pub(crate) struct State<'g> {
 /// What a self-contained element moves aside: everything learned, and
 /// the open elements.
 struct Saved {
-    builtin_top: TopLevel,
+    builtin_top: Option<TopLevel>,
     top: Top,
     elems: Map<NameId, ElementGrammar>,
     stack: Vec<Frame>,
 }
 
-impl<'g> State<'g> {
-    pub fn new(
-        opts: Options,
-        g: &'g Grammars<'g>,
-        limits: Limits,
-    ) -> State<'g> {
-        let keep = Keep::from_options(&opts);
-        let schema = g.set().schema.as_ref();
+impl TopTables {
+    pub(crate) fn new(
+        schema: Option<&Schema>,
+        opts: &Options,
+        keep: Keep,
+    ) -> Self {
         let builtin_top = if opts.fragment() {
             TopLevel::fragment(keep)
         } else {
             TopLevel::document(keep)
         };
         let informed_top = schema.map(|s| {
-            let list: Vec<ElementId> = if opts.fragment() {
-                s.fragment.clone().unwrap_or_default()
+            let list = if opts.fragment() {
+                s.fragment.as_deref().unwrap_or_default()
             } else {
-                s.globals.clone()
+                &s.globals
             };
             let mut terms: Vec<Terminal> =
                 list.iter().map(|e| Terminal::SE(s.elem(*e).id)).collect();
             let mut elems: Vec<Option<ElementId>> =
-                list.into_iter().map(Some).collect();
+                list.iter().copied().map(Some).collect();
             terms.push(Terminal::SeAny);
             elems.push(None);
             if opts.fragment() {
@@ -406,6 +418,22 @@ impl<'g> State<'g> {
             }
             (pruned(&full, keep), elems, pruned(&end, keep))
         });
+        Self { builtin: builtin_top, informed: informed_top }
+    }
+}
+
+impl<'g> State<'g> {
+    pub fn new(
+        opts: Options,
+        g: &'g Grammars<'g>,
+        limits: Limits,
+    ) -> State<'g> {
+        let keep = Keep::from_options(&opts);
+        let schema = g.set().schema.as_ref();
+        #[cfg(feature = "std")]
+        let top_tables = g.top_tables(&opts, keep);
+        #[cfg(not(feature = "std"))]
+        let top_tables = TopTables::new(schema, &opts, keep);
         State {
             schema,
             #[cfg(feature = "std")]
@@ -415,8 +443,14 @@ impl<'g> State<'g> {
             keep,
             budget: limits.get_max_learned_productions(),
             limits,
-            builtin_top,
-            informed_top,
+            #[cfg(feature = "std")]
+            top_tables,
+            #[cfg(not(feature = "std"))]
+            informed_top: top_tables.informed,
+            #[cfg(feature = "std")]
+            builtin_top: None,
+            #[cfg(not(feature = "std"))]
+            builtin_top: Some(top_tables.builtin),
             top: Top::Content,
             elems: Map::with_hasher(FxBuildHasher),
             stack: Vec::new(),
@@ -448,7 +482,7 @@ impl<'g> State<'g> {
     /// starts again from the fragment grammar (built-in grammars
     /// module, "Self-contained elements").
     pub fn begin_sc(&mut self) {
-        let fresh_top = TopLevel::fragment(self.keep);
+        let fresh_top = Some(TopLevel::fragment(self.keep));
         self.saved.push(Saved {
             builtin_top: core::mem::replace(&mut self.builtin_top, fresh_top),
             top: core::mem::replace(&mut self.top, Top::Content),
@@ -490,19 +524,34 @@ impl<'g> State<'g> {
             .ok_or_else(|| internal("schema-informed frame without a schema"))
     }
 
+    fn informed_top(&self) -> Option<&InformedTop> {
+        #[cfg(feature = "std")]
+        let tables = &self.top_tables.informed;
+        #[cfg(not(feature = "std"))]
+        let tables = &self.informed_top;
+        tables.as_ref()
+    }
+
+    fn builtin_top(&self) -> &TopLevel {
+        #[cfg(feature = "std")]
+        return self.builtin_top.as_ref().unwrap_or(&self.top_tables.builtin);
+        #[cfg(not(feature = "std"))]
+        self.builtin_top.as_ref().expect("owned tables")
+    }
+
     /// The code table of the current state.
     pub fn table(&self) -> Result<Table<'_>> {
-        let informed_top =
-            if self.in_sc() { &None } else { &self.informed_top };
         let Some(f) = self.stack.last() else {
+            let informed_top =
+                if self.in_sc() { None } else { self.informed_top() };
             return Ok(match (self.top, informed_top) {
                 (Top::Done, _) => Table::Flat(&[]),
                 (Top::Content, Some((t, _, _))) => Table::Borrowed(t),
                 (Top::End, Some((_, _, end))) => Table::Borrowed(end),
                 (Top::Content, None) => {
-                    Table::Borrowed(self.builtin_top.content())
+                    Table::Borrowed(self.builtin_top().content())
                 }
-                (Top::End, None) => Table::Borrowed(self.builtin_top.end()),
+                (Top::End, None) => Table::Borrowed(self.builtin_top().end()),
             });
         };
         match f.kind {
@@ -809,7 +858,7 @@ impl<'g> State<'g> {
         match self.stack.last() {
             None if self.in_sc() => None,
             None => {
-                let (table, elems, _) = self.informed_top.as_ref()?;
+                let (table, elems, _) = self.informed_top()?;
                 let i = table.entries().iter().position(|(x, _)| *x == t)?;
                 elems[i].or_else(|| schema.global_named(id))
             }
@@ -891,7 +940,7 @@ impl<'g> State<'g> {
                     matches!(f.kind, FrameKind::Builtin { .. })
                 }) || (self.stack.is_empty()
                     && self.fragment()
-                    && (self.informed_top.is_none() || self.in_sc())));
+                    && (self.informed_top().is_none() || self.in_sc())));
         if (new_grammar as u64 + learns as u64) > self.budget {
             return Err(err(
                 ErrorKind::Limit,
@@ -909,8 +958,14 @@ impl<'g> State<'g> {
                     return Err(internal("SE after the document element"));
                 }
                 if learns {
-                    self.builtin_top
-                        .learn_fragment_se(id, &mut self.budget)?;
+                    #[cfg(feature = "std")]
+                    let table = self.builtin_top.get_or_insert_with(|| {
+                        self.top_tables.builtin.clone()
+                    });
+                    #[cfg(not(feature = "std"))]
+                    let table =
+                        self.builtin_top.as_mut().expect("owned tables");
+                    table.learn_fragment_se(id, &mut self.budget)?;
                 }
                 if !self.fragment() {
                     self.top = Top::End;
@@ -1951,5 +2006,46 @@ pub(crate) fn owned_name(
     match prefix.and_then(|p| t.prefix_str(id.uri, p)) {
         Some(p) => n.with_prefix(p),
         None => n,
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+    use crate::grammar::GrammarSet;
+    use crate::strings::{GlobalConfig, GlobalStrings};
+
+    #[test]
+    fn shared_fragment_tables_keep_learning_local() -> Result<()> {
+        let set = GrammarSet::schemaless();
+        let strings = GlobalStrings::new(GlobalConfig::new())?;
+        let grammars = set.attach(&strings)?;
+        let opts = Options::builder().fragment(true).build()?;
+        let mut first = State::new(opts.clone(), &grammars, Limits::new());
+        let second = State::new(opts, &grammars, Limits::new());
+        assert!(alloc::sync::Arc::ptr_eq(
+            &first.top_tables,
+            &second.top_tables
+        ));
+
+        let name = NameId { uri: 0, local: 0 };
+        let code = first.table()?.code(Terminal::SeAny).unwrap();
+        first.on_se(Terminal::SeAny, code, name, None)?;
+        first.on_ee()?;
+        assert_eq!(
+            first.table()?.code(Terminal::SE(name)),
+            Some(EventCode::new(&[0]))
+        );
+        assert_eq!(second.table()?.code(Terminal::SE(name)), None);
+        assert_eq!(second.table()?.code(Terminal::SeAny), Some(code));
+
+        let opts = Options::builder()
+            .fragment(true)
+            .preserve(Preserve::COMMENTS)
+            .build()?;
+        let with_comments = State::new(opts, &grammars, Limits::new());
+        assert!(with_comments.table()?.code(Terminal::CM).is_some());
+        assert!(second.table()?.code(Terminal::CM).is_none());
+        Ok(())
     }
 }

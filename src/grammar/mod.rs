@@ -258,6 +258,8 @@ impl GrammarSet {
             initial: self.entries.attach(strings)?,
             #[cfg(feature = "std")]
             tables: Default::default(),
+            #[cfg(feature = "std")]
+            tops: Default::default(),
         })
     }
 }
@@ -281,6 +283,13 @@ pub(crate) type TableCache = hashbrown::HashMap<
     rustc_hash::FxBuildHasher,
 >;
 
+#[cfg(feature = "std")]
+type TopCache = hashbrown::HashMap<
+    (bool, bool, builtin::Keep),
+    alloc::sync::Arc<crate::engine::TopTables>,
+    rustc_hash::FxBuildHasher,
+>;
+
 /// A grammar set attached to global string tables: what readers and
 /// writers borrow. Create one per grammar set and global tables, and
 /// share it among any number of sessions.
@@ -289,6 +298,8 @@ pub struct Grammars<'g> {
     initial: Initial<'g>,
     #[cfg(feature = "std")]
     tables: std::sync::Mutex<TableCache>,
+    #[cfg(feature = "std")]
+    tops: std::sync::Mutex<TopCache>,
 }
 
 impl<'g> Grammars<'g> {
@@ -302,6 +313,27 @@ impl<'g> Grammars<'g> {
     pub(crate) fn table_cache(&self) -> &std::sync::Mutex<TableCache> {
         &self.tables
     }
+    #[cfg(feature = "std")]
+    pub(crate) fn top_tables(
+        &self,
+        opts: &crate::Options,
+        keep: builtin::Keep,
+    ) -> alloc::sync::Arc<crate::engine::TopTables> {
+        // Only DT, CM and PI can change top-level productions.
+        let keep = builtin::Keep { ns: false, sc: false, ..keep };
+        let key = (opts.fragment(), opts.strict(), keep);
+        let mut tops = self.tops.lock().unwrap_or_else(|e| e.into_inner());
+        tops.entry(key)
+            .or_insert_with(|| {
+                alloc::sync::Arc::new(crate::engine::TopTables::new(
+                    self.set.schema.as_ref(),
+                    opts,
+                    keep,
+                ))
+            })
+            .clone()
+    }
+
     pub fn strings(&self) -> &'g GlobalStrings {
         self.initial.global()
     }

@@ -67,6 +67,31 @@ fn plain_document() {
     }
 }
 
+/// The project logo (`exi-logo.svg`, shown in the README) round-trips exactly in every
+/// coding this build has, and comes out smaller than its text.
+#[test]
+fn logo_svg() {
+    let svg = include_str!("../exi-logo.svg");
+    let mut codings = vec![Coding::ByteAligned];
+    if cfg!(feature = "bit-packed") {
+        codings.push(Coding::BitPacked);
+    }
+    if cfg!(feature = "compression") {
+        codings.extend([Coding::PreCompression, Coding::Compression]);
+    }
+    for coding in codings {
+        let opts = Options::builder()
+            .coding(coding)
+            .preserve(Preserve::PREFIXES | Preserve::COMMENTS)
+            .build()
+            .unwrap();
+        let (exi, back) = xml_exi_xml(svg, opts, PrefixPolicy::FromEvents, 7);
+        // Nothing after the root element is part of the document.
+        assert_eq!(back, svg.trim_end(), "{coding:?}");
+        assert!(exi.len() < svg.len(), "{coding:?}: {} octets", exi.len());
+    }
+}
+
 #[test]
 fn comments_pis_and_doctype() {
     let xml = r#"<!DOCTYPE doc [<!ENTITY e "x">]><!--c--><?pi data?><doc><!--in--><?p?>t</doc>"#;

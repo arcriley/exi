@@ -107,7 +107,15 @@ use crate::tables::SessionTables;
 use crate::value::{OwnedValue, ValueFlags};
 use crate::{Coding, ErrorKind, Limits, NameId, Options, Result};
 
+#[cfg(feature = "compression")]
+mod blocks;
+
 /// How streams follow each other (module documentation).
+///
+/// ```
+/// use exi::Sequence;
+/// assert_eq!(Sequence::default(), Sequence::Single);
+/// ```
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum Sequence {
     #[default]
@@ -117,6 +125,46 @@ pub enum Sequence {
 }
 
 /// Configuration for a [`Reader`].
+///
+/// One configuration reads every coding: the header says which. Pre-compression and
+/// compression streams arrive a block at a time.
+///
+/// ```
+/// # #[cfg(all(feature = "bit-packed", feature = "compression"))] {
+/// use exi::{Coding, EventSink, Options, OwnedEvent, Reader, ReaderConfig, Step, Writer, WriterConfig};
+/// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+/// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+/// # let set = GrammarSet::schemaless();
+/// # let grammars = set.attach(&strings)?;
+/// let read = |cfg: ReaderConfig<'_>, bytes: &[u8]| -> exi::Result<Vec<OwnedEvent>> {
+///     let mut r: Reader = Reader::new(cfg)?;
+///     r.feed(bytes);
+///     r.end_input();
+///     let mut out = Vec::new();
+///     while let Step::Event(e, _) = r.next()? { out.push(e.to_owned()); }
+///     Ok(out)
+/// };
+/// let mut seen = Vec::new();
+/// for coding in [Coding::BitPacked, Coding::ByteAligned, Coding::PreCompression, Coding::Compression] {
+///     let opts = Options::builder().coding(coding).build()?;
+///     let mut w = Writer::new(Vec::new(), WriterConfig::new(opts, &grammars))?;
+///     w.start_element("log")?;
+///     for i in 0..200 {
+///         w.start_element("entry")?;
+///         w.attribute("n", i.to_string().as_str())?;
+///         w.text("ok")?;
+///         w.end_element()?;
+///     }
+///     w.end_element()?;
+///     w.end_document()?;
+///     let events = read(ReaderConfig::new(&grammars), &w.into_sink())?;
+///     assert_eq!(events.len(), 2 + 2 + 200 * 4);
+///     seen.push(events);
+/// }
+/// assert!(seen.windows(2).all(|p| p[0] == p[1]));      // every coding, the same events
+/// # }
+/// # Ok::<(), exi::Error>(())
+/// ```
 #[derive(Clone)]
 pub struct ReaderConfig<'g> {
     grammars: &'g Grammars<'g>,
@@ -129,6 +177,29 @@ pub struct ReaderConfig<'g> {
 impl<'g> ReaderConfig<'g> {
     /// Reads streams informed by `grammars`, with the header's options,
     /// as one stream, in normal mode, with default limits.
+    ///
+    /// ```
+    /// use exi::{Coding, ErrorKind, Reader, ReaderConfig, Step};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// // <a/> with its options in the header: byte-aligned.
+    /// let mut r: Reader = Reader::new(ReaderConfig::new(&grammars))?;
+    /// r.feed(&[0xA0, 0x00, 0x4A, 0x01, 0x02, b'a', 0x00]);
+    /// r.end_input();
+    /// let mut n = 0;
+    /// while let Step::Event(..) = r.next()? { n += 1; }
+    /// assert_eq!(n, 4);                                        // SD SE EE ED
+    /// assert_eq!(r.options().unwrap().coding(), Coding::ByteAligned);
+    ///
+    /// // A bare header, and no options given: nothing says how to read the body.
+    /// let mut r: Reader = Reader::new(ReaderConfig::new(&grammars))?;
+    /// r.feed(&[0x80, 0x01, 0x02, b'a', 0x00]);
+    /// r.end_input();
+    /// assert_eq!(r.next().unwrap_err().kind(), ErrorKind::Header);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn new(grammars: &'g Grammars<'g>) -> Self {
         ReaderConfig {
             grammars,
@@ -140,15 +211,101 @@ impl<'g> ReaderConfig<'g> {
     }
     /// Options agreed out of band, used only when the header carries
     /// none.
+    ///
+    /// ```
+    /// use exi::{Coding, Options, Reader, ReaderConfig, Step};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let byte = Options::builder().coding(Coding::ByteAligned).build()?;
+    /// let bits = Options::builder().coding(Coding::BitPacked).build()?;
+    /// // A bare header: the given options are used.
+    /// let mut r: Reader = Reader::new(ReaderConfig::new(&grammars).options(byte))?;
+    /// r.feed(&[0x80, 0x01, 0x02, b'a', 0x00]);
+    /// r.end_input();
+    /// r.next()?;
+    /// assert_eq!(r.options().unwrap().coding(), Coding::ByteAligned);
+    /// // Options in the header govern over the given ones.
+    /// let mut r: Reader = Reader::new(ReaderConfig::new(&grammars).options(bits))?;
+    /// r.feed(&[0xA0, 0x00, 0x4A, 0x01, 0x02, b'a', 0x00]);
+    /// r.end_input();
+    /// r.next()?;
+    /// assert_eq!(r.options().unwrap().coding(), Coding::ByteAligned);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn options(self, o: Options) -> Self {
         ReaderConfig { options: Some(o), ..self }
     }
+    /// How streams follow each other: [`Sequence`].
+    ///
+    /// ```
+    /// use exi::{Coding, ErrorKind, Event, Options, Reader, ReaderConfig, Sequence, Step};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let byte = Options::builder().coding(Coding::ByteAligned).build()?;
+    /// // Two <a/> streams back to back, each with its own header.
+    /// let cfg = ReaderConfig::new(&grammars).options(byte.clone()).sequence(Sequence::Streams);
+    /// let mut r: Reader = Reader::new(cfg)?;
+    /// r.feed(&[0x80, 0x01, 0x02, b'a', 0x00, 0x80, 0x01, 0x02, b'a', 0x00]);
+    /// r.end_input();
+    /// let mut documents = 0;
+    /// loop {
+    ///     match r.next()? {
+    ///         Step::Event(Event::EndDocument, _) => documents += 1,
+    ///         Step::Event(..) => {}
+    ///         _ => break,
+    ///     }
+    /// }
+    /// assert_eq!(documents, 2);
+    /// // Frames are fragments, byte-aligned.
+    /// let cfg = ReaderConfig::new(&grammars).options(byte).sequence(Sequence::Frames);
+    /// assert_eq!(Reader::<64>::new(cfg).err().unwrap().kind(), ErrorKind::Arg);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn sequence(self, s: Sequence) -> Self {
         ReaderConfig { sequence: s, ..self }
     }
+    /// Requests combined start-tag events. EXI readers currently
+    /// return `Unsupported` for this mode.
+    ///
+    /// ```
+    /// use exi::{ErrorKind, Reader, ReaderConfig};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let cfg = ReaderConfig::new(&grammars).start_tag(true);
+    /// assert_eq!(Reader::<64>::new(cfg).err().unwrap().kind(), ErrorKind::Unsupported);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn start_tag(self, on: bool) -> Self {
         ReaderConfig { start_tag: on, ..self }
     }
+    /// The [`Limits`] input is checked against.
+    ///
+    /// ```
+    /// use exi::{Coding, ErrorKind, Limits, Options, Reader, ReaderConfig, Step};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let byte = Options::builder().coding(Coding::ByteAligned).build()?;
+    /// let read = |limits: Limits| -> exi::Result<()> {
+    ///     let cfg = ReaderConfig::new(&grammars).options(byte.clone()).limits(limits);
+    ///     let mut r: Reader = Reader::new(cfg)?;
+    ///     // <r><a/></r>: depth 2.
+    ///     r.feed(&[0x80, 0x01, 0x02, b'r', 0x02, 0x01, 0x02, b'a', 0x00, 0x00]);
+    ///     r.end_input();
+    ///     while let Step::Event(..) = r.next()? {}
+    ///     Ok(())
+    /// };
+    /// read(Limits::new().max_depth(2))?;
+    /// assert_eq!(read(Limits::new().max_depth(1)).unwrap_err().kind(), ErrorKind::Limit);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn limits(self, l: Limits) -> Self {
         ReaderConfig { limits: l, ..self }
     }
@@ -495,6 +652,24 @@ impl<'g, const N: usize> Reader<'g, N> {
     /// `ErrorKind::Arg` when the configuration is inconsistent:
     /// `Frames` with out-of-band options that do not set `fragment` and
     /// byte alignment.
+    ///
+    /// ```
+    /// use exi::{Coding, ErrorKind, Options, Reader, ReaderConfig, Sequence};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let small = Reader::<64>::new(ReaderConfig::new(&grammars))?;   // a 64-octet ring
+    /// let usual: Reader = Reader::new(ReaderConfig::new(&grammars))?; // 4096 octets
+    /// assert_eq!((small.depth(), usual.depth()), (0, 0));
+    ///
+    /// let frag = Options::builder().coding(Coding::ByteAligned).fragment(true).build()?;
+    /// let frames = ReaderConfig::new(&grammars).sequence(Sequence::Frames);
+    /// assert!(Reader::<64>::new(frames.clone().options(frag)).is_ok());
+    /// let bits = Options::builder().fragment(true).build()?;              // bit-packed
+    /// assert_eq!(Reader::<64>::new(frames.options(bits)).err().unwrap().kind(), ErrorKind::Arg);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn new(cfg: ReaderConfig<'g>) -> Result<Self> {
         let () = InputRing::<N>::VALID;
         if cfg.sequence == Sequence::Frames {
@@ -546,6 +721,40 @@ impl<'g, const N: usize> Reader<'g, N> {
     /// Copies as much of `data` as fits into the ring and returns how
     /// much. The caller's buffer is free as soon as this returns; feed
     /// the rest after calling `next`.
+    ///
+    /// ```
+    /// use exi::{Coding, EventSink, Header, Options, OwnedEvent, OwnedValue, Reader, ReaderConfig, Step, Writer, WriterConfig};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let byte = Options::builder().coding(Coding::ByteAligned).build()?;
+    /// let text = "x".repeat(300);
+    /// let mut w = Writer::new(Vec::new(), WriterConfig::new(byte.clone(), &grammars).header(Header::Bare { cookie: false }))?;
+    /// w.start_element("a")?;
+    /// w.text(text.as_str())?;
+    /// w.end_element()?;
+    /// w.end_document()?;
+    /// let stream = w.into_sink();
+    ///
+    /// let mut r = Reader::<64>::new(ReaderConfig::new(&grammars).options(byte))?;
+    /// let mut rest = &stream[..];
+    /// let n = r.feed(rest);
+    /// assert_eq!(n, 64);                                       // only the ring's worth
+    /// rest = &rest[n..];
+    /// let mut events = Vec::new();
+    /// loop {
+    ///     rest = &rest[r.feed(rest)..];
+    ///     if rest.is_empty() { r.end_input(); }
+    ///     match r.next()? {
+    ///         Step::Event(e, _) => events.push(e.to_owned()),
+    ///         Step::NeedInput => {}
+    ///         Step::End => break,
+    ///     }
+    /// }
+    /// assert_eq!(events[2], OwnedEvent::Characters(OwnedValue::Str(text.into())));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn feed(&mut self, data: &[u8]) -> usize {
         let n = if self.spilling {
             self.spill.extend(data);
@@ -557,11 +766,54 @@ impl<'g, const N: usize> Reader<'g, N> {
         n
     }
     /// Free ring space to read into directly (see
-    /// [`InputRing::buffer`]).
+    /// [`InputRing::buffer`]). Call [`Self::commit`] after filling it.
+    ///
+    /// ```
+    /// use exi::{Coding, Event, Options, Reader, ReaderConfig, Step};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let options = Options::builder().coding(Coding::ByteAligned).build()?;
+    /// let mut reader = Reader::<64>::new(ReaderConfig::new(&grammars).options(options.clone()))?;
+    /// assert!(reader.options().is_none());
+    /// let document = [0x80, 0x01, 0x02, b'a', 0x00];
+    /// reader.buffer()[..document.len()].copy_from_slice(&document);
+    /// reader.commit(document.len());
+    /// reader.end_input();
+    /// assert!(matches!(reader.next()?, Step::Event(Event::StartDocument, _)));
+    /// assert_eq!(reader.options(), Some(&options));
+    /// assert_eq!(reader.position().byte, 1);
+    /// assert!(matches!(reader.next()?, Step::Event(Event::StartElement(_), _)));
+    /// assert_eq!(reader.depth(), 1);
+    /// assert!(matches!(reader.next()?, Step::Event(Event::EndElement(_), _)));
+    /// assert_eq!(reader.depth(), 0);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn buffer(&mut self) -> &mut [u8] {
         self.ring.buffer()
     }
     /// Makes `n` octets written into `buffer()` visible to `next`.
+    ///
+    /// ```
+    /// use exi::{Coding, Event, Options, Reader, ReaderConfig, Step};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let byte = Options::builder().coding(Coding::ByteAligned).build()?;
+    /// let mut r = Reader::<64>::new(ReaderConfig::new(&grammars).options(byte))?;
+    /// // <a/> in two pieces. Octets written but not committed are not read.
+    /// r.buffer()[0] = 0x80;
+    /// assert!(matches!(r.next()?, Step::NeedInput));
+    /// r.commit(1);
+    /// assert!(matches!(r.next()?, Step::Event(Event::StartDocument, _)));
+    /// r.buffer()[..4].copy_from_slice(&[0x01, 0x02, b'a', 0x00]);
+    /// r.commit(4);
+    /// r.end_input();
+    /// assert!(matches!(r.next()?, Step::Event(Event::StartElement(n), _) if n.local_name() == "a"));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn commit(&mut self, n: usize) {
         self.ring.commit(n);
         self.fed += n as u64;
@@ -576,6 +828,23 @@ impl<'g, const N: usize> Reader<'g, N> {
     /// is needed, and ends the input. The events are not returned: use
     /// this with [`crate::drive`] or after counting, or use `feed` in a
     /// loop.
+    ///
+    /// ```
+    /// use exi::{Coding, Event, Options, Reader, ReaderConfig, Step};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let byte = Options::builder().coding(Coding::ByteAligned).build()?;
+    /// let file: &[u8] = &[0x80, 0x01, 0x02, b'a', 0x00];       // <a/>, from any io::Read
+    /// let mut r: Reader = Reader::new(ReaderConfig::new(&grammars).options(byte))?;
+    /// r.fill_from(&mut &file[..])?;
+    /// // It fit in the ring, so every event is still to come; the input has ended.
+    /// let mut n = 0;
+    /// while let Step::Event(..) = r.next()? { n += 1; }
+    /// assert_eq!(n, 4);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     #[cfg(feature = "std")]
     pub fn fill_from(&mut self, src: &mut impl std::io::Read) -> Result<()> {
         loop {
@@ -600,10 +869,62 @@ impl<'g, const N: usize> Reader<'g, N> {
     }
     /// `Sequence::Frames`: the octets fed since the last call complete
     /// one frame.
+    ///
+    /// ```
+    /// use exi::{Coding, Event, EventSink, Header, Options, Reader, ReaderConfig, Sequence, Step, Writer, WriterConfig};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let frag = Options::builder().coding(Coding::ByteAligned).fragment(true).build()?;
+    /// let cfg = WriterConfig::new(frag.clone(), &grammars)
+    ///     .header(Header::Bare { cookie: false })
+    ///     .sequence(Sequence::Frames);
+    /// let mut w = Writer::new(Vec::new(), cfg)?;
+    /// let mut frames = Vec::new();
+    /// for body in ["one", "two"] {
+    ///     w.start_element("m")?;
+    ///     w.text(body)?;
+    ///     w.end_element()?;
+    ///     frames.push(w.end_frame()?.to_vec());
+    /// }
+    ///
+    /// let cfg = ReaderConfig::new(&grammars).options(frag).sequence(Sequence::Frames);
+    /// let mut r: Reader = Reader::new(cfg)?;
+    /// let mut texts = Vec::new();
+    /// for f in &frames {
+    ///     r.feed(f);
+    ///     r.end_frame();
+    ///     while let Step::Event(e, _) = r.next()? {           // to NeedInput
+    ///         if let Event::Characters(v) = e { texts.push(v.as_str().unwrap().to_owned()); }
+    ///     }
+    /// }
+    /// r.end_input();
+    /// assert!(matches!(r.next()?, Step::End));                 // no ED: a libexi convention
+    /// assert_eq!(texts, ["one", "two"]);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn end_frame(&mut self) {
         self.frame_ends.push_back(self.fed);
     }
     /// No more input will come.
+    ///
+    /// ```
+    /// use exi::{Coding, Event, Options, Reader, ReaderConfig, Step};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let byte = Options::builder().coding(Coding::ByteAligned).build()?;
+    /// let mut r: Reader = Reader::new(ReaderConfig::new(&grammars).options(byte))?;
+    /// r.feed(&[0x80, 0x01, 0x02, b'a', 0x00]);
+    /// while let Step::Event(..) = r.next()? {}
+    /// // After ED, `End` waits for the end of input.
+    /// assert!(matches!(r.next()?, Step::NeedInput));
+    /// r.end_input();
+    /// assert!(matches!(r.next()?, Step::End));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn end_input(&mut self) {
         self.ended = true;
     }
@@ -613,19 +934,88 @@ impl<'g, const N: usize> Reader<'g, N> {
     ///
     /// As the module documentation describes. After an error,
     /// `ErrorKind::State`.
+    ///
+    /// ```
+    /// use exi::{Coding, ErrorKind, Event, Options, Reader, ReaderConfig, Step};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let byte = Options::builder().coding(Coding::ByteAligned).build()?;
+    /// let mut r: Reader = Reader::new(ReaderConfig::new(&grammars).options(byte))?;
+    /// r.feed(&[0x80, 0x01, 0x02]);                             // <a> cut inside its name
+    /// assert!(matches!(r.next()?, Step::Event(Event::StartDocument, _)));
+    /// assert!(matches!(r.next()?, Step::NeedInput));           // more may come
+    /// r.end_input();
+    /// assert_eq!(r.next().unwrap_err().kind(), ErrorKind::Truncated);  // it will not
+    /// assert_eq!(r.next().unwrap_err().kind(), ErrorKind::State);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     #[allow(clippy::should_implement_trait)] // events borrow the reader: not an Iterator
     pub fn next(&mut self) -> Result<Step<'_>> {
         self.step()
     }
     /// The stream's options, once the header has been read.
+    ///
+    /// ```
+    /// use exi::{Coding, Options, Reader, ReaderConfig};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let mut r: Reader = Reader::new(ReaderConfig::new(&grammars))?;
+    /// // Options in the header: byte-aligned.
+    /// r.feed(&[0xA0, 0x00, 0x4A, 0x01, 0x02, b'a', 0x00]);
+    /// r.end_input();
+    /// assert_eq!(r.options(), None);
+    /// r.next()?;
+    /// let byte = Options::builder().coding(Coding::ByteAligned).build()?;
+    /// assert_eq!(r.options(), Some(&byte));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn options(&self) -> Option<&Options> {
         self.options.as_ref()
     }
     /// Where the next event starts.
+    ///
+    /// ```
+    /// use exi::{Coding, Options, Reader, ReaderConfig};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let byte = Options::builder().coding(Coding::ByteAligned).build()?;
+    /// let mut r: Reader = Reader::new(ReaderConfig::new(&grammars).options(byte))?;
+    /// r.feed(&[0x80, 0x01, 0x02, b'a', 0x00]);
+    /// r.end_input();
+    /// assert_eq!((r.position().byte, r.position().event), (0, 0));
+    /// r.next()?;                                               // SD, after the header
+    /// assert_eq!((r.position().byte, r.position().event), (1, 1));
+    /// r.next()?;                                               // SE(a), 3 octets
+    /// assert_eq!((r.position().byte, r.position().event), (4, 2));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn position(&self) -> Position {
         self.position_now()
     }
     /// Open elements.
+    ///
+    /// ```
+    /// use exi::{Coding, Options, Reader, ReaderConfig, Step};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let byte = Options::builder().coding(Coding::ByteAligned).build()?;
+    /// let mut r: Reader = Reader::new(ReaderConfig::new(&grammars).options(byte))?;
+    /// // <r><a/></r>
+    /// r.feed(&[0x80, 0x01, 0x02, b'r', 0x02, 0x01, 0x02, b'a', 0x00, 0x00]);
+    /// r.end_input();
+    /// let mut depths = Vec::new();
+    /// while let Step::Event(..) = r.next()? { depths.push(r.depth()); }
+    /// assert_eq!(depths, [0, 1, 2, 1, 0, 0]);                 // SD SE SE EE EE ED
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn depth(&self) -> u32 {
         self.sess.as_ref().map_or(0, |s| s.st.depth())
     }
@@ -636,6 +1026,25 @@ impl<'g, const N: usize> Reader<'g, N> {
     /// Returns `Status::End` once the element's EE has been read (or
     /// the stream ended), and `Status::NeedInput` when input runs out
     /// first: give more and call it again.
+    ///
+    /// ```
+    /// use exi::{Coding, Event, Options, Reader, ReaderConfig, Status, Step};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let options = Options::builder().coding(Coding::ByteAligned).build()?;
+    /// let mut reader = Reader::<64>::new(ReaderConfig::new(&grammars).options(options))?;
+    /// reader.feed(&[0x80, 0x01, 0x02, b'a']);
+    /// assert!(matches!(reader.next()?, Step::Event(Event::StartDocument, _)));
+    /// assert!(matches!(reader.next()?, Step::Event(Event::StartElement(_), _)));
+    /// assert_eq!(reader.skip_element()?, Status::NeedInput);
+    /// reader.feed(&[0x00]);
+    /// reader.end_input();
+    /// assert_eq!(reader.skip_element()?, Status::End);
+    /// assert!(matches!(reader.next()?, Step::Event(Event::EndDocument, _)));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn skip_element(&mut self) -> Result<Status> {
         // Returns `End` once the element is skipped (or the stream
         // ended), `NeedInput` to be called again after more input.
@@ -674,6 +1083,28 @@ impl<'g, const N: usize> Reader<'g, N> {
     /// Starts a new stream with the same configuration, keeping
     /// allocations: for servers that read many short streams. Clears a
     /// poisoned state.
+    ///
+    /// ```
+    /// use exi::{Coding, ErrorKind, Options, Reader, ReaderConfig, Step};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let byte = Options::builder().coding(Coding::ByteAligned).build()?;
+    /// let mut r: Reader = Reader::new(ReaderConfig::new(&grammars).options(byte))?;
+    /// r.feed(&[0x80, 0x04]);                                   // a URI that does not exist
+    /// r.end_input();
+    /// r.next()?;
+    /// assert_eq!(r.next().unwrap_err().kind(), ErrorKind::Grammar);
+    /// assert_eq!(r.next().unwrap_err().kind(), ErrorKind::State);
+    /// r.reset();
+    /// r.feed(&[0x80, 0x01, 0x02, b'a', 0x00]);
+    /// r.end_input();
+    /// let mut n = 0;
+    /// while let Step::Event(..) = r.next()? { n += 1; }
+    /// assert_eq!(n, 4);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn reset(&mut self) {
         self.ring.clear();
         self.spill.clear();
@@ -753,6 +1184,24 @@ impl<'g, const N: usize> Reader<'g, N> {
         }
     }
 
+    /// Consumes the input used by an event or value.
+    fn advance_input(&mut self, used_bits: u64, inflated: bool) {
+        let octets = (used_bits / 8) as usize;
+        if inflated {
+            #[cfg(feature = "compression")]
+            {
+                self.block
+                    .as_mut()
+                    .expect("inflated implies a block")
+                    .z
+                    .pos += octets;
+                return;
+            }
+        }
+        self.consume(octets);
+        self.bit = (used_bits % 8) as u8;
+    }
+
     /// How much input the next decode may see: up to the end of the
     /// current frame with `Frames`; `None` means "wait for more"
     /// (frames only).
@@ -771,6 +1220,12 @@ impl<'g, const N: usize> Reader<'g, N> {
     fn limited(&self, n: usize) -> (&[u8], &[u8]) {
         let (a, b) = self.input();
         if n <= a.len() { (&a[..n], &[]) } else { (a, &b[..n - a.len()]) }
+    }
+
+    fn spill_if_full(&mut self) {
+        if self.ring.free() == 0 {
+            self.spill_now();
+        }
     }
 
     /// Ring full while an event is incomplete: move the input to the
@@ -796,9 +1251,7 @@ impl<'g, const N: usize> Reader<'g, N> {
                     "input ends inside the header",
                 ));
             }
-            if self.ring.free() == 0 {
-                self.spill_now();
-            }
+            self.spill_if_full();
             return Ok(None);
         };
         let opts = match h.options.or_else(|| self.cfg.options.clone()) {
@@ -891,51 +1344,6 @@ impl<'g, const N: usize> Reader<'g, N> {
         let coding =
             self.options.as_ref().map_or(Coding::ByteAligned, |o| o.coding());
         let bit = self.bit;
-        // Try the event against a counting view of the tables: nothing
-        // changes if the input turns out to be incomplete.
-        {
-            let Reader {
-                ring,
-                spill,
-                spilling,
-                sess,
-                #[cfg(feature = "compression")]
-                block,
-                ..
-            } = &*self;
-            #[cfg(feature = "compression")]
-            let z = block
-                .as_ref()
-                .filter(|_| inflated)
-                .map(|b| &b.z.out[b.z.pos..]);
-            #[cfg(not(feature = "compression"))]
-            let z: Option<&[u8]> = None;
-            let (a, b) = input_view(ring, spill.data(), *spilling, z, n);
-            let sess = sess.as_ref().expect("checked above");
-            let mut d = BodyDecoder::new(coding, a, b, bit);
-            let mut probe = Probe::new(&sess.tables);
-            let mut dec = Decoded::default();
-            match engine::decode(&sess.st, &mut d, &mut probe, &mut dec, defer)
-            {
-                Ok(()) => {}
-                Err(e)
-                    if e.kind() == ErrorKind::Truncated && frame_bounded =>
-                {
-                    return Err(err(
-                        ErrorKind::Grammar,
-                        "a frame ends inside an element",
-                    ));
-                }
-                Err(e) if e.kind() == ErrorKind::Truncated && !final_input => {
-                    if !self.spilling && self.ring.free() == 0 {
-                        self.spill_now();
-                    }
-                    return Ok(None);
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        // The event is complete: decode it for real.
         let used = {
             let Reader {
                 ring,
@@ -946,16 +1354,42 @@ impl<'g, const N: usize> Reader<'g, N> {
                 #[cfg(feature = "compression")]
                 block,
                 ..
-            } = &mut *self;
+            } = self;
             #[cfg(feature = "compression")]
             let z = block
                 .as_ref()
                 .filter(|_| inflated)
                 .map(|b| &b.z.out[b.z.pos..]);
             #[cfg(not(feature = "compression"))]
-            let z: Option<&[u8]> = None;
+            let z = None;
             let (a, b) = input_view(ring, spill.data(), *spilling, z, n);
             let sess = sess.as_mut().expect("checked above");
+            // Probe with a counting view, then decode the complete
+            // event against the real tables.
+            let mut d = BodyDecoder::new(coding, a, b, bit);
+            let mut probe = Probe::new(&sess.tables);
+            match engine::decode(
+                &sess.st,
+                &mut d,
+                &mut probe,
+                &mut Decoded::default(),
+                defer,
+            ) {
+                Ok(()) => {}
+                Err(e)
+                    if e.kind() == ErrorKind::Truncated && frame_bounded =>
+                {
+                    return Err(err(
+                        ErrorKind::Grammar,
+                        "a frame ends inside an element",
+                    ));
+                }
+                Err(e) if e.kind() == ErrorKind::Truncated && !final_input => {
+                    self.spill_if_full();
+                    return Ok(None);
+                }
+                Err(e) => return Err(e),
+            }
             let mut d = BodyDecoder::new(coding, a, b, bit);
             dec.clear();
             engine::decode(&sess.st, &mut d, &mut sess.tables, dec, defer)?;
@@ -1048,53 +1482,12 @@ impl<'g, const N: usize> Reader<'g, N> {
                             })?;
                         sess.st.on_xsi_nil(b)?;
                     }
-                    Some(Slot::TypeName) => {
-                        let DVal::QName(tid, _) = dec.value else {
-                            return Err(err(
-                                ErrorKind::Internal,
-                                "type name expected",
-                            ));
-                        };
-                        let schema = sess.st.schema.ok_or_else(|| {
-                            err(ErrorKind::Internal, "no schema")
-                        })?;
-                        let uri = sess.tables.uri_str(tid.uri).unwrap_or("");
-                        let local = sess
-                            .tables
-                            .local_str(tid.uri, tid.local)
-                            .unwrap_or("");
-                        let ty = schema.type_named(uri, local).ok_or_else(
-                            || {
-                                err(
-                                    ErrorKind::Grammar,
-                                    "xsi:type names no type of the schema",
-                                )
-                            },
-                        )?;
-                        let cur = match sess.st.stack.last().map(|f| f.kind) {
-                            Some(engine::FrameKind::Informed {
-                                ty, ..
-                            }) => ty,
-                            _ => {
-                                return Err(err(
-                                    ErrorKind::Internal,
-                                    "xsi:type outside an informed element",
-                                ));
-                            }
-                        };
-                        if !schema.ty(cur).casts.contains(&ty) {
-                            return Err(err(
-                                ErrorKind::Grammar,
-                                "xsi:type names a type that does not derive from the element's type",
-                            ));
-                        }
-                        sess.st.on_xsi_type(Some(ty))?;
-                    }
-                    // Not strict: xsi:type as a QName; the grammar
-                    // changes when it names a type of the schema.
-                    Some(Slot::QName)
-                        if term == Terminal::AT(engine::XSI_TYPE)
-                            && sess.st.deviates(code) =>
+                    // Non-strict xsi:type changes the grammar only
+                    // when it names a type of the schema.
+                    Some(Slot::TypeName | Slot::QName)
+                        if dec.slot == Some(Slot::TypeName)
+                            || (term == Terminal::AT(engine::XSI_TYPE)
+                                && sess.st.deviates(code)) =>
                     {
                         let DVal::QName(tid, _) = dec.value else {
                             return Err(err(
@@ -1102,15 +1495,24 @@ impl<'g, const N: usize> Reader<'g, N> {
                                 "type name expected",
                             ));
                         };
-                        let schema = sess.st.schema.ok_or_else(|| {
-                            err(ErrorKind::Internal, "no schema")
-                        })?;
                         let uri = sess.tables.uri_str(tid.uri).unwrap_or("");
                         let local = sess
                             .tables
                             .local_str(tid.uri, tid.local)
                             .unwrap_or("");
-                        sess.st.on_xsi_type(schema.type_named(uri, local))?;
+                        let ty = if dec.slot == Some(Slot::TypeName) {
+                            Some(sess.st.strict_xsi_type(
+                                uri,
+                                local,
+                                ErrorKind::Grammar,
+                            )?)
+                        } else {
+                            let schema = sess.st.schema.ok_or_else(|| {
+                                err(ErrorKind::Internal, "no schema")
+                            })?;
+                            schema.type_named(uri, local)
+                        };
+                        sess.st.on_xsi_type(ty)?;
                     }
                     _ => sess.st.on_at(term, code, id)?,
                 }
@@ -1358,335 +1760,6 @@ impl<'g, const N: usize> Reader<'g, N> {
     }
 }
 
-// ----- Pre-compression and compression: blocks (EXI §9,
-// `crate::block`) -----
-//
-// The structure of a block is decoded event by event, as in other
-// codings, but the values in value channels are left as placeholders on
-// the queued events. When the block has all its values (or the stream
-// ends), the values are read in channel order and filled in,
-// and only then are the block's events returned.
-
-#[cfg(feature = "compression")]
-impl<'g, const N: usize> Reader<'g, N> {
-    fn blocks(&self) -> bool {
-        self.block.is_some()
-    }
-    fn inflated(&self) -> bool {
-        self.block.as_ref().is_some_and(|b| b.deflate)
-    }
-    fn in_values(&self) -> bool {
-        self.block.as_ref().is_some_and(|b| b.values_phase)
-    }
-    /// Events at the front of the queue may be returned.
-    fn can_release(&self) -> bool {
-        self.block.is_none() || self.released > 0
-    }
-    fn popped(&mut self) {
-        if self.block.is_some() {
-            self.released -= 1;
-        }
-    }
-    /// Consumes the octets (or bits) a decode used, from the input or
-    /// the inflated stream.
-    fn advance_input(&mut self, used_bits: u64, inflated: bool) {
-        if inflated {
-            let b = self.block.as_mut().expect("inflated implies a block");
-            b.z.pos += (used_bits / 8) as usize;
-        } else {
-            self.consume((used_bits / 8) as usize);
-            self.bit = (used_bits % 8) as u8;
-        }
-    }
-    /// Notes the value the event just decoded left in its channel: its
-    /// name and slot.
-    fn note_deferred(&mut self) {
-        if !self.dec.deferred {
-            return;
-        }
-        let name = match self.dec.term {
-            Some(Terminal::CH) => self
-                .sess
-                .as_ref()
-                .and_then(|s| s.st.stack.last())
-                .map(|f| f.name),
-            _ => self.dec.name.map(|(id, _)| id),
-        };
-        if let (Some(b), Some(name), Some(slot)) =
-            (self.block.as_mut(), name, self.dec.slot)
-        {
-            b.last_deferred = Some((name, slot));
-        }
-    }
-    /// After an event is queued: record its waiting value, and end the
-    /// structure when the block holds `blockSize` values or the stream
-    /// has ended.
-    fn after_enqueue(&mut self, is_ed: bool) -> Result<()> {
-        let Some(b) = self.block.as_mut() else { return Ok(()) };
-        if self.queue.len() as u64 > self.cfg.limits.get_max_block_events() {
-            return Err(err(
-                ErrorKind::Limit,
-                "a block holds more events than max_block_events",
-            ));
-        }
-        if let Some((name, slot)) = b.last_deferred.take() {
-            b.pending.push(crate::block::PendingValue {
-                qi: self.queue.len() - 1,
-                name,
-                slot,
-            });
-        }
-        if b.pending.len() as u64 >= b.block_size as u64 || is_ed {
-            b.end_structure();
-        }
-        Ok(())
-    }
-    /// Makes the current DEFLATE stream whole in the block's buffer;
-    /// `false` when more input is needed. No input at all after the end
-    /// of input is an empty stream: EXI writes none for a part with no
-    /// octets.
-    fn inflate_stream(&mut self) -> Result<bool> {
-        let max = self.cfg.limits.get_max_block_bytes();
-        loop {
-            let available = self.available();
-            let ended = self.ended;
-            let Reader { ring, spill, spilling, block, .. } = &mut *self;
-            let b = block.as_mut().expect("inflated implies a block");
-            if b.ready {
-                return Ok(true);
-            }
-            if !b.inflating {
-                if available == 0 {
-                    if !ended {
-                        return Ok(false);
-                    }
-                    b.z.start();
-                    b.ready = true;
-                    return Ok(true);
-                }
-                b.z.start();
-                b.inflating = true;
-            }
-            let (x, y) = if *spilling {
-                (spill.data(), &[][..])
-            } else {
-                ring.filled()
-            };
-            let part = if x.is_empty() { y } else { x };
-            if part.is_empty() {
-                if ended {
-                    return Err(err(
-                        ErrorKind::Truncated,
-                        "input ends inside a DEFLATE stream",
-                    ));
-                }
-                return Ok(false);
-            }
-            let (used, done) = b.z.feed(part, max)?;
-            if done {
-                b.inflating = false;
-                b.ready = true;
-            }
-            self.consume(used);
-            if !done && used == 0 {
-                return Ok(false);
-            }
-        }
-    }
-    /// True when every value of the current group takes no octets (a
-    /// stream with no octets is not written).
-    fn group_is_implicit(&self) -> bool {
-        let (Some(b), Some(sess)) = (self.block.as_ref(), self.sess.as_ref())
-        else {
-            return false;
-        };
-        let r = b.groups[b.group].clone();
-        let mut text = String::new();
-        b.order[r].iter().all(|&i| {
-            let p = &b.pending[i];
-            let mut d = BodyDecoder::new(Coding::ByteAligned, &[], &[], 0);
-            let mut probe = Probe::new(&sess.tables);
-            text.clear();
-            engine::decode_value(
-                &sess.st, &mut d, &mut probe, p.slot, p.name, &mut text,
-            )
-            .is_ok()
-        })
-    }
-    /// Reads the block's values in channel order and fills in their
-    /// events; `Ok(true)` when the block is complete and its events may
-    /// be returned.
-    fn read_values(&mut self) -> Result<bool> {
-        loop {
-            let b = self.block.as_mut().expect("values imply a block");
-            if b.group >= b.groups.len() {
-                b.next_block();
-                self.released = self.queue.len();
-                return Ok(true);
-            }
-            let r = b.groups[b.group].clone();
-            b.next = b.next.max(r.start);
-            if b.next >= r.end {
-                b.group += 1;
-                continue;
-            }
-            if b.separate && b.acquired != Some(b.group) {
-                // The group's own stream: the one in hand if no part
-                // has claimed it yet, else the next.
-                if self.group_is_implicit() {
-                    // Values that take no bits: EXI writes no stream
-                    // for them, EXIficient an empty one. Look at the
-                    // next stream: take it if empty, else leave it.
-                    let b = self.block.as_mut().expect("values imply a block");
-                    if !b.inflating && !(b.ready && !b.claimed) {
-                        b.ready = false;
-                        if self.available() == 0 {
-                            if !self.ended {
-                                return Ok(false);
-                            }
-                            // Nothing follows: no stream.
-                            let b = self
-                                .block
-                                .as_mut()
-                                .expect("values imply a block");
-                            b.acquired = Some(b.group);
-                            b.claimed = true;
-                            continue;
-                        }
-                    }
-                    if !self.inflate_stream()? {
-                        return Ok(false);
-                    }
-                    let b = self.block.as_mut().expect("values imply a block");
-                    b.claimed = b.z.out.is_empty();
-                } else {
-                    loop {
-                        let b =
-                            self.block.as_mut().expect("values imply a block");
-                        if !b.inflating && !(b.ready && !b.claimed) {
-                            b.ready = false;
-                        }
-                        if !self.inflate_stream()? {
-                            return Ok(false);
-                        }
-                        if !self
-                            .block
-                            .as_ref()
-                            .expect("values imply a block")
-                            .z
-                            .out
-                            .is_empty()
-                        {
-                            break;
-                        }
-                        // An empty stream cannot hold values that take
-                        // octets. EXI §9.3 says not to write one for
-                        // parts with none, but EXIficient does: skip
-                        // it.
-                        if self.available() > 0 {
-                            self.block
-                                .as_mut()
-                                .expect("values imply a block")
-                                .claimed = true;
-                            continue;
-                        }
-                        if !self.ended {
-                            return Ok(false);
-                        }
-                        // Nothing follows: reading the values reports
-                        // the truncation.
-                        break;
-                    }
-                    self.block
-                        .as_mut()
-                        .expect("values imply a block")
-                        .claimed = true;
-                }
-                let b = self.block.as_mut().expect("values imply a block");
-                b.acquired = Some(b.group);
-            }
-            if !self.read_value()? {
-                return Ok(false);
-            }
-        }
-    }
-    /// Reads the next value of the block; `false` when more input is
-    /// needed.
-    fn read_value(&mut self) -> Result<bool> {
-        let inflated = self.inflated();
-        let (n, final_input) = if inflated {
-            (0, true)
-        } else {
-            let Some(l) = self.limit() else { return Ok(false) };
-            l
-        };
-        let (qi, name, slot) = {
-            let b = self.block.as_ref().expect("values imply a block");
-            let p = &b.pending[b.order[b.next]];
-            (p.qi, p.name, p.slot)
-        };
-        let mut text = core::mem::take(&mut self.dec.text);
-        text.clear();
-        {
-            let Reader { ring, spill, spilling, sess, block, .. } = &*self;
-            let z = block
-                .as_ref()
-                .filter(|_| inflated)
-                .map(|b| &b.z.out[b.z.pos..]);
-            let (a, b) = input_view(ring, spill.data(), *spilling, z, n);
-            let sess = sess.as_ref().expect("a block has a session");
-            let mut d = BodyDecoder::new(Coding::ByteAligned, a, b, 0);
-            let mut probe = Probe::new(&sess.tables);
-            match engine::decode_value(
-                &sess.st, &mut d, &mut probe, slot, name, &mut text,
-            ) {
-                Ok(_) => {}
-                Err(e) if e.kind() == ErrorKind::Truncated && !final_input => {
-                    self.dec.text = text;
-                    if !self.spilling && self.ring.free() == 0 {
-                        self.spill_now();
-                    }
-                    return Ok(false);
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        text.clear();
-        let (value, used) = {
-            let Reader { ring, spill, spilling, sess, block, .. } = &mut *self;
-            let z = block
-                .as_ref()
-                .filter(|_| inflated)
-                .map(|b| &b.z.out[b.z.pos..]);
-            let (a, b) = input_view(ring, spill.data(), *spilling, z, n);
-            let sess = sess.as_mut().expect("a block has a session");
-            let mut d = BodyDecoder::new(Coding::ByteAligned, a, b, 0);
-            let v = engine::decode_value(
-                &sess.st,
-                &mut d,
-                &mut sess.tables,
-                slot,
-                name,
-                &mut text,
-            )?;
-            (owned_value(&sess.tables, v, &text), d.bit_position())
-        };
-        self.dec.text = text;
-        self.advance_input(used, inflated);
-        match self.queue.get_mut(qi) {
-            Some((Out::AT(_, _, v), _)) | Some((Out::CH(v), _)) => *v = value,
-            _ => {
-                return Err(err(
-                    ErrorKind::Internal,
-                    "a block value without its event",
-                ));
-            }
-        }
-        self.block.as_mut().expect("values imply a block").next += 1;
-        Ok(true)
-    }
-}
-
 #[cfg(not(feature = "compression"))]
 impl<'g, const N: usize> Reader<'g, N> {
     fn blocks(&self) -> bool {
@@ -1702,10 +1775,6 @@ impl<'g, const N: usize> Reader<'g, N> {
         true
     }
     fn popped(&mut self) {}
-    fn advance_input(&mut self, used_bits: u64, _inflated: bool) {
-        self.consume((used_bits / 8) as usize);
-        self.bit = (used_bits % 8) as u8;
-    }
     fn note_deferred(&mut self) {}
     fn after_enqueue(&mut self, _is_ed: bool) -> Result<()> {
         Ok(())

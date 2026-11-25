@@ -51,8 +51,9 @@ works, how the code is laid out, how to build and test it, the decisions already
 | `src/coding/` | Bit and byte coding, datatypes, names, `BodyEncoder`/`BodyDecoder` |
 | `src/block.rs` | Pre-compression and compression: blocks, channels, DEFLATE (feature `compression`) |
 | `src/header.rs`, `src/options.rs` | Header, cookie and the options document |
-| `src/engine.rs` | The grammar engine shared by reader and writer |
-| `src/reader.rs`, `src/writer.rs` | Layer 1 reader and writer, frames, canonical writing |
+| `src/engine.rs`, `src/engine/wire.rs` | Shared grammar state and event/value coding |
+| `src/reader.rs`, `src/reader/blocks.rs` | Layer 1 reader, frame boundaries and compressed blocks |
+| `src/writer.rs`, `src/writer/attributes.rs` | Layer 1 writer, canonical writing and pending start tags |
 | `src/canonical.rs` | Canonical EXI rules, value normalization, EXIficient differences |
 | `src/grammar/` | Built-in and schema-informed grammars, `.exig` reading and writing, code-table cache |
 | `src/strings.rs`, `src/strings/hash.rs`, `src/tables.rs` | Global string pool and per-stream string tables |

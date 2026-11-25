@@ -96,7 +96,7 @@ use crate::engine::{
 };
 use crate::error::Position;
 use crate::event::{Event, NsDecl};
-use crate::grammar::informed::{ElementId, TypeId};
+use crate::grammar::informed::ElementId;
 use crate::grammar::{EventCode, Grammars, Terminal};
 use crate::header::{Header, write_header};
 use crate::name::{Name, OwnedName};
@@ -106,10 +106,55 @@ use crate::tables::SessionTables;
 use crate::value::{OwnedValue, Value};
 use crate::{Coding, ErrorKind, Limits, NameId, Options, Preserve, Result};
 
+mod attributes;
+
 const XSI_NS: &str = "http://www.w3.org/2001/XMLSchema-instance";
 const XMLNS_NS: &str = "http://www.w3.org/2000/xmlns/";
 
 /// Configuration for a [`Writer`].
+///
+/// Every coding writes the same events: attributes, prefixed names, namespaces and
+/// repeated values here are read back unchanged.
+///
+/// ```
+/// # #[cfg(all(feature = "bit-packed", feature = "compression"))] {
+/// use exi::{Coding, EventSink, Options, OwnedEvent, Preserve, Reader, ReaderConfig, Step, Writer, WriterConfig};
+/// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+/// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+/// # let set = GrammarSet::schemaless();
+/// # let grammars = set.attach(&strings)?;
+/// let mut seen: Vec<Vec<OwnedEvent>> = Vec::new();
+/// for coding in [Coding::BitPacked, Coding::ByteAligned, Coding::PreCompression, Coding::Compression] {
+///     let opts = Options::builder()
+///         .coding(coding)
+///         .preserve(Preserve::PREFIXES)
+///         .build()?;
+///     let mut w = Writer::new(Vec::new(), WriterConfig::new(opts, &grammars))?;
+///     w.start_element(("urn:feed", "feed"))?;
+///     w.namespace("", "urn:feed")?;
+///     w.namespace("x", "urn:x")?;
+///     for i in 0..150 {
+///         w.start_element(("urn:feed", "item"))?;
+///         w.attribute("id", i.to_string().as_str())?;
+///         w.attribute(("urn:x", "kind"), if i % 2 == 0 { "even" } else { "odd" })?;
+///         w.text("same text")?;
+///         w.end_element()?;
+///     }
+///     w.end_element()?;
+///     w.end_document()?;
+///     let bytes = w.into_sink();
+///     let mut r: Reader = Reader::new(ReaderConfig::new(&grammars))?;
+///     r.feed(&bytes);
+///     r.end_input();
+///     let mut events = Vec::new();
+///     while let Step::Event(e, _) = r.next()? { events.push(e.to_owned()); }
+///     seen.push(events);
+/// }
+/// assert_eq!(seen[0].len(), 2 + 4 + 150 * 5);              // SD SE NS NS EE ED; SE AT AT CH EE
+/// assert!(seen.windows(2).all(|p| p[0] == p[1]));
+/// # }
+/// # Ok::<(), exi::Error>(())
+/// ```
 #[derive(Clone)]
 pub struct WriterConfig<'g> {
     options: Options,
@@ -124,6 +169,30 @@ pub struct WriterConfig<'g> {
 }
 
 impl<'g> WriterConfig<'g> {
+    /// Writes streams with `options` informed by `grammars`: one stream, options in the
+    /// header, no cookie, default limits.
+    ///
+    /// ```
+    /// use exi::{Coding, EventSink, Options, Reader, ReaderConfig, Writer, WriterConfig};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let byte = Options::builder().coding(Coding::ByteAligned).build()?;
+    /// let mut w = Writer::new(Vec::new(), WriterConfig::new(byte.clone(), &grammars))?;
+    /// w.start_element("a")?;
+    /// w.end_element()?;
+    /// w.end_document()?;
+    /// let bytes = w.into_sink();
+    /// assert_eq!(bytes[0], 0xA0);                              // options follow
+    /// // So a reader needs no options of its own.
+    /// let mut r: Reader = Reader::new(ReaderConfig::new(&grammars))?;
+    /// r.feed(&bytes);
+    /// r.end_input();
+    /// r.next()?;
+    /// assert_eq!(r.options(), Some(&byte));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn new(options: Options, grammars: &'g Grammars<'g>) -> Self {
         WriterConfig {
             options,
@@ -178,26 +247,177 @@ impl<'g> WriterConfig<'g> {
     }
     /// With [`canonical`](Self::canonical): date-times with a time zone are written in UTC
     /// (EXI C14N's `utcTime`).
+    ///
+    /// ```
+    /// use exi::{Coding, DateTimeKind, EventSink, Header, OwnedName, Options, Writer, WriterConfig};
+    /// use exi::grammar::{GrammarSet, informed::Representation};
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// let mut b = GrammarSet::builder();
+    /// let dt = b.simple_type(None, Representation::DateTime(DateTimeKind::DateTime));
+    /// let ty = b.simple_content_type(None, dt);
+    /// let at = b.element(OwnedName::new("", "at"), ty, false);
+    /// b.global(at);
+    /// let set = b.build()?;
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let grammars = set.attach(&strings)?;
+    /// let strict = Options::builder().coding(Coding::ByteAligned).strict(true).build()?;
+    /// let write = |utc: bool, when: &str| -> exi::Result<Vec<u8>> {
+    ///     let cfg = WriterConfig::new(strict.clone(), &grammars)
+    ///         .header(Header::Bare { cookie: false })
+    ///         .canonical(true)
+    ///         .utc_time(utc);
+    ///     let mut w = Writer::new(Vec::new(), cfg)?;
+    ///     w.start_element("at")?;
+    ///     w.text(when)?;
+    ///     w.end_element()?;
+    ///     w.end_document()?;
+    ///     Ok(w.into_sink())
+    /// };
+    /// // The same instant: written the same way in UTC, differently without.
+    /// let (east, utc) = ("2026-11-25T10:00:00+02:00", "2026-11-25T08:00:00Z");
+    /// assert_eq!(write(true, east)?, write(true, utc)?);
+    /// assert_ne!(write(false, east)?, write(false, utc)?);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn utc_time(self, on: bool) -> Self {
         WriterConfig { utc_time: on, ..self }
     }
     /// The DEFLATE level, 0 (store) to 9 (smallest), for
     /// `Coding::Compression`; 6 when not set. Readers need no setting:
     /// every level decodes the same way. Above 9 is 9.
+    ///
+    /// ```
+    /// # #[cfg(feature = "compression")] {
+    /// use exi::{Coding, EventSink, Options, Reader, ReaderConfig, Step, Writer, WriterConfig};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let deflate = Options::builder().coding(Coding::Compression).build()?;
+    /// let write = |level: u32| -> exi::Result<Vec<u8>> {
+    ///     let cfg = WriterConfig::new(deflate.clone(), &grammars).deflate_level(level);
+    ///     let mut w = Writer::new(Vec::new(), cfg)?;
+    ///     w.start_element("log")?;
+    ///     for i in 0..300 {
+    ///         w.start_element("line")?;
+    ///         w.text(format!("event {} of the day", i % 7).as_str())?;
+    ///         w.end_element()?;
+    ///     }
+    ///     w.end_element()?;
+    ///     w.end_document()?;
+    ///     Ok(w.into_sink())
+    /// };
+    /// let (stored, smallest) = (write(0)?, write(9)?);
+    /// assert!(smallest.len() < stored.len());
+    /// assert_eq!(write(99)?, smallest);                        // above 9 is 9
+    /// let count = |bytes: &[u8]| -> exi::Result<usize> {
+    ///     let mut r: Reader = Reader::new(ReaderConfig::new(&grammars))?;
+    ///     r.feed(bytes);
+    ///     r.end_input();
+    ///     let mut n = 0;
+    ///     while let Step::Event(..) = r.next()? { n += 1; }
+    ///     Ok(n)
+    /// };
+    /// assert_eq!(count(&stored)?, count(&smallest)?);
+    /// # }
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn deflate_level(self, level: u32) -> Self {
         WriterConfig { deflate_level: level.min(9), ..self }
     }
     /// Count what the schema does not declare (non-strict
     /// schema-informed streams): [`Writer::deviations`].
+    ///
+    /// ```
+    /// use exi::{Coding, DeviationKind, EventSink, OwnedName, Options, Writer, WriterConfig};
+    /// use exi::grammar::{GrammarSet, informed::{Prod, Representation}};
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// let mut b = GrammarSet::builder();
+    /// let string = b.simple_type(None, Representation::String { charset: None });
+    /// let ty = b.complex_type(None, vec![
+    ///     vec![Prod::At { name: OwnedName::new("", "unit"), ty: string, next: 1 }],
+    ///     vec![Prod::EE],
+    /// ]);
+    /// let reading = b.element(OwnedName::new("", "reading"), ty, false);
+    /// b.global(reading);
+    /// let set = b.build()?;
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let grammars = set.attach(&strings)?;
+    /// let loose = Options::builder().coding(Coding::ByteAligned).build()?;  // not strict
+    /// let cfg = WriterConfig::new(loose, &grammars).count_deviations(true);
+    /// let mut w = Writer::new(Vec::new(), cfg)?;
+    /// w.start_element("reading")?;
+    /// w.attribute("unit", "C")?;
+    /// w.attribute("where", "attic")?;                          // undeclared
+    /// w.end_element()?;
+    /// w.end_document()?;
+    /// let d = w.deviations().unwrap();
+    /// assert_eq!(d.iter().collect::<Vec<_>>(), [(DeviationKind::Attribute, "{}reading", "{}where", 1)]);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn count_deviations(self, on: bool) -> Self {
         WriterConfig { count_deviations: on, ..self }
     }
+    /// What the header holds: [`Header`]. Options in it by default.
+    ///
+    /// ```
+    /// use exi::{Coding, EventSink, Header, Options, Writer, WriterConfig};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let byte = Options::builder().coding(Coding::ByteAligned).build()?;
+    /// let write = |h: Header| -> exi::Result<Vec<u8>> {
+    ///     let mut w = Writer::new(Vec::new(), WriterConfig::new(byte.clone(), &grammars).header(h))?;
+    ///     w.start_element("a")?;
+    ///     w.end_element()?;
+    ///     w.end_document()?;
+    ///     Ok(w.into_sink())
+    /// };
+    /// let body = [0x01, 0x02, b'a', 0x00];
+    /// assert_eq!(write(Header::Bare { cookie: false })?, [&[0x80][..], &body].concat());
+    /// assert_eq!(write(Header::Bare { cookie: true })?, [&b"$EXI\x80"[..], &body].concat());
+    /// assert_eq!(write(Header::WithOptions { cookie: false })?[..3], [0xA0, 0x00, 0x4A]);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn header(self, h: Header) -> Self {
         WriterConfig { header: h, ..self }
     }
+    /// How streams follow each other: [`Sequence`]. Frames are fragments, byte-aligned;
+    /// [`Writer::end_frame`] has an example.
+    ///
+    /// ```
+    /// use exi::{Coding, ErrorKind, Options, Sequence, Writer, WriterConfig};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let frag = Options::builder().coding(Coding::ByteAligned).fragment(true).build()?;
+    /// let doc = Options::builder().coding(Coding::ByteAligned).build()?;
+    /// let frames = |o: Options| WriterConfig::new(o, &grammars).sequence(Sequence::Frames);
+    /// assert!(Writer::new(Vec::new(), frames(frag)).is_ok());
+    /// assert_eq!(Writer::new(Vec::new(), frames(doc)).err().unwrap().kind(), ErrorKind::Arg);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn sequence(self, s: Sequence) -> Self {
         WriterConfig { sequence: s, ..self }
     }
+    /// The [`Limits`] events are checked against.
+    ///
+    /// ```
+    /// use exi::{Coding, ErrorKind, EventSink, Limits, Options, Writer, WriterConfig};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let byte = Options::builder().coding(Coding::ByteAligned).build()?;
+    /// let cfg = WriterConfig::new(byte, &grammars).limits(Limits::new().max_depth(2));
+    /// let mut w = Writer::new(Vec::new(), cfg)?;
+    /// w.start_element("a")?;
+    /// w.start_element("b")?;
+    /// assert_eq!(w.start_element("c").unwrap_err().kind(), ErrorKind::Limit);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn limits(self, l: Limits) -> Self {
         WriterConfig { limits: l, ..self }
     }
@@ -206,6 +426,31 @@ impl<'g> WriterConfig<'g> {
 /// What a schema did not declare by name, by kind: names matched by a
 /// wildcard or by EXI's added productions (§8.5.4.4.1), and content
 /// only those could encode.
+///
+/// ```
+/// use exi::{Coding, DeviationKind, EventSink, OwnedName, Options, Writer, WriterConfig};
+/// use exi::grammar::{GrammarSet, informed::Prod};
+/// # use exi::strings::{GlobalConfig, GlobalStrings};
+/// let mut b = GrammarSet::builder();
+/// let empty = b.complex_type(None, vec![vec![Prod::EE]]);
+/// let root = b.element(OwnedName::new("", "root"), empty, false);
+/// b.global(root);
+/// let set = b.build()?;
+/// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+/// let grammars = set.attach(&strings)?;
+/// let loose = Options::builder().coding(Coding::ByteAligned).build()?;
+/// let mut w = Writer::new(Vec::new(), WriterConfig::new(loose, &grammars).count_deviations(true))?;
+/// w.start_element("root")?;                                // declared empty
+/// w.start_element("extra")?;
+/// w.end_element()?;
+/// w.text("note")?;
+/// w.end_element()?;
+/// w.end_document()?;
+/// let kinds: Vec<DeviationKind> = w.deviations().unwrap().iter().map(|d| d.0).collect();
+/// assert!(kinds.contains(&DeviationKind::Element));
+/// assert!(kinds.contains(&DeviationKind::Text));
+/// # Ok::<(), exi::Error>(())
+/// ```
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DeviationKind {
     /// An element the parent's type does not name: SE(\*) or
@@ -243,6 +488,16 @@ pub struct Deviations {
 impl Deviations {
     /// One more: names in Clark notation (`{uri}local`); `name` empty
     /// for text and ends.
+    ///
+    /// ```
+    /// use exi::{DeviationKind, Deviations};
+    /// let mut d = Deviations::default();
+    /// d.add(DeviationKind::Text, "{urn:x}p", "");
+    /// d.add(DeviationKind::Text, "{urn:x}p", "");
+    /// d.add(DeviationKind::Element, "{urn:x}p", "{urn:x}b");
+    /// assert_eq!(d.total(), 3);
+    /// assert_eq!(d.iter().count(), 2);                         // two distinct deviations
+    /// ```
     pub fn add(&mut self, kind: DeviationKind, element: &str, name: &str) {
         *self
             .counts
@@ -250,12 +505,34 @@ impl Deviations {
             .or_insert(0) += 1;
     }
     /// Adds another set's counts.
+    ///
+    /// ```
+    /// use exi::{DeviationKind, Deviations};
+    /// let mut first = Deviations::default();
+    /// first.add(DeviationKind::Attribute, "{}item", "{}extra");
+    /// let second = first.clone();
+    /// first.merge(&second);
+    /// assert_eq!(first.total(), 2);
+    /// assert_eq!(second.total(), 1);
+    /// ```
     pub fn merge(&mut self, other: &Deviations) {
         for (k, n) in &other.counts {
             *self.counts.entry(k.clone()).or_insert(0) += n;
         }
     }
     /// Every count, most frequent first.
+    ///
+    /// ```
+    /// use exi::{DeviationKind, Deviations};
+    /// let mut d = Deviations::default();
+    /// d.add(DeviationKind::Attribute, "{}p", "{}a");
+    /// for _ in 0..3 { d.add(DeviationKind::Element, "{}p", "{}b"); }
+    /// let all: Vec<_> = d.iter().collect();
+    /// assert_eq!(all, [
+    ///     (DeviationKind::Element, "{}p", "{}b", 3),
+    ///     (DeviationKind::Attribute, "{}p", "{}a", 1),
+    /// ]);
+    /// ```
     pub fn iter(
         &self,
     ) -> impl Iterator<Item = (DeviationKind, &str, &str, u64)> + '_ {
@@ -269,6 +546,16 @@ impl Deviations {
         });
         v.into_iter()
     }
+    /// All counts added up.
+    ///
+    /// ```
+    /// use exi::{DeviationKind, Deviations};
+    /// let mut d = Deviations::default();
+    /// assert_eq!(d.total(), 0);
+    /// d.add(DeviationKind::EarlyEnd, "{}p", "");
+    /// d.add(DeviationKind::UntypedValue, "{}p", "{}n");
+    /// assert_eq!(d.total(), 2);
+    /// ```
     pub fn total(&self) -> u64 {
         self.counts.values().sum()
     }
@@ -421,6 +708,66 @@ impl Deviations {
 /// assert_eq!(w.into_sink(), [0x80, 0x00, 0x03, b'C', 0x00, 0x15]);
 /// # Ok::<(), exi::Error>(())
 /// ```
+///
+/// Values and attributes strict grammars refuse, and a namespace declared too late.
+///
+/// ```
+/// # #[cfg(feature = "xsd")] {
+/// use exi::{Coding, ErrorKind, EventSink, Options, Preserve, Writer, WriterConfig};
+/// use exi::grammar::GrammarSet;
+/// # use exi::strings::{GlobalConfig, GlobalStrings};
+/// const XSI: &str = "http://www.w3.org/2001/XMLSchema-instance";
+/// let set = GrammarSet::from_xsd(br#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+///   <xs:complexType name="Base"><xs:sequence>
+///     <xs:element name="v" type="xs:string" minOccurs="0"/>
+///   </xs:sequence></xs:complexType>
+///   <xs:complexType name="Sub"><xs:complexContent><xs:extension base="Base"/></xs:complexContent></xs:complexType>
+///   <xs:element name="d" type="xs:decimal"/>
+///   <xs:element name="f" type="xs:double"/>
+///   <xs:element name="b" type="xs:base64Binary"/>
+///   <xs:element name="t" type="xs:dateTime"/>
+///   <xs:element name="n" type="xs:int" nillable="true"/>
+///   <xs:element name="k" type="Base"/>
+/// </xs:schema>"#)?;
+/// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+/// let grammars = set.attach(&strings)?;
+/// let strict = Options::builder().coding(Coding::ByteAligned).strict(true).build()?;
+/// let writer = || Writer::new(Vec::new(), WriterConfig::new(strict.clone(), &grammars));
+/// let text = |element: &str, text: &str| -> exi::Result<()> {
+///     let mut w = writer()?;
+///     w.start_element(element)?;
+///     w.text(text)
+/// };
+/// let attr = |element: &str, name: (&str, &str), value: &str| -> exi::Result<()> {
+///     let mut w = writer()?;
+///     w.start_element(element)?;
+///     w.attribute(name, value)?;
+///     w.end_element()
+/// };
+/// let kind = |r: exi::Result<()>| r.unwrap_err().kind();
+/// text("d", "1.5")?;
+/// assert_eq!(kind(text("d", "one and a half")), ErrorKind::Unencodable);
+/// assert_eq!(kind(text("f", "fast")), ErrorKind::Unencodable);
+/// assert_eq!(kind(text("b", "not base64!")), ErrorKind::Unencodable);
+/// assert_eq!(kind(text("t", "Tuesday")), ErrorKind::Unencodable);
+/// attr("n", (XSI, "nil"), "true")?;
+/// assert_eq!(kind(attr("n", (XSI, "nil"), "maybe")), ErrorKind::Unencodable);
+/// assert_eq!(kind(attr("d", ("", "extra"), "1")), ErrorKind::Unencodable);   // undeclared
+/// attr("k", (XSI, "type"), "Sub")?;
+/// assert_eq!(kind(attr("k", (XSI, "type"), "p:Sub")), ErrorKind::Unencodable); // no prefix p
+/// assert_eq!(kind(attr("k", (XSI, "type"), "Missing")), ErrorKind::Unencodable);
+///
+/// // With prefixes kept, a namespace must come before content.
+/// let prefixes = Options::builder().coding(Coding::ByteAligned).preserve(Preserve::PREFIXES).build()?;
+/// let schemaless = GrammarSet::schemaless();
+/// let g = schemaless.attach(&strings)?;
+/// let mut w = Writer::new(Vec::new(), WriterConfig::new(prefixes, &g))?;
+/// w.start_element("a")?;
+/// w.text("x")?;
+/// assert_eq!(w.namespace("p", "urn:p").unwrap_err().kind(), ErrorKind::State);
+/// # }
+/// # Ok::<(), exi::Error>(())
+/// ```
 pub struct Writer<'g, S: Sink> {
     enc: BodyEncoder<FrameSink<S>>,
     cfg: WriterConfig<'g>,
@@ -448,8 +795,12 @@ pub struct Writer<'g, S: Sink> {
     /// open element whether it has had a child element and whether
     /// `xml:space="preserve"` is in scope.
     ctext: Option<CText>,
-    cchild: Vec<bool>,
-    cspace: Vec<bool>,
+    canonical_elements: Vec<CanonicalElement>,
+}
+
+struct CanonicalElement {
+    has_child: bool,
+    preserve_space: bool,
 }
 
 /// Canonical EXI: character data waiting for the next event. One value
@@ -536,6 +887,25 @@ impl<'g, S: Sink> Writer<'g, S> {
     /// with `selfContained`; `ErrorKind::Schema` when the options'
     /// `schemaId` contradicts the grammars (nil with schema-informed
     /// grammars).
+    ///
+    /// ```
+    /// use exi::{Coding, ErrorKind, Header, Options, Writer, WriterConfig};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let byte = Options::builder().coding(Coding::ByteAligned).build()?;
+    /// assert!(Writer::new(Vec::new(), WriterConfig::new(byte.clone(), &grammars)).is_ok());
+    /// // Canonical EXI has no cookie and no compression.
+    /// let cookie = WriterConfig::new(byte, &grammars).canonical(true).header(Header::Bare { cookie: true });
+    /// assert_eq!(Writer::new(Vec::new(), cookie).err().unwrap().kind(), ErrorKind::Arg);
+    /// # #[cfg(feature = "compression")] {
+    /// let deflate = Options::builder().coding(Coding::Compression).build()?;
+    /// let cfg = WriterConfig::new(deflate, &grammars).canonical(true);
+    /// assert_eq!(Writer::new(Vec::new(), cfg).err().unwrap().kind(), ErrorKind::Arg);
+    /// # }
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn new(sink: S, cfg: WriterConfig<'g>) -> Result<Self> {
         if cfg.sequence == Sequence::Frames
             && !(cfg.options.fragment()
@@ -591,22 +961,69 @@ impl<'g, S: Sink> Writer<'g, S> {
                 None
             },
             ctext: None,
-            cchild: Vec::new(),
-            cspace: Vec::new(),
+            canonical_elements: Vec::new(),
         })
     }
 
     /// What the schema did not declare, when counted
     /// ([`WriterConfig::count_deviations`]).
+    ///
+    /// ```
+    /// use exi::{Coding, Options, Writer, WriterConfig};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let byte = Options::builder().coding(Coding::ByteAligned).build()?;
+    /// let w = Writer::new(Vec::new(), WriterConfig::new(byte.clone(), &grammars))?;
+    /// assert!(w.deviations().is_none());                       // not counted
+    /// let w = Writer::new(Vec::new(), WriterConfig::new(byte, &grammars).count_deviations(true))?;
+    /// assert_eq!(w.deviations().unwrap().total(), 0);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn deviations(&self) -> Option<&Deviations> {
         self.deviations.as_ref()
     }
     /// ED, padding, flush.
+    ///
+    /// ```
+    /// use exi::{Coding, ErrorKind, EventSink, Header, Options, Writer, WriterConfig};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let bits = Options::builder().build()?;                  // bit-packed
+    /// let mut w = Writer::new(Vec::new(), WriterConfig::new(bits, &grammars).header(Header::Bare { cookie: false }))?;
+    /// w.start_element("a")?;
+    /// w.end_element()?;
+    /// w.end_document()?;
+    /// assert_eq!(w.position().bit, 0);                         // padded to an octet
+    /// assert_eq!(w.end_document().unwrap_err().kind(), ErrorKind::State);  // once only
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn end_document(&mut self) -> Result<()> {
         self.guard(|w| w.end_doc())
     }
     /// Commits a buffered start tag and pushes complete octets; returns
     /// the bits still pending (always 0 for byte-aligned coding).
+    ///
+    /// ```
+    /// use exi::{Coding, EventSink, Header, Options, Writer, WriterConfig};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let opts = Options::builder().coding(Coding::ByteAligned).build()?;
+    /// let cfg = WriterConfig::new(opts, &grammars).header(Header::Bare { cookie: false });
+    /// let mut writer = Writer::new(Vec::new(), cfg)?;
+    /// writer.start_element("a")?;
+    /// assert_eq!(writer.flush()?, 0);
+    /// assert_eq!(writer.position().byte, 3); // body octets
+    /// writer.end_element()?;
+    /// writer.end_document()?;
+    /// assert_eq!(writer.into_sink(), [0x80, 0x01, 0x02, b'a', 0x00]);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn flush(&mut self) -> Result<u8> {
         self.guard(|w| {
             w.start()?;
@@ -660,6 +1077,24 @@ impl<'g, S: Sink> Writer<'g, S> {
         })?;
         Ok(&self.enc.sink().last)
     }
+    /// Where the next event starts: octets and bits of the body, and events written.
+    ///
+    /// ```
+    /// use exi::{Coding, EventSink, Header, Options, Writer, WriterConfig};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let bits = Options::builder().build()?;                  // bit-packed
+    /// let mut w = Writer::new(Vec::new(), WriterConfig::new(bits, &grammars).header(Header::Bare { cookie: false }))?;
+    /// assert_eq!(w.position().event, 0);
+    /// w.start_element("a")?;
+    /// w.flush()?;
+    /// let p = w.position();
+    /// assert_eq!(p.event, 1);                                  // events given; SD is implied
+    /// assert!(p.bit != 0);                                     // mid-octet
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn position(&self) -> Position {
         let bits = self.enc.bit_position();
         Position {
@@ -670,9 +1105,31 @@ impl<'g, S: Sink> Writer<'g, S> {
             column: 0,
         }
     }
-    /// Starts a new stream with the same configuration on a new sink,
-    /// keeping allocations; returns the old sink. Clears a poisoned
-    /// state.
+    /// Starts a new stream with the same configuration and returns
+    /// the old sink. Clears learned grammars, session tables, and any
+    /// poisoned state.
+    ///
+    /// ```
+    /// use exi::{Coding, EventSink, Options, Writer, WriterConfig};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let opts = Options::builder().coding(Coding::ByteAligned).build()?;
+    /// let mut writer = Writer::new(Vec::new(), WriterConfig::new(opts, &grammars))?;
+    /// let write = |writer: &mut Writer<'_, Vec<u8>>| -> exi::Result<()> {
+    ///     writer.start_element("reading")?;
+    ///     writer.text("warm")?;
+    ///     writer.end_element()?;
+    ///     writer.end_document()
+    /// };
+    /// write(&mut writer)?;
+    /// let first = writer.reset(Vec::new());
+    /// assert_eq!(writer.position().event, 0);
+    /// write(&mut writer)?;
+    /// assert_eq!(writer.into_sink(), first);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn reset(&mut self, sink: S) -> S {
         let (st, tables) = Self::fresh(&self.cfg);
         let frames = self.cfg.sequence == Sequence::Frames;
@@ -695,10 +1152,25 @@ impl<'g, S: Sink> Writer<'g, S> {
         self.events = 0;
         self.frame_ready = false;
         self.ctext = None;
-        self.cchild.clear();
-        self.cspace.clear();
+        self.canonical_elements.clear();
         old.into_sink().sink
     }
+    /// The sink, with everything written to it.
+    ///
+    /// ```
+    /// use exi::{Coding, EventSink, Header, Options, Writer, WriterConfig};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let byte = Options::builder().coding(Coding::ByteAligned).build()?;
+    /// let mut w = Writer::new(vec![0xFF], WriterConfig::new(byte, &grammars).header(Header::Bare { cookie: false }))?;
+    /// w.start_element("a")?;
+    /// w.end_element()?;
+    /// w.end_document()?;
+    /// assert_eq!(w.into_sink(), [0xFF, 0x80, 0x01, 0x02, b'a', 0x00]);   // appended
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn into_sink(self) -> S {
         self.enc.into_sink().sink
     }
@@ -897,102 +1369,6 @@ impl<'g, S: Sink> Writer<'g, S> {
         Ok((id, p))
     }
 
-    fn resolve_qname(&self, text: &str) -> Option<OwnedName> {
-        let text = text.trim();
-        let (prefix, local) = match text.split_once(':') {
-            Some((p, l)) => (p, l),
-            None => ("", text),
-        };
-        let uri = match prefix {
-            "xml" => "http://www.w3.org/XML/1998/namespace",
-            _ => self
-                .pending
-                .iter()
-                .flat_map(|p| {
-                    p.ns.iter().rev().map(|(p, u)| (p.as_str(), u.as_str()))
-                })
-                .chain(
-                    self.bindings
-                        .iter()
-                        .rev()
-                        .map(|(p, u, _)| (p.as_str(), u.as_str())),
-                )
-                .find(|(p, _)| *p == prefix)
-                .map(|(_, u)| u)
-                .or(if prefix.is_empty() { Some("") } else { None })?,
-        };
-        let n = OwnedName::new(uri, local);
-        Some(if prefix.is_empty() { n } else { n.with_prefix(prefix) })
-    }
-
-    /// A value for a QName slot: a QName, or text resolved with the
-    /// bindings in scope.
-    fn qname_value(&self, v: &Value<'_>) -> Result<OwnedValue> {
-        match v {
-            Value::QName(n) => Ok(OwnedValue::QName(n.to_owned())),
-            _ => {
-                let text = engine::lexical_string(v)?;
-                self.resolve_qname(&text).map(OwnedValue::QName).ok_or_else(
-                    || unencodable("xsi:type value with an undeclared prefix"),
-                )
-            }
-        }
-    }
-
-    /// The slot and prepared value of an attribute against the current
-    /// state; refuses (`Unencodable`) before anything is written.
-    fn prepare_attr(
-        &self,
-        t: Terminal,
-        code: EventCode,
-        n: Name<'_>,
-        v: &Value<'_>,
-    ) -> Result<(Slot, Prepared, Option<TypeId>)> {
-        let id = self
-            .tables
-            .find_name(n.uri(), n.local_name())
-            .unwrap_or(NameId { uri: u32::MAX, local: u32::MAX });
-        let slot = self.st.at_slot(t, code, id);
-        let owned;
-        let v = match slot {
-            Slot::QName | Slot::TypeName => {
-                owned = self.qname_value(v)?;
-                owned.as_value()
-            }
-            _ => *v,
-        };
-        let prepared = engine::prepare(self.st.schema, slot, &v)?;
-        let mut ty = None;
-        if slot == Slot::TypeName {
-            let schema = self
-                .st
-                .schema
-                .ok_or_else(|| err(ErrorKind::Internal, "no schema"))?;
-            let Prepared::QName(uri, local, _) = &prepared else {
-                return Err(err(ErrorKind::Internal, "QName expected"));
-            };
-            let found = schema.type_named(uri, local).ok_or_else(|| {
-                unencodable("xsi:type names no type of the schema")
-            })?;
-            let cur = match self.st.stack.last().map(|f| f.kind) {
-                Some(engine::FrameKind::Informed { ty, .. }) => ty,
-                _ => {
-                    return Err(err(
-                        ErrorKind::Internal,
-                        "xsi:type outside an informed element",
-                    ));
-                }
-            };
-            if !schema.ty(cur).casts.contains(&found) {
-                return Err(unencodable(
-                    "xsi:type names a type that does not derive from the element's type",
-                ));
-            }
-            ty = Some(found);
-        }
-        Ok((slot, prepared, ty))
-    }
-
     /// The added production with terminal `t` and a code of `len`
     /// parts, in the current state (non-strict informed states).
     fn find_added(&self, t: Terminal, len: u8) -> Result<Option<EventCode>> {
@@ -1054,330 +1430,6 @@ impl<'g, S: Sink> Writer<'g, S> {
             )
     }
 
-    /// Writes an attribute now, in the current state.
-    fn write_attr(&mut self, n: Name<'_>, v: &Value<'_>) -> Result<()> {
-        let loose = self.informed_non_strict();
-        let informed = matches!(
-            self.st.stack.last().map(|f| f.kind),
-            Some(engine::FrameKind::Informed { .. })
-        );
-        if informed
-            && !loose
-            && n.is(XSI_NS, "nil")
-            && !self.st.lexical()
-            && matches!(
-                engine::prepare(None, Slot::Nil, v),
-                Ok(Prepared::Bool(false))
-            )
-        {
-            // As EXIficient, strict too and in Canonical EXI (whose
-            // §4.4 says to keep it): xsi:nil="false" says nothing and
-            // is left out.
-            return Ok(());
-        }
-        if loose && n.is(XSI_NS, "nil") && !self.st.lexical() {
-            // As EXIficient: xsi:nil="false" says nothing and is left
-            // out; a value that is not a Boolean goes through AT(*)
-            // [untyped value].
-            match engine::prepare(None, Slot::Nil, v) {
-                Ok(Prepared::Bool(false)) => return Ok(()),
-                Ok(_) => {}
-                Err(_) => {
-                    let code = self
-                        .find_added(Terminal::AtAny, 3)?
-                        .ok_or_else(|| {
-                            err(
-                                ErrorKind::Internal,
-                                "no AT(*) [untyped value] production",
-                            )
-                        })?;
-                    return self.write_attr_as(
-                        Terminal::AtAny,
-                        code,
-                        Slot::Str,
-                        engine::prepare(None, Slot::Str, v)?,
-                        None,
-                        n,
-                    );
-                }
-            }
-        }
-        let (t, code) =
-            self.match_name(n.uri(), n.local_name(), false)?.ok_or_else(
-                || unencodable("no production for this attribute here"),
-            )?;
-        let (t, code, slot, prepared, ty) =
-            match self.prepare_attr(t, code, n, v) {
-                Ok((slot, prepared, ty)) => (t, code, slot, prepared, ty),
-                // Not strict: a value its type cannot hold goes
-                // untyped, through the declared attribute's AT [untyped
-                // value] production, or AT(*)'s.
-                Err(e) if e.kind() == ErrorKind::Unencodable && loose => {
-                    let (t2, code2) = match self.find_added(t, 3)? {
-                        Some(c) if matches!(t, Terminal::AT(_)) => (t, c),
-                        _ => (
-                            Terminal::AtAny,
-                            self.find_added(Terminal::AtAny, 3)?.ok_or(e)?,
-                        ),
-                    };
-                    (
-                        t2,
-                        code2,
-                        Slot::Str,
-                        engine::prepare(None, Slot::Str, v)?,
-                        None,
-                    )
-                }
-                Err(e) => return Err(e),
-            };
-        self.write_attr_as(t, code, slot, prepared, ty, n)
-    }
-
-    fn write_attr_as(
-        &mut self,
-        t: Terminal,
-        code: EventCode,
-        slot: Slot,
-        prepared: Prepared,
-        ty: Option<TypeId>,
-        n: Name<'_>,
-    ) -> Result<()> {
-        match (t, code.len()) {
-            (Terminal::AT(_), 3) => {
-                self.deviated(DeviationKind::UntypedValue, code, Some(n))
-            }
-            (Terminal::AtAny | Terminal::AtUri(_), _) if n.uri() != XSI_NS => {
-                self.deviated(DeviationKind::Attribute, code, Some(n))
-            }
-            _ => {}
-        }
-        self.write_code(code)?;
-        let (id, _) = self.write_name(t, n)?;
-        let prefixes = self.st.prefixes();
-        match slot {
-            Slot::Nil => {
-                let Prepared::Bool(b) = prepared else {
-                    return Err(err(ErrorKind::Internal, "Boolean expected"));
-                };
-                // A typed xsi:nil decides the grammar, so it travels
-                // with the structure.
-                crate::coding::datatypes::write_bool(
-                    &mut self.enc,
-                    crate::coding::Channel::Structure,
-                    b,
-                )?;
-                self.st.on_xsi_nil(b)
-            }
-            Slot::NilText => {
-                let Prepared::Str(s, _) = &prepared else {
-                    return Err(err(ErrorKind::Internal, "text expected"));
-                };
-                let b =
-                    crate::lexical::parse_bool(s).map(|x| x.0).ok_or_else(
-                        || err(ErrorKind::Internal, "Boolean text expected"),
-                    )?;
-                // Structure, as a typed xsi:nil.
-                engine::emit_value(
-                    &mut self.enc,
-                    &mut self.tables,
-                    id,
-                    &prepared,
-                    prefixes,
-                )?;
-                self.st.on_xsi_nil(b)
-            }
-            Slot::TypeName => {
-                engine::emit_value(
-                    &mut self.enc,
-                    &mut self.tables,
-                    id,
-                    &prepared,
-                    prefixes,
-                )?;
-                self.st.on_xsi_type(Some(ty.ok_or_else(|| {
-                    err(ErrorKind::Internal, "type expected")
-                })?))
-            }
-            Slot::QName
-                if t == Terminal::AT(engine::XSI_TYPE)
-                    && self.st.deviates(code) =>
-            {
-                engine::emit_value(
-                    &mut self.enc,
-                    &mut self.tables,
-                    id,
-                    &prepared,
-                    prefixes,
-                )?;
-                let named = match (&prepared, self.st.schema) {
-                    (Prepared::QName(uri, local, _), Some(s)) => {
-                        s.type_named(uri, local)
-                    }
-                    _ => None,
-                };
-                self.st.on_xsi_type(named)
-            }
-            // A lexical xsi:type is a string, but still part of the
-            // structure.
-            _ if id == engine::XSI_TYPE => {
-                engine::emit_value(
-                    &mut self.enc,
-                    &mut self.tables,
-                    id,
-                    &prepared,
-                    prefixes,
-                )?;
-                self.st.on_at(t, code, id)
-            }
-            _ => {
-                self.value(id, prepared, prefixes)?;
-                self.st.on_at(t, code, id)
-            }
-        }
-    }
-
-    /// Writes an NS event now.
-    fn write_ns(
-        &mut self,
-        prefix: &str,
-        uri: &str,
-        local_element_ns: bool,
-    ) -> Result<()> {
-        let code = self
-            .find(Terminal::NS)?
-            .ok_or_else(|| state("namespace declaration after content"))?;
-        self.write_code(code)?;
-        names::write_ns(
-            &mut self.enc,
-            &mut self.tables,
-            NsDecl { prefix, uri, local_element_ns },
-        )?;
-        self.st.on_misc(Terminal::NS, code)
-    }
-
-    /// Checks an attribute of a pending start tag against the
-    /// declaration it enters.
-    fn check_pending_attr(
-        &self,
-        p: &Pending,
-        n: Name<'_>,
-        v: &Value<'_>,
-    ) -> Result<()> {
-        let (Some(schema), Some(decl)) = (self.st.schema, p.decl) else {
-            return Ok(());
-        };
-        if !self.cfg.options.strict() {
-            return Ok(()); // every attribute can be encoded
-        }
-        let ed = schema.elem(decl);
-        let mut td = schema.ty(ed.ty);
-        if n.uri() == XSI_NS && n.local_name() == "type" && td.castable {
-            return self.qname_value(v).map(|_| ());
-        }
-        // An xsi:type already given changes the type the other
-        // attributes belong to. When it may still come, the check waits
-        // for the start tag to be written.
-        let cast =
-            p.attrs.iter().find(|(an, _)| an.as_name().is(XSI_NS, "type"));
-        match cast {
-            Some((_, tv)) => {
-                if let Ok(OwnedValue::QName(q)) =
-                    self.qname_value(&tv.as_value())
-                {
-                    if let Some(t) = schema.type_named(
-                        q.as_name().uri(),
-                        q.as_name().local_name(),
-                    ) {
-                        td = schema.ty(t);
-                    }
-                }
-            }
-            None if td.castable => return Ok(()),
-            None => {}
-        }
-        if n.uri() == XSI_NS && n.local_name() == "nil" {
-            // xsi:nil="false" is left out (as EXIficient), so it fits
-            // any element.
-            let p = engine::prepare(None, Slot::Nil, v);
-            if ed.nillable || matches!(p, Ok(Prepared::Bool(false))) {
-                return p.map(|_| ());
-            }
-        }
-        let id = self.tables.find_name(n.uri(), n.local_name());
-        let uri = self.tables.find_uri_str(n.uri());
-        for st in &td.states[..td.content as usize] {
-            for pr in st {
-                let hit = match pr.term {
-                    Terminal::AT(x) => Some(x) == id,
-                    Terminal::AtUri(u) => Some(u) == uri,
-                    Terminal::AtAny => true,
-                    _ => false,
-                };
-                if hit {
-                    return match pr.ty {
-                        Some(ty) if !self.st.lexical() => {
-                            engine::prepare(Some(schema), Slot::Typed(ty), v)
-                                .map(|_| ())
-                        }
-                        _ => Ok(()),
-                    };
-                }
-            }
-        }
-        Err(unencodable("attribute not declared for this element"))
-    }
-
-    /// Writes a buffered start tag: SE, NS events, then attributes in
-    /// EXI's order.
-    fn commit(&mut self) -> Result<()> {
-        let Some(mut p) = self.pending.take() else { return Ok(()) };
-        if matches!(p.term, Terminal::SeAny | Terminal::SeUri(_)) {
-            self.deviated(
-                DeviationKind::Element,
-                p.code,
-                Some(p.name.as_name()),
-            );
-        }
-        self.write_code(p.code)?;
-        let (id, prefix) = self.write_name(p.term, p.name.as_name())?;
-        self.st.on_se(p.term, p.code, id, prefix)?;
-        self.in_start = true;
-        let depth = self.st.depth();
-        for (pre, uri) in &p.ns {
-            self.bindings.push((pre.clone(), uri.clone(), depth));
-        }
-        if self.cfg.canonical {
-            p.ns.sort_by(|a, b| a.0.cmp(&b.0));
-        }
-        if self.st.prefixes() {
-            let el_prefix = p.name.prefix.as_deref().unwrap_or("");
-            let mut marked = false;
-            for (pre, uri) in core::mem::take(&mut p.ns) {
-                let local = !marked && pre == el_prefix && *uri == *p.name.uri;
-                marked |= local;
-                self.write_ns(&pre, &uri, local)?;
-            }
-        }
-        // Schema-informed streams sort attributes, undeclared elements'
-        // too (EXIficient does; any order is valid in built-in
-        // grammars).
-        if self.st.schema.is_some() || self.cfg.canonical {
-            let key = |n: &OwnedName| {
-                let first = match (&*n.uri, &*n.local) {
-                    (XSI_NS, "type") => 0,
-                    (XSI_NS, "nil") => 1,
-                    _ => 2,
-                };
-                (first, n.local.clone(), n.uri.clone())
-            };
-            p.attrs.sort_by_key(|(n, _)| key(n));
-        }
-        for (n, v) in &p.attrs {
-            self.write_attr(n.as_name(), &v.as_value())?;
-        }
-        Ok(())
-    }
-
     fn handle(&mut self, ev: &Event<'_>) -> Result<()> {
         if !self.cfg.canonical {
             return self.handle_event(ev);
@@ -1424,13 +1476,16 @@ impl<'g, S: Sink> Writer<'g, S> {
         }
         match ev {
             Event::StartElement(_) => {
-                if let Some(c) = self.cchild.last_mut() {
-                    *c = true;
-                }
-                let space = self.cspace.last().copied().unwrap_or(false);
+                let preserve_space =
+                    self.canonical_elements.last_mut().is_some_and(|parent| {
+                        parent.has_child = true;
+                        parent.preserve_space
+                    });
                 self.handle_event(ev)?;
-                self.cchild.push(false);
-                self.cspace.push(space);
+                self.canonical_elements.push(CanonicalElement {
+                    has_child: false,
+                    preserve_space,
+                });
                 Ok(())
             }
             Event::Attribute(n, v)
@@ -1438,15 +1493,14 @@ impl<'g, S: Sink> Writer<'g, S> {
             {
                 let preserve = engine::lexical_string(v)? == "preserve";
                 self.handle_event(ev)?;
-                if let Some(s) = self.cspace.last_mut() {
-                    *s = preserve;
+                if let Some(element) = self.canonical_elements.last_mut() {
+                    element.preserve_space = preserve;
                 }
                 Ok(())
             }
             Event::EndElement(_) => {
                 self.handle_event(ev)?;
-                self.cchild.pop();
-                self.cspace.pop();
+                self.canonical_elements.pop();
                 Ok(())
             }
             _ => self.handle_event(ev),
@@ -1467,10 +1521,11 @@ impl<'g, S: Sink> Writer<'g, S> {
             return Ok(());
         }
         let blank = t.chars().all(|c| matches!(c, ' ' | '\t' | '\n' | '\r'));
-        if blank && !self.cspace.last().copied().unwrap_or(false) {
+        let element = self.canonical_elements.last();
+        if blank && !element.is_some_and(|e| e.preserve_space) {
             let element_content =
                 matches!(next, Event::StartElement(_) | Event::StartTag(_))
-                    || self.cchild.last().copied().unwrap_or(false);
+                    || element.is_some_and(|e| e.has_child);
             if element_content {
                 return Ok(());
             }
@@ -1645,48 +1700,29 @@ impl<'g, S: Sink> Writer<'g, S> {
                         "EndElement names another element than the open one",
                     ));
                 }
-                if self.find(Terminal::EE)?.is_none()
-                    && self.st.schema.is_some()
-                    && self.find(Terminal::CH)?.is_some()
-                {
-                    // Rule 9: an empty value, when the state takes CH
-                    // and then allows EE.
-                    let code =
-                        self.find(Terminal::CH)?.expect("checked above");
-                    let slot = self.st.ch_slot(code);
-                    let prepared = engine::prepare(
-                        self.st.schema,
-                        slot,
-                        &Value::Str(""),
-                    )?;
-                    let after = self.st.iprod(Terminal::CH).map(|p| p.next);
-                    let ends =
-                        match (after, self.st.stack.last().map(|f| f.kind)) {
-                            (
-                                Some(n),
-                                Some(engine::FrameKind::Informed {
-                                    ty, ..
-                                }),
-                            ) => self.st.schema.is_some_and(|s| {
-                                s.ty(ty).states.get(n as usize).is_some_and(
-                                    |st| {
-                                        st.iter()
-                                            .any(|p| p.term == Terminal::EE)
-                                    },
-                                )
-                            }),
-                            _ => false,
-                        };
-                    if !ends {
-                        return Err(unencodable(
-                            "the element cannot end here",
-                        ));
+                let mut end = self.find(Terminal::EE)?;
+                if end.is_none() && self.st.schema.is_some() {
+                    if let Some(code) = self.find(Terminal::CH)? {
+                        // Rule 9: supply an empty value if CH leads to
+                        // EE.
+                        let slot = self.st.ch_slot(code);
+                        let prepared = engine::prepare(
+                            self.st.schema,
+                            slot,
+                            &Value::Str(""),
+                        )?;
+                        if !self.st.can_end_after_characters() {
+                            return Err(unencodable(
+                                "the element cannot end here",
+                            ));
+                        }
+                        self.write_code(code)?;
+                        self.value(f.name, prepared, false)?;
+                        self.st.on_ch(code)?;
+                        end = self.find(Terminal::EE)?;
                     }
-                    self.write_code(code)?;
-                    self.value(f.name, prepared, false)?;
-                    self.st.on_ch(code)?;
                 }
-                let code = self.find(Terminal::EE)?.ok_or_else(|| {
+                let code = end.ok_or_else(|| {
                     unencodable("the element cannot end here")
                 })?;
                 self.deviated(DeviationKind::EarlyEnd, code, None);

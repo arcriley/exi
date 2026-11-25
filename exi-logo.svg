@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 400" width="640" height="400" role="img" aria-labelledby="title desc">
+  <title id="title">exi</title>
+  <desc id="desc">Efficient XML Interchange (EXI) library for Rust: XML in, EXI out.</desc>
+  <defs>
+    <linearGradient id="blue" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#0a3f80"/>
+      <stop offset="1" stop-color="#1f7fd6"/>
+    </linearGradient>
+    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#eef3f8"/>
+    </linearGradient>
+  </defs>
+  <rect width="640" height="400" rx="24" fill="url(#paper)"/>
+  <g id="mark">
+    <!-- The angle bracket behind the XML side. -->
+    <path d="M 238 66 L 176 140 L 238 214" fill="none" stroke="#c5ced9" stroke-width="14" stroke-linejoin="round"/>
+    <!-- The stroke going down: XML into the encoder. -->
+    <path d="M 226 70 C 300 70 320 120 350 160 C 380 200 400 214 440 214" fill="none" stroke="url(#blue)" stroke-width="28" stroke-linecap="round"/>
+    <!-- The stroke going up: EXI out, ending in an arrow. -->
+    <path d="M 240 216 C 300 216 320 170 350 130 C 372 100 392 84 418 74" fill="none" stroke="url(#blue)" stroke-width="28" stroke-linecap="round"/>
+    <path d="M 404 50 L 458 58 L 424 100 Z" fill="#1f7fd6"/>
+    <path d="M 290 186 L 300 176 M 312 160 L 322 150 M 334 134 L 344 124 M 356 110 L 366 100" stroke="#ffffff" stroke-width="5" stroke-linecap="round"/>
+    <!-- Events leaving as EXI. -->
+    <g fill="#e87722">
+      <rect x="388" y="132" width="14" height="10" rx="2"/>
+      <rect x="408" y="132" width="14" height="10" rx="2"/>
+      <path d="M 428 124 L 452 137 L 428 150 Z"/>
+    </g>
+    <g stroke="#9fb0c4" stroke-width="4" stroke-linecap="round">
+      <path d="M 392 112 L 418 112"/>
+      <path d="M 392 162 L 418 162"/>
+    </g>
+    <text x="150" y="150" font-family="Poppins, Montserrat, Arial, sans-serif" font-size="34" font-weight="700" fill="#0a3f80" text-anchor="end">&lt;xml</text>
+    <text x="462" y="150" font-family="Poppins, Montserrat, Arial, sans-serif" font-size="34" font-weight="700" fill="#0a3f80">exi</text>
+  </g>
+  <g id="name">
+    <text x="320" y="318" font-family="Poppins, Montserrat, Arial, sans-serif" font-size="96" font-weight="800" fill="#0a3f80" text-anchor="middle" letter-spacing="-2">exi</text>
+    <text x="408" y="270" font-family="Poppins, Montserrat, Arial, sans-serif" font-size="20" font-weight="700" fill="#e87722">Rust Native</text>
+    <text x="320" y="360" font-family="Inter, Helvetica, Arial, sans-serif" font-size="18" fill="#5b6b7d" text-anchor="middle">Efficient XML Interchange (EXI) Library for Rust</text>
+  </g>
+</svg>

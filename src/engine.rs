@@ -254,21 +254,63 @@ pub(crate) fn lexical_charset(
     }
 }
 
-/// A code table: one of the grammars', or one built for this state and
-/// kept in the cache.
+/// The event codes of the current state. Ordinary strict states use
+/// production indexes directly as their one-part codes.
 pub(crate) enum Table<'a> {
+    Flat(&'a [IProd]),
     Borrowed(&'a CodeTable),
-    Owned(CodeTable),
     Shared(alloc::sync::Arc<CodeTable>),
 }
 
-impl core::ops::Deref for Table<'_> {
-    type Target = CodeTable;
-    fn deref(&self) -> &CodeTable {
+impl Table<'_> {
+    fn explicit(&self) -> Option<&CodeTable> {
         match self {
-            Table::Borrowed(t) => t,
-            Table::Owned(t) => t,
-            Table::Shared(t) => t,
+            Table::Flat(_) => None,
+            Table::Borrowed(t) => Some(t),
+            Table::Shared(t) => Some(t),
+        }
+    }
+
+    pub fn code(&self, term: Terminal) -> Option<EventCode> {
+        match self {
+            Table::Flat(prods) => prods
+                .iter()
+                .position(|p| p.term == term)
+                .map(|i| EventCode::new(&[i as u32])),
+            Table::Borrowed(t) => t.code(term),
+            Table::Shared(t) => t.code(term),
+        }
+    }
+
+    pub fn code_with_len(&self, term: Terminal, len: u8) -> Option<EventCode> {
+        match self.explicit() {
+            Some(t) => t
+                .entries()
+                .iter()
+                .find(|(t, c)| *t == term && c.len() == len)
+                .map(|(_, c)| *c),
+            None if len == 1 => self.code(term),
+            None => None,
+        }
+    }
+
+    pub fn count(&self, prefix: &[u32]) -> u32 {
+        match self {
+            Table::Flat(prods) if prefix.is_empty() => prods.len() as u32,
+            Table::Flat(_) => 0,
+            Table::Borrowed(t) => t.count(prefix),
+            Table::Shared(t) => t.count(prefix),
+        }
+    }
+
+    fn lookup(&self, parts: &[u32]) -> Option<Terminal> {
+        match self {
+            Table::Flat(prods) => match parts {
+                &[i] => prods.get(i as usize).map(|p| p.term),
+                _ => None,
+            },
+            Table::Borrowed(t) => t.lookup(parts),
+            Table::Shared(t) => t.lookup(parts),
         }
     }
 }
@@ -454,7 +496,7 @@ impl<'g> State<'g> {
             if self.in_sc() { &None } else { &self.informed_top };
         let Some(f) = self.stack.last() else {
             return Ok(match (self.top, informed_top) {
-                (Top::Done, _) => Table::Owned(CodeTable::flat([])),
+                (Top::Done, _) => Table::Flat(&[]),
                 (Top::Content, Some((t, _, _))) => Table::Borrowed(t),
                 (Top::End, Some((_, _, end))) => Table::Borrowed(end),
                 (Top::Content, None) => {
@@ -510,11 +552,12 @@ impl<'g> State<'g> {
                     terms.push(Terminal::EE);
                     return Ok(self.cached(key, || CodeTable::flat(terms)));
                 }
-                let base = &td.tables[state as usize];
+                let prods = &td.states[state as usize];
                 if state == 0 && fresh && (td.castable || nillable) {
                     return Ok(self.cached(key, || {
-                        let mut t = base.clone();
-                        let n = td.states[0].len() as u32;
+                        let mut t =
+                            CodeTable::flat(prods.iter().map(|p| p.term));
+                        let n = prods.len() as u32;
                         let mut k = 0;
                         if td.castable {
                             t.push(Terminal::AT(XSI_TYPE), &[n, k]);
@@ -526,7 +569,7 @@ impl<'g> State<'g> {
                         t
                     }));
                 }
-                Ok(Table::Borrowed(base))
+                Ok(Table::Flat(prods))
             }
         }
     }
@@ -1291,22 +1334,24 @@ pub(crate) fn decode<D: Decoder, T: ReadTables + ?Sized>(
 ) -> Result<()> {
     let limits = st.limits;
     let table = st.table()?;
-    let mut parts: Vec<u32> = Vec::with_capacity(3);
+    let mut parts = [0; 3];
+    let mut len = 0;
     let term = loop {
-        let c = table.count(&parts);
+        let c = table.count(&parts[..len]);
         if c == 0 {
             return Err(err(ErrorKind::Grammar, "no event may follow here"));
         }
-        parts.push(read_code_part(d, c)?);
-        if let Some(term) = table.lookup(&parts) {
+        parts[len] = read_code_part(d, c)?;
+        len += 1;
+        if let Some(term) = table.lookup(&parts[..len]) {
             break term;
         }
-        if parts.len() == 3 {
+        if len == parts.len() {
             return Err(internal("event code longer than three parts"));
         }
     };
     out.term = Some(term);
-    let code = EventCode::new(&parts);
+    let code = EventCode::new(&parts[..len]);
     out.code = Some(code);
     let prefixes = st.prefixes();
     let qname = |d: &mut D,

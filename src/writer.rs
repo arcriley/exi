@@ -805,8 +805,13 @@ impl<'g, S: Sink> Writer<'g, S> {
     }
 
     fn write_code(&mut self, code: EventCode) -> Result<()> {
-        let parts = self.st.table()?.parts_with_counts(code);
-        write_event_code(&mut self.enc, &parts)
+        let mut parts = [(0, 0); 3];
+        let values = code.parts();
+        let table = self.st.table()?;
+        for (i, &value) in values.iter().enumerate() {
+            parts[i] = (value, table.count(&values[..i]));
+        }
+        write_event_code(&mut self.enc, &parts[..values.len()])
     }
 
     fn find(&self, t: Terminal) -> Result<Option<EventCode>> {
@@ -991,13 +996,7 @@ impl<'g, S: Sink> Writer<'g, S> {
     /// The added production with terminal `t` and a code of `len`
     /// parts, in the current state (non-strict informed states).
     fn find_added(&self, t: Terminal, len: u8) -> Result<Option<EventCode>> {
-        Ok(self
-            .st
-            .table()?
-            .entries()
-            .iter()
-            .find(|(x, c)| *x == t && c.len() == len)
-            .map(|(_, c)| *c))
+        Ok(self.st.table()?.code_with_len(t, len))
     }
 
     /// The open element's name in Clark notation.

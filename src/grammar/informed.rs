@@ -96,7 +96,6 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use crate::grammar::builtin::CodeTable;
 use crate::grammar::{GrammarSet, Terminal};
 use crate::tables::InitialEntries;
 use crate::value::{BinaryKind, DateTimeKind};
@@ -541,10 +540,6 @@ impl GrammarBuilder {
                     })
                 })
                 .unwrap_or(out.len()) as u32;
-            let tables = out
-                .iter()
-                .map(|st| CodeTable::flat(st.iter().map(|p| p.term)))
-                .collect();
             let t = TypeId(i as u32);
             // Named types reachable through `derives`, starting from t.
             let mut casts = Vec::new();
@@ -565,7 +560,6 @@ impl GrammarBuilder {
             types.push(TypeDef {
                 name: name.clone(),
                 states: out,
-                tables,
                 content,
                 castable: b.castable.contains(&t),
                 casts,
@@ -623,8 +617,6 @@ pub(crate) struct IProd {
 pub(crate) struct TypeDef {
     pub name: Option<OwnedName>,
     pub states: Vec<Vec<IProd>>,
-    /// One-part codes in production order, one table per state.
-    pub tables: Vec<CodeTable>,
     pub content: u32,
     pub castable: bool,
     /// Named types `xsi:type` may name where this type is expected

@@ -1,0 +1,495 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The XHTML5 coding schema, version 1: urn:libexi:xhtml5:1 (libexi Appendix D).
+
+     A schema for coding, not validation: it gives short event codes to the names most
+     pages use. Used with strict off, so a page with anything else still encodes.
+
+     Frozen: once released this file never changes; any change, even a reordering,
+     is a new version. The SHA-256 of its .exig is pinned in tests/xhtml5.rs.
+
+     Rules (Appendix D.5):
+     - every HTML element is a global element in the XHTML namespace;
+     - content types are mixed with an unbounded choice: Flow (every element),
+       Phrasing, Text (title, script, style, textarea) and Void; Html and Head;
+     - content-model rules are not encoded: html5ever has fixed the structure;
+     - global attributes in one group, element attributes on derived types, every
+       attribute value xs:string, and xs:anyAttribute for data-*, aria-* and the rest;
+     - SVG and MathML through xs:any, learned per document. -->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns="http://www.w3.org/1999/xhtml"
+           targetNamespace="http://www.w3.org/1999/xhtml" elementFormDefault="qualified">
+
+  <xs:attributeGroup name="global">
+    <xs:attribute name="class" type="xs:string"/>
+    <xs:attribute name="dir" type="xs:string"/>
+    <xs:attribute name="hidden" type="xs:string"/>
+    <xs:attribute name="id" type="xs:string"/>
+    <xs:attribute name="lang" type="xs:string"/>
+    <xs:attribute name="role" type="xs:string"/>
+    <xs:attribute name="style" type="xs:string"/>
+    <xs:attribute name="tabindex" type="xs:string"/>
+    <xs:attribute name="title" type="xs:string"/>
+    <xs:anyAttribute namespace="##any" processContents="lax"/>
+  </xs:attributeGroup>
+
+  <xs:complexType name="Flow" mixed="true">
+    <xs:choice minOccurs="0" maxOccurs="unbounded">
+      <xs:element ref="a"/>
+      <xs:element ref="abbr"/>
+      <xs:element ref="address"/>
+      <xs:element ref="area"/>
+      <xs:element ref="article"/>
+      <xs:element ref="aside"/>
+      <xs:element ref="audio"/>
+      <xs:element ref="b"/>
+      <xs:element ref="base"/>
+      <xs:element ref="bdi"/>
+      <xs:element ref="bdo"/>
+      <xs:element ref="big"/>
+      <xs:element ref="blockquote"/>
+      <xs:element ref="br"/>
+      <xs:element ref="button"/>
+      <xs:element ref="canvas"/>
+      <xs:element ref="caption"/>
+      <xs:element ref="center"/>
+      <xs:element ref="cite"/>
+      <xs:element ref="code"/>
+      <xs:element ref="col"/>
+      <xs:element ref="colgroup"/>
+      <xs:element ref="data"/>
+      <xs:element ref="datalist"/>
+      <xs:element ref="dd"/>
+      <xs:element ref="del"/>
+      <xs:element ref="details"/>
+      <xs:element ref="dfn"/>
+      <xs:element ref="dialog"/>
+      <xs:element ref="div"/>
+      <xs:element ref="dl"/>
+      <xs:element ref="dt"/>
+      <xs:element ref="em"/>
+      <xs:element ref="embed"/>
+      <xs:element ref="fieldset"/>
+      <xs:element ref="figcaption"/>
+      <xs:element ref="figure"/>
+      <xs:element ref="font"/>
+      <xs:element ref="footer"/>
+      <xs:element ref="form"/>
+      <xs:element ref="h1"/>
+      <xs:element ref="h2"/>
+      <xs:element ref="h3"/>
+      <xs:element ref="h4"/>
+      <xs:element ref="h5"/>
+      <xs:element ref="h6"/>
+      <xs:element ref="header"/>
+      <xs:element ref="hgroup"/>
+      <xs:element ref="hr"/>
+      <xs:element ref="i"/>
+      <xs:element ref="iframe"/>
+      <xs:element ref="img"/>
+      <xs:element ref="input"/>
+      <xs:element ref="ins"/>
+      <xs:element ref="kbd"/>
+      <xs:element ref="label"/>
+      <xs:element ref="legend"/>
+      <xs:element ref="li"/>
+      <xs:element ref="link"/>
+      <xs:element ref="main"/>
+      <xs:element ref="map"/>
+      <xs:element ref="mark"/>
+      <xs:element ref="menu"/>
+      <xs:element ref="meta"/>
+      <xs:element ref="meter"/>
+      <xs:element ref="nav"/>
+      <xs:element ref="noscript"/>
+      <xs:element ref="object"/>
+      <xs:element ref="ol"/>
+      <xs:element ref="optgroup"/>
+      <xs:element ref="option"/>
+      <xs:element ref="output"/>
+      <xs:element ref="p"/>
+      <xs:element ref="picture"/>
+      <xs:element ref="pre"/>
+      <xs:element ref="progress"/>
+      <xs:element ref="q"/>
+      <xs:element ref="rp"/>
+      <xs:element ref="rt"/>
+      <xs:element ref="ruby"/>
+      <xs:element ref="s"/>
+      <xs:element ref="samp"/>
+      <xs:element ref="script"/>
+      <xs:element ref="search"/>
+      <xs:element ref="section"/>
+      <xs:element ref="select"/>
+      <xs:element ref="slot"/>
+      <xs:element ref="small"/>
+      <xs:element ref="source"/>
+      <xs:element ref="span"/>
+      <xs:element ref="strike"/>
+      <xs:element ref="strong"/>
+      <xs:element ref="style"/>
+      <xs:element ref="sub"/>
+      <xs:element ref="summary"/>
+      <xs:element ref="sup"/>
+      <xs:element ref="table"/>
+      <xs:element ref="tbody"/>
+      <xs:element ref="td"/>
+      <xs:element ref="template"/>
+      <xs:element ref="textarea"/>
+      <xs:element ref="tfoot"/>
+      <xs:element ref="th"/>
+      <xs:element ref="thead"/>
+      <xs:element ref="time"/>
+      <xs:element ref="title"/>
+      <xs:element ref="tr"/>
+      <xs:element ref="track"/>
+      <xs:element ref="tt"/>
+      <xs:element ref="u"/>
+      <xs:element ref="ul"/>
+      <xs:element ref="var"/>
+      <xs:element ref="video"/>
+      <xs:element ref="wbr"/>
+      <xs:any namespace="##other" processContents="lax"/>
+    </xs:choice>
+    <xs:attributeGroup ref="global"/>
+  </xs:complexType>
+  <xs:complexType name="Phrasing" mixed="true">
+    <xs:choice minOccurs="0" maxOccurs="unbounded">
+      <xs:element ref="a"/>
+      <xs:element ref="abbr"/>
+      <xs:element ref="audio"/>
+      <xs:element ref="b"/>
+      <xs:element ref="bdi"/>
+      <xs:element ref="bdo"/>
+      <xs:element ref="big"/>
+      <xs:element ref="br"/>
+      <xs:element ref="button"/>
+      <xs:element ref="canvas"/>
+      <xs:element ref="cite"/>
+      <xs:element ref="code"/>
+      <xs:element ref="data"/>
+      <xs:element ref="datalist"/>
+      <xs:element ref="del"/>
+      <xs:element ref="dfn"/>
+      <xs:element ref="em"/>
+      <xs:element ref="embed"/>
+      <xs:element ref="font"/>
+      <xs:element ref="i"/>
+      <xs:element ref="iframe"/>
+      <xs:element ref="img"/>
+      <xs:element ref="input"/>
+      <xs:element ref="ins"/>
+      <xs:element ref="kbd"/>
+      <xs:element ref="label"/>
+      <xs:element ref="map"/>
+      <xs:element ref="mark"/>
+      <xs:element ref="meter"/>
+      <xs:element ref="noscript"/>
+      <xs:element ref="object"/>
+      <xs:element ref="output"/>
+      <xs:element ref="picture"/>
+      <xs:element ref="progress"/>
+      <xs:element ref="q"/>
+      <xs:element ref="ruby"/>
+      <xs:element ref="s"/>
+      <xs:element ref="samp"/>
+      <xs:element ref="script"/>
+      <xs:element ref="select"/>
+      <xs:element ref="slot"/>
+      <xs:element ref="small"/>
+      <xs:element ref="span"/>
+      <xs:element ref="strike"/>
+      <xs:element ref="strong"/>
+      <xs:element ref="sub"/>
+      <xs:element ref="sup"/>
+      <xs:element ref="template"/>
+      <xs:element ref="textarea"/>
+      <xs:element ref="time"/>
+      <xs:element ref="tt"/>
+      <xs:element ref="u"/>
+      <xs:element ref="var"/>
+      <xs:element ref="video"/>
+      <xs:element ref="wbr"/>
+      <xs:any namespace="##other" processContents="lax"/>
+    </xs:choice>
+    <xs:attributeGroup ref="global"/>
+  </xs:complexType>
+  <xs:complexType name="Void">
+    <xs:attributeGroup ref="global"/>
+  </xs:complexType>
+  <xs:complexType name="Text">
+    <xs:simpleContent><xs:extension base="xs:string"><xs:attributeGroup ref="global"/></xs:extension></xs:simpleContent>
+  </xs:complexType>
+  <xs:complexType name="Html" mixed="true">
+    <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:element ref="head"/><xs:element ref="body"/></xs:choice>
+    <xs:attributeGroup ref="global"/>
+  </xs:complexType>
+  <xs:complexType name="Head" mixed="true">
+    <xs:choice minOccurs="0" maxOccurs="unbounded">
+      <xs:element ref="base"/>
+      <xs:element ref="link"/>
+      <xs:element ref="meta"/>
+      <xs:element ref="noscript"/>
+      <xs:element ref="script"/>
+      <xs:element ref="style"/>
+      <xs:element ref="template"/>
+      <xs:element ref="title"/>
+    </xs:choice>
+    <xs:attributeGroup ref="global"/>
+  </xs:complexType>
+
+  <xs:complexType name="A">
+    <xs:complexContent mixed="true"><xs:extension base="Flow">
+      <xs:attribute name="href" type="xs:string"/>
+      <xs:attribute name="rel" type="xs:string"/>
+      <xs:attribute name="target" type="xs:string"/>
+    </xs:extension></xs:complexContent>
+  </xs:complexType>
+  <xs:complexType name="Button">
+    <xs:complexContent mixed="true"><xs:extension base="Phrasing">
+      <xs:attribute name="type" type="xs:string"/>
+    </xs:extension></xs:complexContent>
+  </xs:complexType>
+  <xs:complexType name="Form">
+    <xs:complexContent mixed="true"><xs:extension base="Flow">
+      <xs:attribute name="action" type="xs:string"/>
+      <xs:attribute name="method" type="xs:string"/>
+    </xs:extension></xs:complexContent>
+  </xs:complexType>
+  <xs:complexType name="Iframe">
+    <xs:complexContent mixed="true"><xs:extension base="Flow">
+      <xs:attribute name="allow" type="xs:string"/>
+      <xs:attribute name="height" type="xs:string"/>
+      <xs:attribute name="src" type="xs:string"/>
+      <xs:attribute name="width" type="xs:string"/>
+    </xs:extension></xs:complexContent>
+  </xs:complexType>
+  <xs:complexType name="Img">
+    <xs:complexContent><xs:extension base="Void">
+      <xs:attribute name="alt" type="xs:string"/>
+      <xs:attribute name="height" type="xs:string"/>
+      <xs:attribute name="loading" type="xs:string"/>
+      <xs:attribute name="sizes" type="xs:string"/>
+      <xs:attribute name="src" type="xs:string"/>
+      <xs:attribute name="srcset" type="xs:string"/>
+      <xs:attribute name="width" type="xs:string"/>
+    </xs:extension></xs:complexContent>
+  </xs:complexType>
+  <xs:complexType name="Input">
+    <xs:complexContent><xs:extension base="Void">
+      <xs:attribute name="checked" type="xs:string"/>
+      <xs:attribute name="name" type="xs:string"/>
+      <xs:attribute name="placeholder" type="xs:string"/>
+      <xs:attribute name="type" type="xs:string"/>
+      <xs:attribute name="value" type="xs:string"/>
+    </xs:extension></xs:complexContent>
+  </xs:complexType>
+  <xs:complexType name="Label">
+    <xs:complexContent mixed="true"><xs:extension base="Phrasing">
+      <xs:attribute name="for" type="xs:string"/>
+    </xs:extension></xs:complexContent>
+  </xs:complexType>
+  <xs:complexType name="Link">
+    <xs:complexContent><xs:extension base="Void">
+      <xs:attribute name="as" type="xs:string"/>
+      <xs:attribute name="crossorigin" type="xs:string"/>
+      <xs:attribute name="href" type="xs:string"/>
+      <xs:attribute name="media" type="xs:string"/>
+      <xs:attribute name="rel" type="xs:string"/>
+      <xs:attribute name="sizes" type="xs:string"/>
+      <xs:attribute name="type" type="xs:string"/>
+    </xs:extension></xs:complexContent>
+  </xs:complexType>
+  <xs:complexType name="Meta">
+    <xs:complexContent><xs:extension base="Void">
+      <xs:attribute name="charset" type="xs:string"/>
+      <xs:attribute name="content" type="xs:string"/>
+      <xs:attribute name="http-equiv" type="xs:string"/>
+      <xs:attribute name="name" type="xs:string"/>
+      <xs:attribute name="property" type="xs:string"/>
+    </xs:extension></xs:complexContent>
+  </xs:complexType>
+  <xs:complexType name="Option">
+    <xs:complexContent mixed="true"><xs:extension base="Phrasing">
+      <xs:attribute name="selected" type="xs:string"/>
+      <xs:attribute name="value" type="xs:string"/>
+    </xs:extension></xs:complexContent>
+  </xs:complexType>
+  <xs:complexType name="Script">
+    <xs:simpleContent><xs:extension base="Text">
+      <xs:attribute name="async" type="xs:string"/>
+      <xs:attribute name="crossorigin" type="xs:string"/>
+      <xs:attribute name="defer" type="xs:string"/>
+      <xs:attribute name="integrity" type="xs:string"/>
+      <xs:attribute name="src" type="xs:string"/>
+      <xs:attribute name="type" type="xs:string"/>
+    </xs:extension></xs:simpleContent>
+  </xs:complexType>
+  <xs:complexType name="Select">
+    <xs:complexContent mixed="true"><xs:extension base="Flow">
+      <xs:attribute name="name" type="xs:string"/>
+    </xs:extension></xs:complexContent>
+  </xs:complexType>
+  <xs:complexType name="Source">
+    <xs:complexContent><xs:extension base="Void">
+      <xs:attribute name="media" type="xs:string"/>
+      <xs:attribute name="sizes" type="xs:string"/>
+      <xs:attribute name="src" type="xs:string"/>
+      <xs:attribute name="srcset" type="xs:string"/>
+      <xs:attribute name="type" type="xs:string"/>
+    </xs:extension></xs:complexContent>
+  </xs:complexType>
+  <xs:complexType name="Td">
+    <xs:complexContent mixed="true"><xs:extension base="Flow">
+      <xs:attribute name="colspan" type="xs:string"/>
+      <xs:attribute name="rowspan" type="xs:string"/>
+    </xs:extension></xs:complexContent>
+  </xs:complexType>
+  <xs:complexType name="Textarea">
+    <xs:simpleContent><xs:extension base="Text">
+      <xs:attribute name="cols" type="xs:string"/>
+      <xs:attribute name="name" type="xs:string"/>
+      <xs:attribute name="placeholder" type="xs:string"/>
+      <xs:attribute name="rows" type="xs:string"/>
+    </xs:extension></xs:simpleContent>
+  </xs:complexType>
+  <xs:complexType name="Th">
+    <xs:complexContent mixed="true"><xs:extension base="Flow">
+      <xs:attribute name="colspan" type="xs:string"/>
+      <xs:attribute name="rowspan" type="xs:string"/>
+      <xs:attribute name="scope" type="xs:string"/>
+    </xs:extension></xs:complexContent>
+  </xs:complexType>
+  <xs:complexType name="Time">
+    <xs:complexContent mixed="true"><xs:extension base="Phrasing">
+      <xs:attribute name="datetime" type="xs:string"/>
+    </xs:extension></xs:complexContent>
+  </xs:complexType>
+  <xs:complexType name="Video">
+    <xs:complexContent mixed="true"><xs:extension base="Flow">
+      <xs:attribute name="autoplay" type="xs:string"/>
+      <xs:attribute name="controls" type="xs:string"/>
+      <xs:attribute name="loop" type="xs:string"/>
+      <xs:attribute name="muted" type="xs:string"/>
+      <xs:attribute name="playsinline" type="xs:string"/>
+      <xs:attribute name="poster" type="xs:string"/>
+      <xs:attribute name="src" type="xs:string"/>
+    </xs:extension></xs:complexContent>
+  </xs:complexType>
+
+  <xs:element name="a" type="A"/>
+  <xs:element name="abbr" type="Phrasing"/>
+  <xs:element name="address" type="Flow"/>
+  <xs:element name="area" type="Flow"/>
+  <xs:element name="article" type="Flow"/>
+  <xs:element name="aside" type="Flow"/>
+  <xs:element name="audio" type="Flow"/>
+  <xs:element name="b" type="Phrasing"/>
+  <xs:element name="base" type="Flow"/>
+  <xs:element name="bdi" type="Phrasing"/>
+  <xs:element name="bdo" type="Phrasing"/>
+  <xs:element name="big" type="Phrasing"/>
+  <xs:element name="blockquote" type="Flow"/>
+  <xs:element name="body" type="Flow"/>
+  <xs:element name="br" type="Void"/>
+  <xs:element name="button" type="Button"/>
+  <xs:element name="canvas" type="Flow"/>
+  <xs:element name="caption" type="Flow"/>
+  <xs:element name="center" type="Flow"/>
+  <xs:element name="cite" type="Phrasing"/>
+  <xs:element name="code" type="Phrasing"/>
+  <xs:element name="col" type="Flow"/>
+  <xs:element name="colgroup" type="Flow"/>
+  <xs:element name="data" type="Flow"/>
+  <xs:element name="datalist" type="Flow"/>
+  <xs:element name="dd" type="Flow"/>
+  <xs:element name="del" type="Flow"/>
+  <xs:element name="details" type="Flow"/>
+  <xs:element name="dfn" type="Phrasing"/>
+  <xs:element name="dialog" type="Flow"/>
+  <xs:element name="div" type="Flow"/>
+  <xs:element name="dl" type="Flow"/>
+  <xs:element name="dt" type="Flow"/>
+  <xs:element name="em" type="Phrasing"/>
+  <xs:element name="embed" type="Flow"/>
+  <xs:element name="fieldset" type="Flow"/>
+  <xs:element name="figcaption" type="Flow"/>
+  <xs:element name="figure" type="Flow"/>
+  <xs:element name="font" type="Flow"/>
+  <xs:element name="footer" type="Flow"/>
+  <xs:element name="form" type="Form"/>
+  <xs:element name="h1" type="Flow"/>
+  <xs:element name="h2" type="Flow"/>
+  <xs:element name="h3" type="Flow"/>
+  <xs:element name="h4" type="Flow"/>
+  <xs:element name="h5" type="Flow"/>
+  <xs:element name="h6" type="Flow"/>
+  <xs:element name="head" type="Head"/>
+  <xs:element name="header" type="Flow"/>
+  <xs:element name="hgroup" type="Flow"/>
+  <xs:element name="hr" type="Void"/>
+  <xs:element name="html" type="Html"/>
+  <xs:element name="i" type="Phrasing"/>
+  <xs:element name="iframe" type="Iframe"/>
+  <xs:element name="img" type="Img"/>
+  <xs:element name="input" type="Input"/>
+  <xs:element name="ins" type="Flow"/>
+  <xs:element name="kbd" type="Phrasing"/>
+  <xs:element name="label" type="Label"/>
+  <xs:element name="legend" type="Flow"/>
+  <xs:element name="li" type="Flow"/>
+  <xs:element name="link" type="Link"/>
+  <xs:element name="main" type="Flow"/>
+  <xs:element name="map" type="Flow"/>
+  <xs:element name="mark" type="Phrasing"/>
+  <xs:element name="menu" type="Flow"/>
+  <xs:element name="meta" type="Meta"/>
+  <xs:element name="meter" type="Flow"/>
+  <xs:element name="nav" type="Flow"/>
+  <xs:element name="noscript" type="Flow"/>
+  <xs:element name="object" type="Flow"/>
+  <xs:element name="ol" type="Flow"/>
+  <xs:element name="optgroup" type="Flow"/>
+  <xs:element name="option" type="Option"/>
+  <xs:element name="output" type="Flow"/>
+  <xs:element name="p" type="Flow"/>
+  <xs:element name="picture" type="Flow"/>
+  <xs:element name="pre" type="Flow"/>
+  <xs:element name="progress" type="Flow"/>
+  <xs:element name="q" type="Flow"/>
+  <xs:element name="rp" type="Phrasing"/>
+  <xs:element name="rt" type="Phrasing"/>
+  <xs:element name="ruby" type="Phrasing"/>
+  <xs:element name="s" type="Phrasing"/>
+  <xs:element name="samp" type="Phrasing"/>
+  <xs:element name="script" type="Script"/>
+  <xs:element name="search" type="Flow"/>
+  <xs:element name="section" type="Flow"/>
+  <xs:element name="select" type="Select"/>
+  <xs:element name="slot" type="Flow"/>
+  <xs:element name="small" type="Phrasing"/>
+  <xs:element name="source" type="Source"/>
+  <xs:element name="span" type="Phrasing"/>
+  <xs:element name="strike" type="Phrasing"/>
+  <xs:element name="strong" type="Phrasing"/>
+  <xs:element name="style" type="Flow"/>
+  <xs:element name="sub" type="Phrasing"/>
+  <xs:element name="summary" type="Flow"/>
+  <xs:element name="sup" type="Phrasing"/>
+  <xs:element name="table" type="Flow"/>
+  <xs:element name="tbody" type="Flow"/>
+  <xs:element name="td" type="Td"/>
+  <xs:element name="template" type="Flow"/>
+  <xs:element name="textarea" type="Textarea"/>
+  <xs:element name="tfoot" type="Flow"/>
+  <xs:element name="th" type="Th"/>
+  <xs:element name="thead" type="Flow"/>
+  <xs:element name="time" type="Time"/>
+  <xs:element name="title" type="Text"/>
+  <xs:element name="tr" type="Flow"/>
+  <xs:element name="track" type="Flow"/>
+  <xs:element name="tt" type="Phrasing"/>
+  <xs:element name="u" type="Phrasing"/>
+  <xs:element name="ul" type="Flow"/>
+  <xs:element name="var" type="Phrasing"/>
+  <xs:element name="video" type="Video"/>
+  <xs:element name="wbr" type="Void"/>
+</xs:schema>

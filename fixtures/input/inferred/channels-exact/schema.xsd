@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" elementFormDefault="qualified">
+  <xs:simpleType name="e-k">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="v0"/>
+      <xs:enumeration value="v1"/>
+      <xs:enumeration value="v2"/>
+      <xs:enumeration value="v3"/>
+      <xs:enumeration value="v4"/>
+      <xs:enumeration value="v5"/>
+      <xs:enumeration value="v6"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="e-rare">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="v0"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="e-t">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="v0"/>
+      <xs:enumeration value="v1"/>
+      <xs:enumeration value="v2"/>
+      <xs:enumeration value="v3"/>
+      <xs:enumeration value="v4"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="note-value">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="v0"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:element name="e">
+    <xs:complexType>
+      <xs:simpleContent>
+        <xs:extension base="xs:string">
+        <xs:attribute name="k" type="e-k" use="required"/>
+        <xs:attribute name="rare" type="e-rare"/>
+        <xs:attribute name="t" type="e-t" use="required"/>
+        </xs:extension>
+      </xs:simpleContent>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="log">
+    <xs:complexType>
+      <xs:choice minOccurs="0" maxOccurs="unbounded">
+        <xs:element ref="e"/>
+        <xs:element ref="note"/>
+      </xs:choice>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="note" type="note-value"/>
+</xs:schema>

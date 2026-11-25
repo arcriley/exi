@@ -1,0 +1,60 @@
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns="urn:c" xmlns:o="urn:other"
+           targetNamespace="urn:c" elementFormDefault="qualified">
+  <xs:import namespace="urn:other" schemaLocation="other.xsd"/>
+  <xs:simpleType name="code"><xs:restriction base="xs:string"><xs:pattern value="[A-F0-9]{2}(-[A-F0-9]{2})*"/></xs:restriction></xs:simpleType>
+  <xs:simpleType name="level"><xs:restriction base="xs:token"><xs:enumeration value="low"/><xs:enumeration value="mid"/><xs:enumeration value="high"/></xs:restriction></xs:simpleType>
+  <xs:simpleType name="levels"><xs:list itemType="level"/></xs:simpleType>
+  <xs:simpleType name="numOrWord"><xs:union memberTypes="xs:int xs:NCName"/></xs:simpleType>
+  <xs:simpleType name="percent"><xs:restriction base="xs:integer"><xs:minInclusive value="0"/><xs:maxInclusive value="100"/></xs:restriction></xs:simpleType>
+  <xs:simpleType name="big"><xs:restriction base="xs:integer"><xs:minExclusive value="-1"/></xs:restriction></xs:simpleType>
+  <xs:attributeGroup name="common">
+    <xs:attribute name="id" type="xs:ID"/>
+    <xs:attribute name="zlast" type="xs:string"/>
+    <xs:attribute ref="o:flag"/>
+  </xs:attributeGroup>
+  <xs:group name="pair"><xs:sequence><xs:element name="k" type="xs:string"/><xs:element name="v" type="xs:string" minOccurs="0"/></xs:sequence></xs:group>
+  <xs:complexType name="Base">
+    <xs:sequence><xs:element name="name" type="xs:string"/></xs:sequence>
+    <xs:attributeGroup ref="common"/>
+  </xs:complexType>
+  <xs:complexType name="Derived">
+    <xs:complexContent><xs:extension base="Base">
+      <xs:sequence><xs:element name="extra" type="xs:int" maxOccurs="3"/></xs:sequence>
+      <xs:attribute name="kind" type="level" use="required"/>
+    </xs:extension></xs:complexContent>
+  </xs:complexType>
+  <xs:complexType name="Measure">
+    <xs:simpleContent><xs:extension base="xs:decimal"><xs:attribute name="unit" type="xs:string"/></xs:extension></xs:simpleContent>
+  </xs:complexType>
+  <xs:element name="shape" type="Base" abstract="false"/>
+  <xs:element name="circle" substitutionGroup="shape" type="Derived"/>
+  <xs:element name="box" substitutionGroup="shape"/>
+  <xs:element name="doc">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:choice maxOccurs="unbounded">
+          <xs:element ref="shape"/>
+          <xs:element name="note" type="xs:string"/>
+          <xs:group ref="pair"/>
+        </xs:choice>
+        <xs:element name="m" type="Measure" minOccurs="2" maxOccurs="4"/>
+        <xs:element name="any">
+          <xs:complexType mixed="true"><xs:sequence>
+            <xs:any namespace="##other" processContents="skip" minOccurs="0" maxOccurs="unbounded"/>
+            <xs:element name="b" type="xs:string" minOccurs="0"/>
+          </xs:sequence><xs:anyAttribute namespace="urn:other ##local"/></xs:complexType>
+        </xs:element>
+        <xs:element name="all">
+          <xs:complexType><xs:all><xs:element name="x" type="code"/><xs:element name="y" type="levels" minOccurs="0"/><xs:element name="z" type="numOrWord"/></xs:all></xs:complexType>
+        </xs:element>
+        <xs:element name="nums"><xs:complexType><xs:sequence>
+          <xs:element name="p" type="percent" maxOccurs="unbounded"/>
+          <xs:element name="g" type="big"/>
+        </xs:sequence></xs:complexType></xs:element>
+        <xs:element name="typed" type="Base" maxOccurs="unbounded"/>
+        <xs:element name="empty"><xs:complexType><xs:anyAttribute/></xs:complexType></xs:element>
+      </xs:sequence>
+      <xs:attribute name="version" type="xs:decimal" fixed="1.0"/>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>

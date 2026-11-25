@@ -1,0 +1,10 @@
+<list>
+  <item id="a">
+    <name>first</name>
+    <count>1</count>
+  </item>
+  <item>
+    <name/>
+    <count> 2 </count>
+  </item>
+</list>

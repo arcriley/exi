@@ -1,0 +1,729 @@
+// src/dom/io.rs
+//
+// Conversion between document trees and events
+// Copyright © 2026 Arc Riley
+//
+// This file is free software and available for distribution by
+// the terms of the Apache 2.0 or MIT licenses. Code contrubutions
+// are welcome only if this notice remains unchanged clearly
+// communicating that changes are made under these same conditions.
+//
+//! Trees from events and events from trees: layer 2 reads and writes
+//! through layer 1.
+
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::ptr;
+
+use super::raw::*;
+use super::{Document, NodeId, append_raw};
+use crate::stream::{EventSink, EventSource, Step};
+use crate::strings::GlobalStrings;
+use crate::{Error, ErrorKind, Event, EventMeta, Name, NsDecl, Result, Value};
+
+/// Builds a [`Document`] from events: an [`EventSink`], so any reader
+/// feeds it, a piece at a time.
+///
+/// ```
+/// use exi::dom::DocumentBuilder;
+/// use exi::strings::{GlobalConfig, GlobalStrings};
+/// use exi::EventSink;
+///
+/// let strings = GlobalStrings::new(GlobalConfig::new())?;
+/// let mut b = DocumentBuilder::new(&strings);
+/// b.start_element("stream")?;
+/// b.start_element("message")?;
+/// b.attribute("to", "juliet@example.com")?;
+/// b.end_element()?;
+/// // The stream is still open, and the tree is usable: an XMPP server works this way.
+/// let doc = b.document();
+/// let stream = doc.root().unwrap();
+/// assert_eq!(doc.child_element_count(stream), 1);
+/// # Ok::<(), exi::Error>(())
+/// ```
+pub struct DocumentBuilder<'g> {
+    doc: Document<'g>,
+    stack: Vec<*mut RawNode>,
+    /// The open element's namespace is chosen after its NS events.
+    pending: bool,
+    text: String,
+    line: u32,
+    ignore_blanks: bool,
+    ended: bool,
+}
+
+impl<'g> DocumentBuilder<'g> {
+    pub fn new(strings: &'g GlobalStrings) -> DocumentBuilder<'g> {
+        DocumentBuilder {
+            doc: Document::new(strings),
+            stack: Vec::new(),
+            pending: false,
+            text: String::new(),
+            line: 0,
+            ignore_blanks: false,
+            ended: false,
+        }
+    }
+
+    /// Leave out text that is whitespace only, such as indentation
+    /// (libxml2's `XML_PARSE_NOBLANKS`). Off by default.
+    pub fn ignore_blanks(mut self, on: bool) -> Self {
+        self.ignore_blanks = on;
+        self
+    }
+
+    /// The tree so far. Open elements are in it, without their end.
+    pub fn document(&self) -> &Document<'g> {
+        &self.doc
+    }
+
+    pub fn document_mut(&mut self) -> &mut Document<'g> {
+        &mut self.doc
+    }
+
+    /// The open element, if any.
+    pub fn current(&self) -> Option<NodeId> {
+        self.stack.last().map(|&p| self.doc.id(p as *mut RawCommon))
+    }
+
+    /// The document, after its end.
+    ///
+    /// # Errors
+    ///
+    /// `ErrorKind::State` before `EndDocument`.
+    pub fn finish(self) -> Result<Document<'g>> {
+        if !self.ended {
+            return Err(Error::new(
+                ErrorKind::State,
+                "the document has not ended",
+            ));
+        }
+        Ok(self.doc)
+    }
+
+    /// The tree, ended or not: open elements stay as they are.
+    pub fn into_document(mut self) -> Document<'g> {
+        let _ = self.flush();
+        let _ = self.settle();
+        self.doc
+    }
+
+    /// An event with its position: the start tag's line goes to `line`.
+    pub fn event_at(
+        &mut self,
+        ev: &Event<'_>,
+        meta: Option<&EventMeta>,
+    ) -> Result<()> {
+        if let Some(m) = meta {
+            self.line = m.position.line;
+        }
+        self.event(ev)
+    }
+
+    fn parent(&self) -> *mut RawCommon {
+        match self.stack.last() {
+            Some(&p) => p as *mut RawCommon,
+            None => self.doc.doc_ptr() as *mut RawCommon,
+        }
+    }
+
+    /// Chooses the open element's namespace, once its declarations are
+    /// in.
+    fn settle(&mut self) -> Result<()> {
+        if self.pending {
+            self.pending = false;
+            if let Some(&el) = self.stack.last() {
+                self.doc.fix_ns(el, super::Declare::Here)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        if self.text.is_empty() {
+            return Ok(());
+        }
+        let text = core::mem::take(&mut self.text);
+        if self.stack.is_empty()
+            || (self.ignore_blanks
+                && text
+                    .bytes()
+                    .all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r')))
+        {
+            return Ok(());
+        }
+        let n = self.doc.new_text(&text);
+        self.place(n);
+        Ok(())
+    }
+
+    fn place(&mut self, n: NodeId) {
+        let p = self.doc.p(n);
+        // SAFETY: a new node appended to the open element or the
+        // document.
+        unsafe { append_raw(self.parent(), p) };
+    }
+
+    fn start_ev(&mut self, name: Name<'_>) -> Result<()> {
+        self.flush()?;
+        self.settle()?;
+        let p = self.doc.alloc_node(EXI_ELEMENT_NODE);
+        self.doc.set_name(p, name)?;
+        self.doc.want_prefix(p, name.prefix());
+        // SAFETY: a new element appended to the open element or the
+        // document.
+        unsafe {
+            (*(p as *mut RawNode)).line =
+                self.line.min(u16::MAX as u32) as u16;
+            append_raw(self.parent(), p);
+        }
+        self.stack.push(p as *mut RawNode);
+        self.pending = true;
+        Ok(())
+    }
+
+    fn ns_ev(&mut self, d: &NsDecl<'_>) -> Result<()> {
+        let &el = self.stack.last().ok_or_else(|| {
+            Error::new(ErrorKind::State, "a namespace outside an element")
+        })?;
+        let prefix = (!d.prefix.is_empty()).then_some(d.prefix);
+        if prefix == Some("xml") {
+            return Ok(());
+        }
+        let ns = self.doc.declare_raw(el, prefix, d.uri)?;
+        if d.local_element_ns {
+            // SAFETY: the open element.
+            unsafe { (*el).ns = ns };
+        }
+        Ok(())
+    }
+
+    fn attribute_ev(&mut self, name: Name<'_>, v: &Value<'_>) -> Result<()> {
+        self.settle()?;
+        let &el = self.stack.last().ok_or_else(|| {
+            Error::new(ErrorKind::State, "an attribute outside an element")
+        })?;
+        let a = self.doc.alloc_attr();
+        self.doc.set_name(a, name)?;
+        self.doc.want_prefix(a, name.prefix());
+        // SAFETY: a new attribute on the open element.
+        unsafe { super::append_attr_raw(el, a as *mut RawAttr) };
+        self.doc.fix_attr_ns(a as *mut RawAttr, super::Declare::Here)?;
+        let t = self.doc.new_value(v.to_owned());
+        let tp = self.doc.p(t);
+        // SAFETY: a new text node under the new attribute.
+        unsafe { append_raw(a, tp) };
+        Ok(())
+    }
+
+    fn characters(&mut self, v: &Value<'_>) -> Result<()> {
+        if self.stack.is_empty() {
+            return Ok(()); // whitespace around the root element
+        }
+        self.settle()?;
+        match v {
+            Value::Str(s) => self.text.push_str(s),
+            v => {
+                self.flush()?;
+                let n = self.doc.new_value(v.to_owned());
+                self.place(n);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl EventSink for DocumentBuilder<'_> {
+    fn event(&mut self, ev: &Event<'_>) -> Result<()> {
+        if self.ended {
+            return Err(Error::new(
+                ErrorKind::State,
+                "an event after the end of the document",
+            ));
+        }
+        match ev {
+            Event::StartDocument | Event::SelfContained => Ok(()),
+            Event::StartElement(n) => self.start_ev(*n),
+            Event::Namespace(d) => self.ns_ev(d),
+            Event::Attribute(n, v) => self.attribute_ev(*n, v),
+            Event::Characters(v) => self.characters(v),
+            Event::EndElement(_) => {
+                self.flush()?;
+                self.settle()?;
+                self.stack.pop().ok_or_else(|| {
+                    Error::new(ErrorKind::State, "an end with no element open")
+                })?;
+                Ok(())
+            }
+            Event::Comment(t) => {
+                self.flush()?;
+                self.settle()?;
+                let n = self.doc.new_comment(t);
+                self.place(n);
+                Ok(())
+            }
+            Event::ProcessingInstruction { target, data } => {
+                self.flush()?;
+                self.settle()?;
+                let n = self.doc.new_pi(target, data);
+                self.place(n);
+                Ok(())
+            }
+            Event::EntityReference(name) => {
+                self.flush()?;
+                self.settle()?;
+                let n = self.doc.new_entity_ref(name);
+                self.place(n);
+                Ok(())
+            }
+            Event::Doctype(d) => {
+                self.doc.set_doctype(*d);
+                Ok(())
+            }
+            Event::EndDocument => {
+                self.flush()?;
+                if !self.stack.is_empty() {
+                    return Err(Error::new(
+                        ErrorKind::State,
+                        "the document ended inside an element",
+                    ));
+                }
+                self.ended = true;
+                Ok(())
+            }
+            Event::StartTag(t) => {
+                self.start_ev(t.name)?;
+                for d in t.ns {
+                    self.ns_ev(d)?;
+                }
+                for (n, v) in t.attrs {
+                    self.attribute_ev(*n, v)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl<'g> Document<'g> {
+    /// A document from every event of `source` (`xmlReadMemory` for any
+    /// layer 1 reader: XML text, EXI, or your own). The source must
+    /// have all its input; for input that arrives in pieces, feed a
+    /// [`DocumentBuilder`].
+    ///
+    /// # Errors
+    ///
+    /// The source's errors; `ErrorKind::Truncated` if it needs more
+    /// input.
+    ///
+    /// ```
+    /// # #[cfg(feature = "xml")] {
+    /// use exi::dom::Document;
+    /// use exi::grammar::GrammarSet;
+    /// use exi::strings::{GlobalConfig, GlobalStrings};
+    /// use exi::{Coding, Options, Reader, ReaderConfig, Writer, WriterConfig};
+    ///
+    /// let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let set = GrammarSet::schemaless();
+    /// let g = set.attach(&strings)?;
+    /// let doc = Document::parse_xml(&strings, b"<note to='Tove'>Hello</note>")?;
+    ///
+    /// // To EXI, and back into a tree.
+    /// let opts = Options::builder().coding(Coding::ByteAligned).build()?;
+    /// let mut w = Writer::new(Vec::new(), WriterConfig::new(opts, &g))?;
+    /// doc.write(&mut w)?;
+    /// let exi = w.into_sink();
+    /// let mut r: Reader = Reader::new(ReaderConfig::new(&g))?;
+    /// r.feed(&exi);
+    /// r.end_input();
+    /// let back = Document::read(&strings, &mut r)?;
+    /// assert_eq!(back.to_xml()?, "<note to=\"Tove\">Hello</note>");
+    /// # }
+    /// # Ok::<(), exi::Error>(())
+    /// ```
+    pub fn read(
+        strings: &'g GlobalStrings,
+        source: &mut impl EventSource,
+    ) -> Result<Document<'g>> {
+        let mut b = DocumentBuilder::new(strings);
+        loop {
+            match source.next()? {
+                Step::Event(e, meta) => b.event_at(&e, Some(&meta))?,
+                Step::NeedInput => {
+                    return Err(Error::new(
+                        ErrorKind::Truncated,
+                        "the source needs more input",
+                    ));
+                }
+                Step::End => break,
+            }
+        }
+        b.finish()
+    }
+
+    /// A document from XML text (`xmlReadMemory`). Comments, PIs and
+    /// the DOCTYPE are kept.
+    #[cfg(feature = "xml")]
+    pub fn parse_xml(
+        strings: &'g GlobalStrings,
+        xml: &[u8],
+    ) -> Result<Document<'g>> {
+        Self::parse_xml_with(strings, xml, DocumentBuilder::new(strings))
+    }
+
+    /// As [`parse_xml`](Self::parse_xml), with a configured builder.
+    #[cfg(feature = "xml")]
+    pub fn parse_xml_with(
+        strings: &'g GlobalStrings,
+        xml: &[u8],
+        mut b: DocumentBuilder<'g>,
+    ) -> Result<Document<'g>> {
+        use crate::grammar::GrammarSet;
+        use crate::xml::{XmlConfig, XmlReader};
+        let set = GrammarSet::schemaless();
+        let g = set.attach(strings)?;
+        let mut x: XmlReader = XmlReader::new(
+            XmlConfig::new()
+                .report_comments(true)
+                .report_pis(true)
+                .report_doctype(true),
+            &g,
+        );
+        let mut rest = xml;
+        loop {
+            rest = &rest[x.feed(rest)..];
+            if rest.is_empty() {
+                x.end_input();
+            }
+            loop {
+                match x.next()? {
+                    Step::Event(e, meta) => b.event_at(&e, Some(&meta))?,
+                    Step::NeedInput => break,
+                    Step::End => return b.finish(),
+                }
+            }
+        }
+    }
+
+    /// Writes the document's events to `sink` (`xmlDocDump` for any
+    /// layer 1 writer).
+    pub fn write(&self, sink: &mut impl EventSink) -> Result<()> {
+        let mut e = self.events();
+        while let Step::Event(ev, _) = e.next()? {
+            sink.event(&ev)?;
+        }
+        Ok(())
+    }
+
+    /// Writes one element and everything inside it, with the namespace
+    /// declarations it needs from its ancestors: a stanza from a
+    /// stream.
+    pub fn write_subtree(
+        &self,
+        element: NodeId,
+        sink: &mut impl EventSink,
+    ) -> Result<()> {
+        let mut e = self.subtree_events(element);
+        while let Step::Event(ev, _) = e.next()? {
+            sink.event(&ev)?;
+        }
+        Ok(())
+    }
+
+    /// The document as events: an [`EventSource`].
+    pub fn events(&self) -> DocEvents<'_, 'g> {
+        DocEvents {
+            doc: self,
+            top: ptr::null_mut(),
+            top_ns: Vec::new(),
+            state: St::Start,
+            scratch: String::new(),
+        }
+    }
+
+    /// One element as events (no StartDocument or EndDocument).
+    pub fn subtree_events(&self, element: NodeId) -> DocEvents<'_, 'g> {
+        let p = self.p(element);
+        // Declarations in scope at the element, nearest first, one per
+        // prefix.
+        let mut top_ns: Vec<*mut RawNs> = Vec::new();
+        // SAFETY: walking live ancestors.
+        unsafe {
+            if (*p).r#type == EXI_ELEMENT_NODE {
+                let mut e = p as *mut RawNode;
+                while !e.is_null() && (*e).r#type == EXI_ELEMENT_NODE {
+                    let mut ns = (*e).nsDef;
+                    while !ns.is_null() {
+                        if !top_ns.iter().any(|&o| {
+                            (*o).prefix.is_null() == (*ns).prefix.is_null()
+                                && str_at((*o).prefix) == str_at((*ns).prefix)
+                        }) {
+                            top_ns.push(ns);
+                        }
+                        ns = (*ns).next;
+                    }
+                    e = (*e).parent;
+                }
+            }
+        }
+        DocEvents {
+            doc: self,
+            top: p,
+            top_ns,
+            state: St::Enter(p),
+            scratch: String::new(),
+        }
+    }
+
+    /// The document as XML text, without an XML declaration.
+    #[cfg(feature = "xml")]
+    pub fn to_xml(&self) -> Result<String> {
+        let b = self.write_xml(crate::xml::XmlWriterConfig::new())?;
+        String::from_utf8(b).map_err(|_| {
+            Error::new(
+                ErrorKind::Internal,
+                "the XML writer wrote bytes that are not UTF-8",
+            )
+        })
+    }
+
+    /// The document as XML text with this writer configuration
+    /// (`xmlDocDumpMemory`). The tree's own prefixes and declarations
+    /// are written.
+    #[cfg(feature = "xml")]
+    pub fn write_xml(
+        &self,
+        cfg: crate::xml::XmlWriterConfig,
+    ) -> Result<Vec<u8>> {
+        use crate::xml::{PrefixPolicy, XmlWriter};
+        let mut w =
+            XmlWriter::new(Vec::new(), cfg.prefixes(PrefixPolicy::FromEvents));
+        self.write(&mut w)?;
+        Ok(w.into_sink())
+    }
+
+    /// Builds a document from owned events, mainly for tests.
+    pub fn from_events(
+        strings: &'g GlobalStrings,
+        events: &[crate::OwnedEvent],
+    ) -> Result<Document<'g>> {
+        let mut b = DocumentBuilder::new(strings);
+        for e in events {
+            b.event(&e.as_event())?;
+        }
+        b.finish()
+    }
+}
+
+#[derive(Clone)]
+enum St {
+    Start,
+    Enter(*mut RawCommon),
+    TopNs(*mut RawNode, usize),
+    Ns(*mut RawNode, *mut RawNs),
+    Attr(*mut RawNode, *mut RawAttr),
+    Leave(*mut RawNode),
+    EndDoc,
+    Done,
+}
+
+/// A document's events, in document order: an [`EventSource`] from
+/// [`Document::events`] or [`Document::subtree_events`].
+pub struct DocEvents<'d, 'g> {
+    doc: &'d Document<'g>,
+    /// The element of a subtree; NULL for the whole document.
+    top: *mut RawCommon,
+    top_ns: Vec<*mut RawNs>,
+    state: St,
+    scratch: String,
+}
+
+impl DocEvents<'_, '_> {
+    /// The state after node `p` is done.
+    fn after(&self, p: *mut RawCommon) -> St {
+        if p == self.top {
+            return St::Done;
+        }
+        // SAFETY: live nodes of the borrowed document.
+        unsafe {
+            let next = (*p).next;
+            if !next.is_null() {
+                return St::Enter(next as *mut RawCommon);
+            }
+            let parent = (*p).parent;
+            if parent.is_null() || (*parent).r#type == EXI_DOCUMENT_NODE {
+                if self.top.is_null() { St::EndDoc } else { St::Done }
+            } else {
+                St::Leave(parent)
+            }
+        }
+    }
+}
+
+impl EventSource for DocEvents<'_, '_> {
+    fn next(&mut self) -> Result<Step<'_>> {
+        let meta = EventMeta::default();
+        let doc = self.doc;
+        loop {
+            // SAFETY: every pointer in the state is a live node of
+            // `doc`, which is borrowed for the life of `self`, so the
+            // strings returned live long enough.
+            unsafe {
+                match self.state.clone() {
+                    St::Start => {
+                        let first = (*doc.doc_ptr()).children;
+                        self.state = if first.is_null() {
+                            St::EndDoc
+                        } else {
+                            St::Enter(first as *mut RawCommon)
+                        };
+                        return Ok(Step::Event(Event::StartDocument, meta));
+                    }
+                    St::Enter(p) => match (*p).r#type {
+                        EXI_ELEMENT_NODE => {
+                            let el = p as *mut RawNode;
+                            self.state =
+                                if p == self.top && !self.top_ns.is_empty() {
+                                    St::TopNs(el, 0)
+                                } else {
+                                    St::Ns(el, (*el).nsDef)
+                                };
+                            let name =
+                                doc.name(doc.id(p)).unwrap_or(Name::local(""));
+                            return Ok(Step::Event(
+                                Event::StartElement(name),
+                                meta,
+                            ));
+                        }
+                        EXI_TEXT_NODE | EXI_CDATA_SECTION_NODE => {
+                            self.state = self.after(p);
+                            let v =
+                                doc.value(doc.id(p)).unwrap_or(Value::Str(""));
+                            return Ok(Step::Event(
+                                Event::Characters(v),
+                                meta,
+                            ));
+                        }
+                        EXI_COMMENT_NODE => {
+                            self.state = self.after(p);
+                            let x = extra(p);
+                            return Ok(Step::Event(
+                                Event::Comment(
+                                    x.text.as_ref().map_or("", |b| text_of(b)),
+                                ),
+                                meta,
+                            ));
+                        }
+                        EXI_PI_NODE => {
+                            self.state = self.after(p);
+                            let x = extra(p);
+                            let data =
+                                x.text.as_ref().map_or("", |b| text_of(b));
+                            return Ok(Step::Event(
+                                Event::ProcessingInstruction {
+                                    target: str_at((*p).name),
+                                    data,
+                                },
+                                meta,
+                            ));
+                        }
+                        EXI_ENTITY_REF_NODE => {
+                            self.state = self.after(p);
+                            return Ok(Step::Event(
+                                Event::EntityReference(str_at((*p).name)),
+                                meta,
+                            ));
+                        }
+                        EXI_DTD_NODE => {
+                            self.state = self.after(p);
+                            if let Some(d) = doc.doctype() {
+                                return Ok(Step::Event(
+                                    Event::Doctype(d),
+                                    meta,
+                                ));
+                            }
+                        }
+                        _ => self.state = self.after(p),
+                    },
+                    St::TopNs(el, i) => match self.top_ns.get(i) {
+                        Some(&ns) => {
+                            self.state = St::TopNs(el, i + 1);
+                            return Ok(Step::Event(
+                                Event::Namespace(ns_event(ns, el)),
+                                meta,
+                            ));
+                        }
+                        None => self.state = St::Attr(el, (*el).properties),
+                    },
+                    St::Ns(el, ns) => {
+                        if ns.is_null() {
+                            self.state = St::Attr(el, (*el).properties);
+                        } else {
+                            self.state = St::Ns(el, (*ns).next);
+                            return Ok(Step::Event(
+                                Event::Namespace(ns_event(ns, el)),
+                                meta,
+                            ));
+                        }
+                    }
+                    St::Attr(el, a) => {
+                        if a.is_null() {
+                            self.state = if (*el).children.is_null() {
+                                St::Leave(el)
+                            } else {
+                                St::Enter((*el).children as *mut RawCommon)
+                            };
+                        } else {
+                            self.state = St::Attr(el, (*a).next);
+                            let id = doc.id(a as *mut RawCommon);
+                            let name = doc.name(id).unwrap_or(Name::local(""));
+                            let v = match doc.value(id) {
+                                Some(v) => v,
+                                None => {
+                                    self.scratch = doc.content(id);
+                                    Value::Str(
+                                        &*(self.scratch.as_str()
+                                            as *const str),
+                                    )
+                                }
+                            };
+                            return Ok(Step::Event(
+                                Event::Attribute(name, v),
+                                meta,
+                            ));
+                        }
+                    }
+                    St::Leave(el) => {
+                        self.state = self.after(el as *mut RawCommon);
+                        let name = doc
+                            .name(doc.id(el as *mut RawCommon))
+                            .unwrap_or(Name::local(""));
+                        return Ok(Step::Event(Event::EndElement(name), meta));
+                    }
+                    St::EndDoc => {
+                        self.state = St::Done;
+                        return Ok(Step::Event(Event::EndDocument, meta));
+                    }
+                    St::Done => return Ok(Step::End),
+                }
+            }
+        }
+    }
+}
+
+/// An NS event for a declaration on (or in scope at) `el`.
+///
+/// # Safety
+///
+/// `ns` and `el` are live.
+unsafe fn ns_event<'a>(ns: *mut RawNs, el: *mut RawNode) -> NsDecl<'a> {
+    // SAFETY: the caller's contract; the strings live in held table
+    // entries.
+    unsafe {
+        NsDecl {
+            prefix: str_at((*ns).prefix),
+            uri: str_at((*ns).href),
+            local_element_ns: (*el).ns == ns,
+        }
+    }
+}

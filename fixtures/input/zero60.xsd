@@ -1,0 +1,69 @@
+<?xml version="1.0"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <xs:element name="r">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="e0" type="xs:int"/>
+        <xs:element name="e1" type="xs:int"/>
+        <xs:element name="e2" type="xs:int"/>
+        <xs:element name="e3" type="xs:int"/>
+        <xs:element name="e4" type="xs:int"/>
+        <xs:element name="e5" type="xs:int"/>
+        <xs:element name="e6" type="xs:int"/>
+        <xs:element name="e7" type="xs:int"/>
+        <xs:element name="e8" type="xs:int"/>
+        <xs:element name="e9" type="xs:int"/>
+        <xs:element name="e10" type="xs:int"/>
+        <xs:element name="e11" type="xs:int"/>
+        <xs:element name="e12" type="xs:int"/>
+        <xs:element name="e13" type="xs:int"/>
+        <xs:element name="e14" type="xs:int"/>
+        <xs:element name="e15" type="xs:int"/>
+        <xs:element name="e16" type="xs:int"/>
+        <xs:element name="e17" type="xs:int"/>
+        <xs:element name="e18" type="xs:int"/>
+        <xs:element name="e19" type="xs:int"/>
+        <xs:element name="e20" type="xs:int"/>
+        <xs:element name="e21" type="xs:int"/>
+        <xs:element name="e22" type="xs:int"/>
+        <xs:element name="e23" type="xs:int"/>
+        <xs:element name="e24" type="xs:int"/>
+        <xs:element name="e25" type="xs:int"/>
+        <xs:element name="e26" type="xs:int"/>
+        <xs:element name="e27" type="xs:int"/>
+        <xs:element name="e28" type="xs:int"/>
+        <xs:element name="e29" type="xs:int"/>
+        <xs:element name="e30" type="xs:int"/>
+        <xs:element name="e31" type="xs:int"/>
+        <xs:element name="e32" type="xs:int"/>
+        <xs:element name="e33" type="xs:int"/>
+        <xs:element name="e34" type="xs:int"/>
+        <xs:element name="e35" type="xs:int"/>
+        <xs:element name="e36" type="xs:int"/>
+        <xs:element name="e37" type="xs:int"/>
+        <xs:element name="e38" type="xs:int"/>
+        <xs:element name="e39" type="xs:int"/>
+        <xs:element name="e40" type="xs:int"/>
+        <xs:element name="e41" type="xs:int"/>
+        <xs:element name="e42" type="xs:int"/>
+        <xs:element name="e43" type="xs:int"/>
+        <xs:element name="e44" type="xs:int"/>
+        <xs:element name="e45" type="xs:int"/>
+        <xs:element name="e46" type="xs:int"/>
+        <xs:element name="e47" type="xs:int"/>
+        <xs:element name="e48" type="xs:int"/>
+        <xs:element name="e49" type="xs:int"/>
+        <xs:element name="e50" type="xs:int"/>
+        <xs:element name="e51" type="xs:int"/>
+        <xs:element name="e52" type="xs:int"/>
+        <xs:element name="e53" type="xs:int"/>
+        <xs:element name="e54" type="xs:int"/>
+        <xs:element name="e55" type="xs:int"/>
+        <xs:element name="e56" type="xs:int"/>
+        <xs:element name="e57" type="xs:int"/>
+        <xs:element name="e58" type="xs:int"/>
+        <xs:element name="e59" type="xs:int"/>
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>

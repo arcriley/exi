@@ -1,0 +1,9 @@
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:n" xmlns="urn:n" elementFormDefault="qualified">
+  <xs:element name="r">
+    <xs:complexType><xs:sequence>
+      <xs:element name="v" nillable="true" maxOccurs="unbounded">
+        <xs:complexType><xs:simpleContent><xs:extension base="xs:int"><xs:attribute name="u" type="xs:string"/></xs:extension></xs:simpleContent></xs:complexType>
+      </xs:element>
+    </xs:sequence></xs:complexType>
+  </xs:element>
+</xs:schema>

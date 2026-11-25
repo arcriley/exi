@@ -1,0 +1,16 @@
+<doc xmlns:z="urn:z" xmlns:a="urn:a" b="2" a="1" z:c="3" a:c="4">
+  <p>Some <b>bold</b> and <i>italic</i> text.</p>
+  <empty></empty>
+  <blank>   </blank>
+  <pre xml:space="preserve">
+    <line> kept </line>
+    <inner xml:space="default">
+      <x/>
+    </inner>
+  </pre>
+  <mixed>a<!--c-->b<?pi d?>c</mixed>
+  <list>
+    <item n="1"/>
+    <item n="2"/>
+  </list>
+</doc>

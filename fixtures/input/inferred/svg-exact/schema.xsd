@@ -1,0 +1,215 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:ns1="http://www.w3.org/2000/svg" targetNamespace="http://www.w3.org/2000/svg" elementFormDefault="qualified">
+  <xs:import namespace="http://www.w3.org/1999/xlink" schemaLocation="schema-xlink.xsd"/>
+  <xs:simpleType name="circle-cx">
+    <xs:restriction base="xs:nonNegativeInteger">
+      <xs:minInclusive value="60"/>
+      <xs:maxInclusive value="160"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="circle-cy">
+    <xs:restriction base="xs:nonNegativeInteger">
+      <xs:minInclusive value="50"/>
+      <xs:maxInclusive value="50"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="circle-r">
+    <xs:restriction base="xs:nonNegativeInteger">
+      <xs:minInclusive value="30"/>
+      <xs:maxInclusive value="30"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="g-stroke-width">
+    <xs:restriction base="xs:nonNegativeInteger">
+      <xs:minInclusive value="2"/>
+      <xs:maxInclusive value="2"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="linearGradient-x1">
+    <xs:restriction base="xs:nonNegativeInteger">
+      <xs:minInclusive value="0"/>
+      <xs:maxInclusive value="0"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="linearGradient-x2">
+    <xs:restriction base="xs:nonNegativeInteger">
+      <xs:minInclusive value="1"/>
+      <xs:maxInclusive value="1"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="linearGradient-y1">
+    <xs:restriction base="xs:nonNegativeInteger">
+      <xs:minInclusive value="0"/>
+      <xs:maxInclusive value="0"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="linearGradient-y2">
+    <xs:restriction base="xs:nonNegativeInteger">
+      <xs:minInclusive value="1"/>
+      <xs:maxInclusive value="1"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="rect-height">
+    <xs:restriction base="xs:nonNegativeInteger">
+      <xs:minInclusive value="100"/>
+      <xs:maxInclusive value="100"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="rect-rx">
+    <xs:restriction base="xs:nonNegativeInteger">
+      <xs:minInclusive value="12"/>
+      <xs:maxInclusive value="12"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="rect-width">
+    <xs:restriction base="xs:nonNegativeInteger">
+      <xs:minInclusive value="220"/>
+      <xs:maxInclusive value="220"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="rect-x">
+    <xs:restriction base="xs:nonNegativeInteger">
+      <xs:minInclusive value="0"/>
+      <xs:maxInclusive value="0"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="rect-y">
+    <xs:restriction base="xs:nonNegativeInteger">
+      <xs:minInclusive value="0"/>
+      <xs:maxInclusive value="0"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="svg-height">
+    <xs:restriction base="xs:nonNegativeInteger">
+      <xs:minInclusive value="120"/>
+      <xs:maxInclusive value="120"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="svg-width">
+    <xs:restriction base="xs:nonNegativeInteger">
+      <xs:minInclusive value="240"/>
+      <xs:maxInclusive value="240"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="text-font-size">
+    <xs:restriction base="xs:nonNegativeInteger">
+      <xs:minInclusive value="14"/>
+      <xs:maxInclusive value="14"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="text-x">
+    <xs:restriction base="xs:nonNegativeInteger">
+      <xs:minInclusive value="110"/>
+      <xs:maxInclusive value="110"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="text-y">
+    <xs:restriction base="xs:nonNegativeInteger">
+      <xs:minInclusive value="95"/>
+      <xs:maxInclusive value="95"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:element name="circle">
+    <xs:complexType>
+      <xs:attribute name="cx" type="ns1:circle-cx" use="required"/>
+      <xs:attribute name="cy" type="ns1:circle-cy" use="required"/>
+      <xs:attribute name="opacity" type="xs:decimal" use="required"/>
+      <xs:attribute name="r" type="ns1:circle-r" use="required"/>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="defs">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element ref="ns1:linearGradient"/>
+        <xs:element ref="ns1:path"/>
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="g">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element ref="ns1:rect"/>
+        <xs:element ref="ns1:circle" maxOccurs="unbounded"/>
+        <xs:element ref="ns1:use" maxOccurs="unbounded"/>
+        <xs:element ref="ns1:text"/>
+      </xs:sequence>
+      <xs:attribute name="fill" type="xs:string" use="required"/>
+      <xs:attribute name="stroke" type="xs:string" use="required"/>
+      <xs:attribute name="stroke-width" type="ns1:g-stroke-width" use="required"/>
+      <xs:attribute name="transform" type="xs:string" use="required"/>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="linearGradient">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element ref="ns1:stop" maxOccurs="unbounded"/>
+      </xs:sequence>
+      <xs:attribute name="id" type="xs:string" use="required"/>
+      <xs:attribute name="x1" type="ns1:linearGradient-x1" use="required"/>
+      <xs:attribute name="x2" type="ns1:linearGradient-x2" use="required"/>
+      <xs:attribute name="y1" type="ns1:linearGradient-y1" use="required"/>
+      <xs:attribute name="y2" type="ns1:linearGradient-y2" use="required"/>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="path">
+    <xs:complexType>
+      <xs:attribute name="d" type="xs:string" use="required"/>
+      <xs:attribute name="id" type="xs:string" use="required"/>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="rect">
+    <xs:complexType>
+      <xs:attribute name="height" type="ns1:rect-height" use="required"/>
+      <xs:attribute name="rx" type="ns1:rect-rx" use="required"/>
+      <xs:attribute name="width" type="ns1:rect-width" use="required"/>
+      <xs:attribute name="x" type="ns1:rect-x" use="required"/>
+      <xs:attribute name="y" type="ns1:rect-y" use="required"/>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="stop">
+    <xs:complexType>
+      <xs:attribute name="offset" type="xs:decimal" use="required"/>
+      <xs:attribute name="stop-color" type="xs:string" use="required"/>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="svg">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element ref="ns1:title"/>
+        <xs:element ref="ns1:defs"/>
+        <xs:element ref="ns1:g"/>
+      </xs:sequence>
+      <xs:attribute name="height" type="ns1:svg-height" use="required"/>
+      <xs:attribute name="version" type="xs:decimal" use="required"/>
+      <xs:attribute name="viewBox" type="xs:string" use="required"/>
+      <xs:attribute name="width" type="ns1:svg-width" use="required"/>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="text">
+    <xs:complexType mixed="true">
+      <xs:sequence>
+        <xs:element ref="ns1:tspan"/>
+      </xs:sequence>
+      <xs:attribute name="font-family" type="xs:string" use="required"/>
+      <xs:attribute name="font-size" type="ns1:text-font-size" use="required"/>
+      <xs:attribute name="x" type="ns1:text-x" use="required"/>
+      <xs:attribute name="y" type="ns1:text-y" use="required"/>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="title" type="xs:string"/>
+  <xs:element name="tspan">
+    <xs:complexType>
+      <xs:simpleContent>
+        <xs:extension base="xs:string">
+        <xs:attribute name="font-weight" type="xs:string" use="required"/>
+        </xs:extension>
+      </xs:simpleContent>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="use">
+    <xs:complexType>
+      <xs:attribute ref="xlink:href" use="required"/>
+      <xs:attribute name="transform" type="xs:string" use="required"/>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>

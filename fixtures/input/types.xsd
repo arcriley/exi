@@ -1,0 +1,24 @@
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:t" xmlns="urn:t" elementFormDefault="qualified">
+  <xs:simpleType name="color"><xs:restriction base="xs:string"><xs:enumeration value="red"/><xs:enumeration value="green"/></xs:restriction></xs:simpleType>
+  <xs:simpleType name="small"><xs:restriction base="xs:int"><xs:minInclusive value="10"/><xs:maxInclusive value="20"/></xs:restriction></xs:simpleType>
+  <xs:simpleType name="ints"><xs:list itemType="xs:int"/></xs:simpleType>
+  <xs:element name="root">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="i" type="xs:int"/>
+        <xs:element name="d" type="xs:decimal"/>
+        <xs:element name="l" type="ints"/>
+        <xs:element name="t" type="xs:date"/>
+        <xs:element name="f" type="xs:double"/>
+        <xs:element name="b" type="xs:base64Binary"/>
+        <xs:element name="h" type="xs:hexBinary"/>
+        <xs:element name="u" type="xs:unsignedLong"/>
+        <xs:element name="dt" type="xs:dateTime"/>
+        <xs:element name="s" type="xs:string" minOccurs="0" maxOccurs="unbounded"/>
+      </xs:sequence>
+      <xs:attribute name="color" type="color"/>
+      <xs:attribute name="n" type="small"/>
+      <xs:attribute name="ok" type="xs:boolean"/>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>

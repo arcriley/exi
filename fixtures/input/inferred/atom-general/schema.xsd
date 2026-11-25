@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:ns1="http://www.w3.org/2005/Atom" targetNamespace="http://www.w3.org/2005/Atom" elementFormDefault="qualified">
+  <xs:import namespace="http://www.w3.org/XML/1998/namespace" schemaLocation="schema-xml.xsd"/>
+  <xs:element name="author">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element ref="ns1:name"/>
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="entry">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element ref="ns1:title"/>
+        <xs:element ref="ns1:link"/>
+        <xs:element ref="ns1:id"/>
+        <xs:element ref="ns1:updated"/>
+        <xs:element ref="ns1:summary" minOccurs="0"/>
+      </xs:sequence>
+      <xs:attribute ref="xml:lang"/>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="feed">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element ref="ns1:title"/>
+        <xs:element ref="ns1:link"/>
+        <xs:element ref="ns1:updated"/>
+        <xs:element ref="ns1:author"/>
+        <xs:element ref="ns1:id"/>
+        <xs:element ref="ns1:entry" maxOccurs="unbounded"/>
+      </xs:sequence>
+      <xs:attribute ref="xml:lang" use="required"/>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="id" type="xs:string"/>
+  <xs:element name="link">
+    <xs:complexType>
+      <xs:attribute name="href" type="xs:string" use="required"/>
+      <xs:attribute name="rel" type="xs:string"/>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="name" type="xs:string"/>
+  <xs:element name="summary" type="xs:string"/>
+  <xs:element name="title" type="xs:string"/>
+  <xs:element name="updated" type="xs:dateTime"/>
+</xs:schema>

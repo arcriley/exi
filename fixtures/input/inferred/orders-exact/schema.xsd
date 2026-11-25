@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" elementFormDefault="qualified">
+  <xs:simpleType name="line-qty">
+    <xs:restriction base="xs:nonNegativeInteger">
+      <xs:minInclusive value="1"/>
+      <xs:maxInclusive value="10"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="order-id">
+    <xs:restriction base="xs:nonNegativeInteger">
+      <xs:minInclusive value="1001"/>
+      <xs:maxInclusive value="1004"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="status-value">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="open"/>
+      <xs:enumeration value="shipped"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:element name="customer" type="xs:string"/>
+  <xs:element name="date" type="xs:date"/>
+  <xs:element name="line">
+    <xs:complexType>
+      <xs:attribute name="price" type="xs:decimal" use="required"/>
+      <xs:attribute name="qty" type="line-qty" use="required"/>
+      <xs:attribute name="sku" type="xs:string" use="required"/>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="note" type="xs:string"/>
+  <xs:element name="order">
+    <xs:complexType>
+      <xs:choice minOccurs="0" maxOccurs="unbounded">
+        <xs:element ref="customer"/>
+        <xs:element ref="date"/>
+        <xs:element ref="line"/>
+        <xs:element ref="status"/>
+        <xs:element ref="note"/>
+      </xs:choice>
+      <xs:attribute name="id" type="order-id" use="required"/>
+      <xs:attribute name="paid" type="xs:boolean" use="required"/>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="orders">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element ref="order" maxOccurs="unbounded"/>
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="status" type="status-value"/>
+</xs:schema>

@@ -1,0 +1,4 @@
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:other">
+  <xs:attribute name="flag" type="xs:boolean"/>
+  <xs:element name="ext" type="xs:string"/>
+</xs:schema>

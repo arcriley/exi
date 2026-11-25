@@ -1,0 +1,14 @@
+<orders>
+  <order id="1003" paid="true">
+    <date>2026-11-05</date>
+    <customer>Linus</customer>
+    <line sku="C-9" qty="3" price="0.50"/>
+    <status>open</status>
+  </order>
+  <order id="1004" paid="true">
+    <customer>Barbara</customer>
+    <date>2026-11-06</date>
+    <status>shipped</status>
+    <line sku="B-2" qty="1" price="120.00"/>
+  </order>
+</orders>

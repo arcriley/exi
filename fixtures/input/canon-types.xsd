@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <xs:element name="r">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="f" type="xs:double" maxOccurs="unbounded"/>
+        <xs:element name="d" type="xs:decimal" maxOccurs="unbounded"/>
+        <xs:element name="t" type="xs:dateTime" maxOccurs="unbounded"/>
+        <xs:element name="h" type="xs:time" maxOccurs="unbounded"/>
+        <xs:element name="day" type="xs:date" maxOccurs="unbounded"/>
+        <xs:element name="n" type="xs:int" nillable="true" maxOccurs="unbounded"/>
+        <xs:element name="e" maxOccurs="unbounded">
+          <xs:simpleType>
+            <xs:restriction base="xs:string">
+              <xs:enumeration value="a"/>
+              <xs:enumeration value="b"/>
+              <xs:enumeration value="a"/>
+            </xs:restriction>
+          </xs:simpleType>
+        </xs:element>
+        <xs:element name="s" type="xs:string" maxOccurs="unbounded"/>
+      </xs:sequence>
+      <xs:attribute name="y" type="xs:string"/>
+      <xs:attribute name="x" type="xs:string"/>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>

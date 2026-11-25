@@ -1,0 +1,1 @@
+<doc xmlns="urn:c" xmlns:o="urn:other" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><note xsi:nil="true"/><note xsi:nil="false">x</note><shape xsi:type="Derived" kind="low"><name>n</name><extra>1</extra></shape><m>1</m><m>2</m><any/><all><x>0A</x><z>1</z></all><nums><p>1</p><g>1</g></nums><typed xsi:type="Unknown"><name>n</name></typed><empty/></doc>

@@ -237,7 +237,26 @@ pub fn parse_header(
     input: &[u8],
     limits: &Limits,
 ) -> Result<Option<ParsedHeader>> {
-    let cookie = match sniff(input) {
+    parse_header_split(input, &[], limits)
+}
+
+/// Reads a header across the two slices of an input ring.
+pub(crate) fn parse_header_split(
+    first: &[u8],
+    second: &[u8],
+    limits: &Limits,
+) -> Result<Option<ParsedHeader>> {
+    let mut prefix = [0; COOKIE.len()];
+    let sniffed = if first.len() >= prefix.len() || second.is_empty() {
+        sniff(first)
+    } else {
+        let tail = second.len().min(prefix.len() - first.len());
+        let len = first.len() + tail;
+        prefix[..first.len()].copy_from_slice(first);
+        prefix[first.len()..len].copy_from_slice(&second[..tail]);
+        sniff(&prefix[..len])
+    };
+    let cookie = match sniffed {
         Sniff::NeedMoreData => return Ok(None),
         Sniff::NotExi => {
             return Err(header_err(
@@ -247,7 +266,7 @@ pub fn parse_header(
         Sniff::Exi { cookie } => cookie,
     };
     let start = if cookie { 32 } else { 0 };
-    let mut d = BitDecoder::new(input, start);
+    let mut d = BitDecoder::split(first, second, start);
     let result = (|| -> Result<ParsedHeader> {
         if d.nbit(S, 2)? != 0b10 {
             return Err(header_err("distinguishing bits are not 10"));
@@ -285,7 +304,7 @@ pub fn parse_header(
         let mut offset = d.bit_position();
         if options.as_ref().is_none_or(|o| o.coding() != Coding::BitPacked) {
             offset = offset.div_ceil(8) * 8;
-            if offset > 8 * input.len() as u64 {
+            if offset > 8 * (first.len() + second.len()) as u64 {
                 return Err(Error::new(
                     ErrorKind::Truncated,
                     "input ends inside the header padding",
@@ -777,4 +796,49 @@ fn read_schema_string(
     } else {
         SchemaId::Id(s.into())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn header_can_wrap_at_any_octet() -> Result<()> {
+        let limits = Limits::new();
+        let opts = Options::builder()
+            .coding(Coding::ByteAligned)
+            .schema_id(SchemaId::Id("urn:example:wrapped".into()))
+            .build()?;
+        let mut bytes = alloc::vec::Vec::new();
+        write_header(&mut bytes, Header::WithOptions { cookie: true }, &opts)?;
+        let header_len = bytes.len();
+        bytes.extend_from_slice(&[0xFF; 256]);
+        let expected = parse_header(&bytes, &limits)?.unwrap();
+        assert_eq!(expected.options, Some(opts));
+        for end in 0..=header_len {
+            let parsed = parse_header(&bytes[..end], &limits)?;
+            assert_eq!(parsed.is_some(), end == header_len);
+            for split in 0..=end {
+                assert_eq!(
+                    parse_header_split(
+                        &bytes[..split],
+                        &bytes[split..end],
+                        &limits
+                    )?,
+                    parsed,
+                );
+            }
+        }
+        for split in 0..=bytes.len() {
+            assert_eq!(
+                parse_header_split(&bytes[..split], &bytes[split..], &limits)?,
+                Some(expected.clone()),
+            );
+        }
+        assert_eq!(
+            parse_header_split(b"$E", b"XJ", &limits).unwrap_err().kind(),
+            ErrorKind::Header,
+        );
+        Ok(())
+    }
 }

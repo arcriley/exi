@@ -692,7 +692,7 @@ impl<'a> SessionTables<'a> {
             rules,
             max_names: limits.get_max_names(),
             max_bytes: limits.get_max_string_table_bytes(),
-            cur: Partitions::new(initial.uris.len()),
+            cur: Partitions::new(),
             stack: Vec::new(),
             names_total: 0,
             bytes_total: 0,
@@ -708,14 +708,14 @@ impl<'a> SessionTables<'a> {
         (self.initial_uris() + self.cur.uris.added.len()) as u32
     }
     pub fn uri(&self, n: u32) -> Option<UriId> {
-        lookup(&self.initial.uris, &self.cur.uris, n)
+        lookup(&self.initial.uris, Some(&self.cur.uris), n)
     }
     pub fn uri_str(&self, n: u32) -> Option<&str> {
         self.uri(n).map(|id| self.global().uris().resolve(id))
     }
     /// The most recent number of the URI with global id `id`.
     pub fn find_uri(&self, id: UriId) -> Option<u32> {
-        find(Some(&self.initial.uri_rev), &self.cur.uris, id)
+        find(Some(&self.initial.uri_rev), Some(&self.cur.uris), id)
     }
     pub fn find_uri_str(&self, s: &str) -> Option<u32> {
         self.global().uris().get(s).and_then(|id| self.find_uri(id))
@@ -768,7 +768,6 @@ impl<'a> SessionTables<'a> {
         let n = self.uri_count();
         self.cur.uris.added.push(id);
         self.cur.uris.rev.insert(id, n);
-        self.cur.per_uri.push(UriPart::new());
         self.count_name(s.len());
         Ok(n)
     }
@@ -777,15 +776,12 @@ impl<'a> SessionTables<'a> {
     /// range.
     pub fn prefix_count(&self, uri: u32) -> u32 {
         let init = self.initial.prefixes.get(uri as usize).map_or(0, Vec::len);
-        let added = self
-            .cur
-            .per_uri
-            .get(uri as usize)
-            .map_or(0, |p| p.prefixes.added.len());
+        let added =
+            self.cur.per_uri.get(&uri).map_or(0, |p| p.prefixes.added.len());
         (init + added) as u32
     }
     pub fn prefix(&self, uri: u32, n: u32) -> Option<PrefixId> {
-        let part = &self.cur.per_uri.get(uri as usize)?.prefixes;
+        let part = self.cur.per_uri.get(&uri).map(|p| &p.prefixes);
         lookup(
             self.initial.prefixes.get(uri as usize).map_or(&[][..], |v| v),
             part,
@@ -798,7 +794,7 @@ impl<'a> SessionTables<'a> {
     pub fn find_prefix(&self, uri: u32, id: PrefixId) -> Option<u32> {
         find(
             self.initial.prefix_rev.get(uri as usize),
-            &self.cur.per_uri.get(uri as usize)?.prefixes,
+            self.cur.per_uri.get(&uri).map(|p| &p.prefixes),
             id,
         )
     }
@@ -813,7 +809,12 @@ impl<'a> SessionTables<'a> {
         self.check_name(s.len(), self.prefix_count(uri) as usize)?;
         let id = self.global().prefixes().intern_id(s)?;
         let n = self.prefix_count(uri);
-        let part = &mut self.cur.per_uri[uri as usize].prefixes;
+        let part = &mut self
+            .cur
+            .per_uri
+            .entry(uri)
+            .or_insert_with(UriPart::new)
+            .prefixes;
         part.added.push(id);
         part.rev.insert(id, n);
         self.count_name(s.len());
@@ -824,15 +825,12 @@ impl<'a> SessionTables<'a> {
     /// range.
     pub fn local_count(&self, uri: u32) -> u32 {
         let init = self.initial.locals.get(uri as usize).map_or(0, Vec::len);
-        let added = self
-            .cur
-            .per_uri
-            .get(uri as usize)
-            .map_or(0, |p| p.locals.added.len());
+        let added =
+            self.cur.per_uri.get(&uri).map_or(0, |p| p.locals.added.len());
         (init + added) as u32
     }
     pub fn local(&self, uri: u32, n: u32) -> Option<LocalId> {
-        let part = &self.cur.per_uri.get(uri as usize)?.locals;
+        let part = self.cur.per_uri.get(&uri).map(|p| &p.locals);
         lookup(
             self.initial.locals.get(uri as usize).map_or(&[][..], |v| v),
             part,
@@ -845,7 +843,7 @@ impl<'a> SessionTables<'a> {
     pub fn find_local(&self, uri: u32, id: LocalId) -> Option<u32> {
         find(
             self.initial.local_rev.get(uri as usize),
-            &self.cur.per_uri.get(uri as usize)?.locals,
+            self.cur.per_uri.get(&uri).map(|p| &p.locals),
             id,
         )
     }
@@ -873,7 +871,12 @@ impl<'a> SessionTables<'a> {
         self.check_name(s.len(), self.local_count(uri) as usize)?;
         let id = self.global().locals().intern_id(s)?;
         let n = self.local_count(uri);
-        let part = &mut self.cur.per_uri[uri as usize].locals;
+        let part = &mut self
+            .cur
+            .per_uri
+            .entry(uri)
+            .or_insert_with(UriPart::new)
+            .locals;
         part.added.push(id);
         part.rev.insert(id, n);
         self.count_name(s.len());
@@ -1311,7 +1314,7 @@ impl<'a> SessionTables<'a> {
     /// # Ok::<(), exi::Error>(())
     /// ```
     pub fn begin_self_contained(&mut self) {
-        let fresh = Partitions::new(self.initial_uris());
+        let fresh = Partitions::new();
         let saved = core::mem::replace(&mut self.cur, fresh);
         self.stack.push(saved);
     }
@@ -1455,7 +1458,8 @@ struct LocalPart {
 /// The partitions of one stream, or of one self-contained element.
 struct Partitions {
     uris: NamePart<crate::strings::Uri>,
-    per_uri: Vec<UriPart>,
+    /// Only URI numbers with a session-added prefix or local name.
+    per_uri: Map<u32, UriPart>,
     slots: Vec<Slot>,
     next_slot: u32,
     global_rev: Map<ValueId, u32>,
@@ -1465,10 +1469,10 @@ struct Partitions {
 }
 
 impl Partitions {
-    fn new(initial_uris: usize) -> Self {
+    fn new() -> Self {
         Partitions {
             uris: NamePart::new(),
-            per_uri: (0..initial_uris).map(|_| UriPart::new()).collect(),
+            per_uri: map(),
             slots: Vec::new(),
             next_slot: 0,
             global_rev: map(),
@@ -1480,7 +1484,7 @@ impl Partitions {
 
     fn release(&mut self, g: &GlobalStrings) {
         self.uris.release(g.uris());
-        for p in &mut self.per_uri {
+        for p in self.per_uri.values_mut() {
             p.prefixes.release(g.prefixes());
             p.locals.release(g.locals());
         }
@@ -1494,24 +1498,23 @@ impl Partitions {
 
 fn lookup<K: Kind>(
     initial: &[StrId<K>],
-    part: &NamePart<K>,
+    part: Option<&NamePart<K>>,
     n: u32,
 ) -> Option<StrId<K>> {
     let n = n as usize;
     if n < initial.len() {
         Some(initial[n])
     } else {
-        part.added.get(n - initial.len()).copied()
+        part?.added.get(n - initial.len()).copied()
     }
 }
 
 fn find<K: Kind>(
     initial: Option<&Map<StrId<K>, u32>>,
-    part: &NamePart<K>,
+    part: Option<&NamePart<K>>,
     id: StrId<K>,
 ) -> Option<u32> {
-    part.rev
-        .get(&id)
+    part.and_then(|p| p.rev.get(&id))
         .copied()
         .or_else(|| initial.and_then(|m| m.get(&id).copied()))
 }
@@ -1648,6 +1651,53 @@ impl SessionTables<'_> {
                 "global value partition has u32::MAX - 1 entries",
             ));
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::strings::GlobalConfig;
+
+    #[test]
+    fn uri_partitions_are_created_only_when_extended() -> Result<()> {
+        let global = GlobalStrings::new(GlobalConfig::device())?;
+        let entries = InitialEntries::schemaless();
+        let initial = entries.attach(&global)?;
+        let mut tables = SessionTables::new(
+            &initial,
+            ValueRules::unbounded(),
+            &Limits::device(),
+        );
+        let xml = tables.prefix(1, 0).unwrap();
+        let lang = tables.local(1, 2).unwrap();
+        assert_eq!(tables.find_prefix(1, xml), Some(0));
+        assert_eq!(tables.find_local(1, lang), Some(2));
+
+        let uri = tables.add_uri(XML_NS)?;
+        assert!(tables.cur.per_uri.is_empty());
+        assert_eq!(tables.prefix_count(uri), 0);
+        assert_eq!(tables.local_count(uri), 0);
+        assert_eq!(tables.find_local(uri, lang), None);
+        assert_eq!(tables.add_local(uri, "lang")?, 0);
+        assert_eq!(tables.add_local(1, "lang")?, 4);
+        assert_eq!(tables.add_prefix(1, "xml")?, 1);
+        assert_eq!(tables.find_local(1, lang), Some(4));
+        assert_eq!(tables.find_prefix(1, xml), Some(1));
+        assert_eq!(tables.local(1, 2), Some(lang));
+        assert_eq!(tables.prefix(1, 0), Some(xml));
+
+        tables.begin_self_contained();
+        assert!(tables.cur.per_uri.is_empty());
+        assert_eq!(tables.find_local(1, lang), Some(2));
+        assert_eq!(tables.find_prefix(1, xml), Some(0));
+        assert_eq!(tables.add_local(1, "inner")?, 4);
+        tables.end_self_contained()?;
+        assert_eq!(global.locals().get("inner"), None);
+        assert_eq!(tables.find_local(1, lang), Some(4));
+        assert_eq!(tables.find_local(uri, lang), Some(0));
+        assert_eq!(tables.find_prefix(1, xml), Some(1));
         Ok(())
     }
 }

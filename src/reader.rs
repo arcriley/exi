@@ -99,7 +99,7 @@ use crate::engine::{
 use crate::error::Position;
 use crate::event::{Doctype, Event, EventMeta, NsDecl};
 use crate::grammar::{Grammars, Terminal};
-use crate::header::parse_header;
+use crate::header::parse_header_split;
 use crate::input::InputRing;
 use crate::name::{GlobalName, Name};
 use crate::stream::{EventSource, Status, Step};
@@ -789,10 +789,7 @@ impl<'g, const N: usize> Reader<'g, N> {
     fn read_header(&mut self) -> Result<Option<()>> {
         let Some((n, final_input)) = self.limit() else { return Ok(None) };
         let (a, b) = self.limited(n);
-        let mut data = Vec::with_capacity(a.len() + b.len());
-        data.extend_from_slice(a);
-        data.extend_from_slice(b);
-        let Some(h) = parse_header(&data, &self.cfg.limits)? else {
+        let Some(h) = parse_header_split(a, b, &self.cfg.limits)? else {
             if final_input {
                 return Err(err(
                     ErrorKind::Truncated,

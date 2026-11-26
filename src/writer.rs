@@ -92,7 +92,7 @@ use crate::coding::body::BodyEncoder;
 use crate::coding::datatypes::{write_event_code, write_string};
 use crate::coding::{Encoder, Sink, names};
 use crate::engine::{
-    self, Prepared, Slot, State, Top, check_options, err, value_rules,
+    self, Prepared, Slot, State, Top, check_options, err,
 };
 use crate::error::Position;
 use crate::event::{Event, NsDecl};
@@ -775,8 +775,6 @@ pub struct Writer<'g, S: Sink> {
     tables: SessionTables<'g>,
     /// The header has been written.
     started: bool,
-    /// An explicit StartDocument, or any event, has been seen.
-    begun: bool,
     poisoned: bool,
     /// A start tag not yet written: its SE was checked, its NS and AT
     /// events wait.
@@ -907,15 +905,7 @@ impl<'g, S: Sink> Writer<'g, S> {
     /// # Ok::<(), exi::Error>(())
     /// ```
     pub fn new(sink: S, cfg: WriterConfig<'g>) -> Result<Self> {
-        if cfg.sequence == Sequence::Frames
-            && !(cfg.options.fragment()
-                && cfg.options.coding() == Coding::ByteAligned)
-        {
-            return Err(err(
-                ErrorKind::Arg,
-                "frames need fragment and byte alignment",
-            ));
-        }
+        cfg.sequence.check_options(&cfg.options)?;
         check_options(&cfg.options, cfg.grammars)?;
         if cfg.canonical {
             if matches!(
@@ -935,20 +925,15 @@ impl<'g, S: Sink> Writer<'g, S> {
                 ));
             }
         }
-        let (st, tables) = Self::fresh(&cfg);
-        let frames = cfg.sequence == Sequence::Frames;
+        let (st, tables) =
+            engine::new_session(cfg.options.clone(), cfg.grammars, cfg.limits);
         let cfg_counts = cfg.count_deviations;
         Ok(Writer {
-            enc: BodyEncoder::new(
-                &cfg.options,
-                cfg.deflate_level,
-                FrameSink { sink, frames, buf: Vec::new(), last: Vec::new() },
-            ),
+            enc: Self::encoder(sink, &cfg),
             cfg,
             st,
             tables,
             started: false,
-            begun: false,
             poisoned: false,
             pending: None,
             in_start: false,
@@ -1131,20 +1116,16 @@ impl<'g, S: Sink> Writer<'g, S> {
     /// # Ok::<(), exi::Error>(())
     /// ```
     pub fn reset(&mut self, sink: S) -> S {
-        let (st, tables) = Self::fresh(&self.cfg);
-        let frames = self.cfg.sequence == Sequence::Frames;
-        let fresh = BodyEncoder::new(
-            &self.cfg.options,
-            self.cfg.deflate_level,
-            FrameSink { sink, frames, buf: Vec::new(), last: Vec::new() },
-        );
+        let fresh = Self::encoder(sink, &self.cfg);
         let old = core::mem::replace(&mut self.enc, fresh);
-        // The new state and tables first: the old tables drop before
-        // the new ones exist twice.
+        let (st, tables) = engine::new_session(
+            self.cfg.options.clone(),
+            self.cfg.grammars,
+            self.cfg.limits,
+        );
         self.tables = tables;
         self.st = st;
         self.started = false;
-        self.begun = false;
         self.poisoned = false;
         self.pending = None;
         self.in_start = false;
@@ -1189,14 +1170,13 @@ impl<'g, S: Sink> Writer<'g, S> {
         &mut self.enc.sink_mut().sink
     }
 
-    fn fresh(cfg: &WriterConfig<'g>) -> (State<'g>, SessionTables<'g>) {
-        let st = State::new(cfg.options.clone(), cfg.grammars, cfg.limits);
-        let tables = SessionTables::new(
-            cfg.grammars.initial(),
-            value_rules(&cfg.options),
-            &cfg.limits,
-        );
-        (st, tables)
+    fn encoder(sink: S, cfg: &WriterConfig<'g>) -> BodyEncoder<FrameSink<S>> {
+        let frames = cfg.sequence == Sequence::Frames;
+        BodyEncoder::new(
+            &cfg.options,
+            cfg.deflate_level,
+            FrameSink { sink, frames, buf: Vec::new(), last: Vec::new() },
+        )
     }
 
     fn guard<T>(
@@ -1233,7 +1213,6 @@ impl<'g, S: Sink> Writer<'g, S> {
             }
             self.started = true;
         }
-        self.begun = true;
         Ok(())
     }
 
@@ -1536,7 +1515,7 @@ impl<'g, S: Sink> Writer<'g, S> {
     fn handle_event(&mut self, ev: &Event<'_>) -> Result<()> {
         match ev {
             Event::StartDocument => {
-                if self.begun {
+                if self.started {
                     return Err(state("StartDocument after other events"));
                 }
                 self.start()

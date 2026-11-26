@@ -48,7 +48,7 @@ use crate::grammar::informed::{
 };
 use crate::grammar::{EventCode, Grammars, Terminal};
 use crate::options::{Coding, SchemaId};
-use crate::tables::ValueRules;
+use crate::tables::{SessionTables, ValueRules};
 use crate::{Error, ErrorKind, Limits, NameId, Options, Preserve, Result};
 
 mod wire;
@@ -140,11 +140,17 @@ pub(crate) fn check_options(opts: &Options, g: &Grammars<'_>) -> Result<()> {
     Ok(())
 }
 
-/// The value rules of a stream's options.
-pub(crate) fn value_rules(o: &Options) -> ValueRules {
-    ValueRules::unbounded()
-        .capacity(o.value_partition_capacity())
-        .max_length(o.value_max_length())
+/// Starts a stream with its grammar state and empty session partitions.
+pub(crate) fn new_session<'g>(
+    opts: Options,
+    grammars: &'g Grammars<'g>,
+    limits: Limits,
+) -> (State<'g>, SessionTables<'g>) {
+    let rules = ValueRules::unbounded()
+        .capacity(opts.value_partition_capacity())
+        .max_length(opts.value_max_length());
+    let tables = SessionTables::new(grammars.initial(), rules, &limits);
+    (State::new(opts, grammars, limits), tables)
 }
 
 /// Where an element is in its grammar.

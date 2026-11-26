@@ -96,7 +96,6 @@ use crate::coding::block::BlockRead;
 use crate::coding::body::BodyDecoder;
 use crate::engine::{
     self, DVal, Decoded, Probe, Slot, State, Top, check_options, err,
-    value_rules,
 };
 use crate::error::Position;
 use crate::event::{Doctype, Event, EventMeta, NsDecl};
@@ -124,6 +123,20 @@ pub enum Sequence {
     Single,
     Streams,
     Frames,
+}
+
+impl Sequence {
+    pub(crate) fn check_options(self, opts: &Options) -> Result<()> {
+        if self == Self::Frames
+            && !(opts.fragment() && opts.coding() == Coding::ByteAligned)
+        {
+            return Err(err(
+                ErrorKind::Arg,
+                "frames need fragment and byte alignment",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Configuration for a [`Reader`].
@@ -492,7 +505,6 @@ pub struct Reader<'g, const N: usize = 4096> {
     poisoned: bool,
     phase: Phase,
     sess: Option<Session<'g>>,
-    options: Option<Options>,
     dec: Decoded,
     out: Out,
     /// Octets consumed and fed since the reader started (frame ends use
@@ -674,15 +686,8 @@ impl<'g, const N: usize> Reader<'g, N> {
     /// ```
     pub fn new(cfg: ReaderConfig<'g>) -> Result<Self> {
         let () = InputRing::<N>::VALID;
-        if cfg.sequence == Sequence::Frames {
-            if let Some(o) = &cfg.options {
-                if !(o.fragment() && o.coding() == Coding::ByteAligned) {
-                    return Err(err(
-                        ErrorKind::Arg,
-                        "frames need fragment and byte alignment",
-                    ));
-                }
-            }
+        if let Some(opts) = &cfg.options {
+            cfg.sequence.check_options(opts)?;
         }
         if cfg.start_tag {
             return Err(err(
@@ -699,7 +704,6 @@ impl<'g, const N: usize> Reader<'g, N> {
             poisoned: false,
             phase: Phase::Header,
             sess: None,
-            options: None,
             dec: Decoded::default(),
             out: Out::None,
             pos: 0,
@@ -976,7 +980,7 @@ impl<'g, const N: usize> Reader<'g, N> {
     /// # Ok::<(), exi::Error>(())
     /// ```
     pub fn options(&self) -> Option<&Options> {
-        self.options.as_ref()
+        self.sess.as_ref().map(|s| &s.st.opts)
     }
     /// Where the next event starts.
     ///
@@ -1115,7 +1119,6 @@ impl<'g, const N: usize> Reader<'g, N> {
         self.poisoned = false;
         self.phase = Phase::Header;
         self.sess = None;
-        self.options = None;
         self.dec.clear();
         self.out = Out::None;
         self.pos = 0;
@@ -1131,6 +1134,7 @@ impl<'g, const N: usize> Reader<'g, N> {
             self.released = 0;
         }
         self.collecting = false;
+        self.collect_at = 0;
         self.sc_se = false;
         self.sc_ed = false;
         self.suppress = false;
@@ -1265,27 +1269,11 @@ impl<'g, const N: usize> Reader<'g, N> {
                 ));
             }
         };
-        if self.cfg.sequence == Sequence::Frames
-            && !(opts.fragment() && opts.coding() == Coding::ByteAligned)
-        {
-            return Err(err(
-                ErrorKind::Arg,
-                "frames need fragment and byte alignment",
-            ));
-        }
+        self.cfg.sequence.check_options(&opts)?;
         check_options(&opts, self.cfg.grammars)?;
         self.consume((h.body_offset_bits / 8) as usize);
         // A bit-packed body starts inside the header's last octet.
         self.bit = (h.body_offset_bits % 8) as u8;
-        let st = State::new(opts.clone(), self.cfg.grammars, self.cfg.limits);
-        let tables = SessionTables::new(
-            self.cfg.grammars.initial(),
-            value_rules(&opts),
-            &self.cfg.limits,
-        );
-        // The old session, if any, drops before the new one is stored.
-        self.sess = None;
-        self.sess = Some(Session { st, tables });
         #[cfg(feature = "compression")]
         {
             self.block = match opts.coding() {
@@ -1298,7 +1286,10 @@ impl<'g, const N: usize> Reader<'g, N> {
                 _ => None,
             };
         }
-        self.options = Some(opts);
+        self.sess = None;
+        let (st, tables) =
+            engine::new_session(opts, self.cfg.grammars, self.cfg.limits);
+        self.sess = Some(Session { st, tables });
         self.phase = Phase::Body;
         self.out = Out::SD;
         Ok(Some(()))
@@ -1317,6 +1308,7 @@ impl<'g, const N: usize> Reader<'g, N> {
         let sess = self.sess.as_ref().ok_or_else(|| {
             err(ErrorKind::Internal, "body without a session")
         })?;
+        let coding = sess.st.opts.coding();
         let at_top = sess.st.stack.is_empty();
         if frames
             && at_top
@@ -1342,8 +1334,6 @@ impl<'g, const N: usize> Reader<'g, N> {
             l
         };
         let frame_bounded = frames && !self.frame_ends.is_empty();
-        let coding =
-            self.options.as_ref().map_or(Coding::ByteAligned, |o| o.coding());
         let bit = self.bit;
         let Some(used) = ('decode: {
             let Reader {
@@ -1669,6 +1659,11 @@ impl<'g, const N: usize> Reader<'g, N> {
         self.queue.push_back((out, EventMeta { depth, position: pos, flags }));
     }
 
+    fn fail(&mut self, e: crate::Error, pos: Position) -> crate::Error {
+        self.poisoned = true;
+        if e.position() == Position::default() { e.at(pos) } else { e }
+    }
+
     fn step(&mut self) -> Result<Step<'_>> {
         if self.poisoned {
             return Err(err(
@@ -1692,42 +1687,21 @@ impl<'g, const N: usize> Reader<'g, N> {
             let pos = self.position_now();
             if self.in_values() {
                 // A block's structure is complete: its values next.
-                match self.read_values() {
-                    Ok(true) => continue,
-                    Ok(false) => return Ok(Step::NeedInput),
-                    Err(e) => {
-                        self.poisoned = true;
-                        return Err(if e.position() == Position::default() {
-                            e.at(pos)
-                        } else {
-                            e
-                        });
-                    }
+                if self.read_values().map_err(|e| self.fail(e, pos))? {
+                    continue;
                 }
+                return Ok(Step::NeedInput);
             }
-            match self.advance() {
-                Ok(true) if self.phase == Phase::End => {
-                    self.collecting = false
-                }
-                Ok(true) if self.suppress => self.suppress = false,
-                Ok(true) => {
+            match self.advance().map_err(|e| self.fail(e, pos))? {
+                false => return Ok(Step::NeedInput),
+                true if self.phase == Phase::End => self.collecting = false,
+                true if self.suppress => self.suppress = false,
+                true => {
                     let out = core::mem::take(&mut self.out);
                     let is_ed = matches!(out, Out::ED);
                     self.enqueue(out, pos);
-                    if let Err(e) = self.after_enqueue(is_ed) {
-                        self.poisoned = true;
-                        return Err(e.at(pos));
-                    }
-                }
-                Ok(false) => return Ok(Step::NeedInput),
-                Err(e) => {
-                    self.poisoned = true;
-                    let e = if e.position() == Position::default() {
-                        e.at(pos)
-                    } else {
-                        e
-                    };
-                    return Err(e);
+                    self.after_enqueue(is_ed)
+                        .map_err(|e| self.fail(e.at(pos), pos))?;
                 }
             }
         };

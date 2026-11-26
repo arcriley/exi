@@ -258,17 +258,25 @@ fn streams_follow_one_another_in_every_coding() {
     let g = set.attach(&strings).unwrap();
     let a = events_of_xml(&g, b"<a x='1'>one<b/>two</a>", false);
     let b = events_of_xml(&g, b"<b y='2'><c>three</c></b>", false);
+    let want: Vec<OwnedEvent> = a.iter().chain(&b).cloned().collect();
     for coding in CODINGS {
         let opts = Options::builder()
             .coding(coding)
             .block_size(2)
             .build()
             .unwrap();
-        let mut exi = encode(&g, &opts, &a).unwrap();
-        exi.extend(encode(&g, &opts, &b).unwrap());
-        let got = decode::<4096>(&g, &exi, 3, Limits::new(), Sequence::Streams).unwrap();
-        let want: Vec<OwnedEvent> = a.iter().chain(&b).cloned().collect();
-        assert_eq!(got, want, "{coding:?}");
+        let first = encode(&g, &opts, &a).unwrap();
+        for next in [coding, Coding::ByteAligned] {
+            let opts = Options::builder()
+                .coding(next)
+                .block_size(2)
+                .build()
+                .unwrap();
+            let mut exi = first.clone();
+            exi.extend(encode(&g, &opts, &b).unwrap());
+            let got = decode::<4096>(&g, &exi, 3, Limits::new(), Sequence::Streams).unwrap();
+            assert_eq!(got, want, "{coding:?} followed by {next:?}");
+        }
     }
 }
 

@@ -350,6 +350,8 @@ impl Default for XmlConfig {
 /// let xxe = ev(r#"<!DOCTYPE r [<!ENTITY e SYSTEM "file:///etc/passwd">]><r>&e;</r>"#)?;
 /// assert!(has(&xxe, &OwnedEvent::EntityReference("e".into())));        // reported, never fetched
 ///
+/// let unicode = ev("<!DOCTYPE café [<!ENTITY mot 'été'>]><café>&mot;</café>")?;
+/// assert!(unicode.iter().any(|e| matches!(e.as_event(), exi::Event::Characters(v) if v.as_str() == Some("été"))));
 /// let defaults = ev(r#"<!DOCTYPE r [<!ATTLIST r lang CDATA "en" kind NMTOKEN " a ">]><r/>"#)?;
 /// assert!(has(&defaults, &OwnedEvent::Attribute(exi::OwnedName::new("", "lang"), exi::OwnedValue::Str("en".into()))));
 /// assert!(has(&defaults, &OwnedEvent::Attribute(exi::OwnedName::new("", "kind"), exi::OwnedValue::Str("a".into()))));
@@ -1440,9 +1442,8 @@ impl<'g, const N: usize> XmlReader<'g, N> {
         let mut c = Cur { s: body, i: 0 };
         let qname = c
             .name()
-            .ok_or_else(|| xml_err("a start tag without a name").at(pos))?
-            .to_string();
-        let mut raw: Vec<(String, String)> = Vec::new();
+            .ok_or_else(|| xml_err("a start tag without a name").at(pos))?;
+        let mut raw: Vec<(&str, &str)> = Vec::new();
         loop {
             let had_space = c.ws();
             if c.done() {
@@ -1456,19 +1457,15 @@ impl<'g, const N: usize> XmlReader<'g, N> {
             }
             let name = c
                 .name()
-                .ok_or_else(|| xml_err("a malformed attribute").at(pos))?
-                .to_string();
+                .ok_or_else(|| xml_err("a malformed attribute").at(pos))?;
             c.ws();
             if !c.eat("=") {
                 return Err(xml_err("an attribute without a value").at(pos));
             }
             c.ws();
-            let v = c
-                .quoted()
-                .ok_or_else(|| {
-                    xml_err("an attribute value without quotes").at(pos)
-                })?
-                .to_string();
+            let v = c.quoted().ok_or_else(|| {
+                xml_err("an attribute value without quotes").at(pos)
+            })?;
             if raw.iter().any(|(n, _)| *n == name) {
                 return Err(xml_err("an attribute given twice").at(pos));
             }
@@ -1558,8 +1555,8 @@ impl<'g, const N: usize> XmlReader<'g, N> {
 
     fn element(
         &mut self,
-        qname: String,
-        raw: Vec<(String, String)>,
+        qname: &str,
+        raw: Vec<(&str, &str)>,
         empty: bool,
         pos: Position,
     ) -> Result<()> {
@@ -1568,19 +1565,19 @@ impl<'g, const N: usize> XmlReader<'g, N> {
             return Err(limit("elements nested deeper than max_depth"));
         }
         // Values, then defaults from the internal subset.
-        let defs: Vec<AttDef> = self.dtd.attdefs(&qname).to_vec();
-        let mut attrs: Vec<(String, String)> = Vec::with_capacity(raw.len());
-        for (n, v) in &raw {
+        let defs: Vec<AttDef> = self.dtd.attdefs(qname).to_vec();
+        let mut attrs = Vec::with_capacity(raw.len());
+        for (n, v) in raw {
             let mut out = String::new();
             self.normalize(v, &mut out, 0, &mut Vec::new())?;
-            attrs.push((n.clone(), out));
+            attrs.push((n, out));
         }
         for d in &defs {
             if let Some(dv) = &d.default {
                 if !attrs.iter().any(|(n, _)| *n == d.name) {
                     let mut out = String::new();
                     self.normalize(dv, &mut out, 0, &mut Vec::new())?;
-                    attrs.push((d.name.clone(), out));
+                    attrs.push((d.name.as_str(), out));
                 }
             }
         }
@@ -1601,7 +1598,7 @@ impl<'g, const N: usize> XmlReader<'g, N> {
         // Namespace declarations.
         let ns_mark = self.ns.len();
         let mut decls: Vec<(String, String)> = Vec::new();
-        let mut plain: Vec<(String, String)> = Vec::new();
+        let mut plain = Vec::new();
         for (n, v) in attrs {
             let prefix = if n == "xmlns" {
                 Some(String::new())
@@ -1646,7 +1643,7 @@ impl<'g, const N: usize> XmlReader<'g, N> {
         for (p, u) in &decls {
             self.ns.push((p.clone(), u.clone()));
         }
-        let (eprefix, elocal) = split_qname(&qname)?;
+        let (eprefix, elocal) = split_qname(qname)?;
         let euri = self
             .lookup(eprefix)
             .ok_or_else(|| xml_err("an undeclared prefix"))?
@@ -1654,7 +1651,7 @@ impl<'g, const N: usize> XmlReader<'g, N> {
         let mut resolved: Vec<(String, String, String, String)> =
             Vec::with_capacity(plain.len());
         for (n, v) in plain {
-            let (p, l) = split_qname(&n)?;
+            let (p, l) = split_qname(n)?;
             let uri = if p.is_empty() {
                 String::new()
             } else {
@@ -1672,8 +1669,6 @@ impl<'g, const N: usize> XmlReader<'g, N> {
         let id = self.tables.add_name(&euri, elocal)?;
         let depth = self.stack.len() as u32 + 1;
         let eprefix = eprefix.to_string();
-        let elocal_s = elocal.to_string();
-        let _ = elocal_s;
         self.queue(XEv::SE(id, eprefix.clone()), depth, pos);
         let mut marked = false;
         for (p, u) in decls {
@@ -1694,7 +1689,12 @@ impl<'g, const N: usize> XmlReader<'g, N> {
                 self.phase = XPhase::Content;
             }
         } else {
-            self.stack.push(Open { qname, id, prefix: eprefix, ns_mark });
+            self.stack.push(Open {
+                qname: qname.into(),
+                id,
+                prefix: eprefix,
+                ns_mark,
+            });
             self.phase = XPhase::Content;
         }
         Ok(())
@@ -1751,20 +1751,23 @@ impl<'g, const N: usize> XmlReader<'g, N> {
         let mut subset = false;
         let mut end = None;
         while i < b.len() {
-            let r = &s[i..];
             match b[i] {
-                q @ (b'"' | b'\'') => match r[1..].find(q as char) {
+                q @ (b'"' | b'\'') => match s[i + 1..].find(q as char) {
                     Some(j) => i += j + 2,
                     None => break,
                 },
-                _ if subset && r.starts_with("<!--") => match r.find("-->") {
-                    Some(j) => i += j + 3,
-                    None => break,
-                },
-                _ if subset && r.starts_with("<?") => match r.find("?>") {
-                    Some(j) => i += j + 2,
-                    None => break,
-                },
+                b'<' if subset && s[i..].starts_with("<!--") => {
+                    match s[i..].find("-->") {
+                        Some(j) => i += j + 3,
+                        None => break,
+                    }
+                }
+                b'<' if subset && s[i..].starts_with("<?") => {
+                    match s[i..].find("?>") {
+                        Some(j) => i += j + 2,
+                        None => break,
+                    }
+                }
                 b'[' if !subset => {
                     subset = true;
                     i += 1;

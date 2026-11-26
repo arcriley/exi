@@ -132,6 +132,30 @@ impl XmlWriterConfig {
 /// # Ok::<(), exi::Error>(())
 /// ```
 ///
+/// A shadowed prefix returns to its outer binding when the element
+/// closes.
+///
+/// ```
+/// use exi::xml::{PrefixPolicy, XmlWriter, XmlWriterConfig};
+/// use exi::EventSink;
+/// let config = XmlWriterConfig::new().prefixes(PrefixPolicy::FromEvents);
+/// let mut w = XmlWriter::new(Vec::new(), config);
+/// w.start_element("root")?;
+/// w.namespace("p", "urn:outer")?;
+/// w.start_element("child")?;
+/// w.namespace("p", "urn:inner")?;
+/// w.attribute(("urn:outer", "a"), "x")?;
+/// w.attribute(("urn:inner", "b"), "y")?;
+/// w.end_element()?;
+/// w.start_element("sibling")?;
+/// w.attribute(("urn:outer", "a"), "z")?;
+/// w.end_element()?;
+/// w.end_element()?;
+/// w.end_document()?;
+/// assert_eq!(w.into_sink(), br#"<root xmlns:p="urn:outer"><child xmlns:p="urn:inner" xmlns:ns1="urn:outer" ns1:a="x" p:b="y"/><sibling p:a="z"/></root>"#);
+/// # Ok::<(), exi::Error>(())
+/// ```
+///
 /// What cannot be written.
 ///
 /// ```
@@ -250,16 +274,26 @@ impl<S: Sink> EventSink for XmlWriter<S> {
                 self.put(&format!("</{name}>"))
             }
             Event::Characters(v) => {
-                let text = lexical_string(&v)?;
-                check_chars(&text)?;
+                let owned;
+                let text = match v.as_str() {
+                    Some(text) => text,
+                    None => {
+                        owned = lexical_string(&v)?;
+                        &owned
+                    }
+                };
+                check_chars(text)?;
                 self.close_tag(false)?;
                 if self.stack.is_empty() {
                     return Err(state(
                         "character data outside the document element",
                     ));
                 }
+                if !text.contains(['&', '<', '>', '\r']) {
+                    return self.put(text);
+                }
                 let mut out = String::with_capacity(text.len());
-                escape_text(&mut out, &text);
+                escape_text(&mut out, text);
                 self.put(&out)
             }
             Event::Comment(c) => {
@@ -380,14 +414,8 @@ impl<S: Sink> XmlWriter<S> {
     fn close_tag(&mut self, empty: bool) -> Result<()> {
         let Some(tag) = self.open.take() else { return Ok(()) };
         let mark = self.bindings.len();
-        let mut decls: Vec<(String, String)> = Vec::new();
         let from_events = self.cfg.prefixes == PrefixPolicy::FromEvents;
-        if from_events {
-            for (p, u) in &tag.ns {
-                self.bindings.push((p.clone(), u.clone()));
-                decls.push((p.clone(), u.clone()));
-            }
-        }
+        self.bindings.extend(tag.ns);
         // The element's name.
         let uri = &*tag.name.uri;
         let mut ename = None;
@@ -409,73 +437,20 @@ impl<S: Sink> XmlWriter<S> {
                 } else {
                     if self.lookup("") != Some(uri) {
                         self.bindings.push((String::new(), uri.into()));
-                        decls.push((String::new(), uri.into()));
                     }
                     tag.name.local.to_string()
                 }
             }
         };
-        // Attribute names.
-        let mut anames = Vec::with_capacity(tag.attrs.len());
-        for (n, _) in &tag.attrs {
-            let uri = &*n.uri;
-            if uri.is_empty() {
-                anames.push(n.local.to_string());
-                continue;
-            }
-            if uri == XML_NS {
-                anames.push(format!("xml:{}", n.local));
-                continue;
-            }
-            if from_events {
-                if let Some(p) = n.prefix.as_deref().filter(|p| !p.is_empty())
-                {
-                    if self.lookup(p) == Some(uri) {
-                        anames.push(format!("{p}:{}", n.local));
-                        continue;
-                    }
-                }
-            }
-            let bound = self
-                .bindings
-                .iter()
-                .rev()
-                .map(|(p, _)| p.clone())
-                .find(|p| !p.is_empty() && self.lookup(p) == Some(uri));
-            let p = match bound {
-                Some(p) => p,
-                None => {
-                    // The name's own prefix when it is free here
-                    // (`xlink:href`), else the lowest `nsN` not in
-                    // scope.
-                    let own = n.prefix.as_deref().filter(|p| {
-                        !p.is_empty()
-                            && *p != "xml"
-                            && *p != "xmlns"
-                            && self.lookup(p).is_none()
-                            && !decls.iter().any(|(d, _)| d == p)
-                    });
-                    let p = match own {
-                        Some(p) => p.to_string(),
-                        None => {
-                            let mut k = 1;
-                            while self.lookup(&format!("ns{k}")).is_some() {
-                                k += 1;
-                            }
-                            format!("ns{k}")
-                        }
-                    };
-                    self.bindings.push((p.clone(), uri.into()));
-                    decls.push((p.clone(), uri.into()));
-                    p
-                }
-            };
-            anames.push(format!("{p}:{}", n.local));
-        }
+        let prefixes: Vec<_> = tag
+            .attrs
+            .iter()
+            .map(|(name, _)| self.attribute_prefix(name, from_events))
+            .collect();
         let mut out = String::new();
         out.push('<');
         out.push_str(&ename);
-        for (p, u) in &decls {
+        for (p, u) in &self.bindings[mark..] {
             if p.is_empty() {
                 out.push_str(" xmlns=\"");
             } else {
@@ -486,11 +461,17 @@ impl<S: Sink> XmlWriter<S> {
             escape_attr(&mut out, u);
             out.push('"');
         }
-        for ((_, v), n) in tag.attrs.iter().zip(&anames) {
+        for ((name, value), prefix) in tag.attrs.iter().zip(prefixes) {
             out.push(' ');
-            out.push_str(n);
+            if let Some(i) = prefix {
+                out.push_str(&self.bindings[i].0);
+                out.push(':');
+            } else if &*name.uri == XML_NS {
+                out.push_str("xml:");
+            }
+            out.push_str(&name.local);
             out.push_str("=\"");
-            escape_attr(&mut out, v);
+            escape_attr(&mut out, value);
             out.push('"');
         }
         if empty {
@@ -501,6 +482,51 @@ impl<S: Sink> XmlWriter<S> {
             self.stack.push((ename, mark));
         }
         self.put(&out)
+    }
+
+    fn attribute_prefix(
+        &mut self,
+        name: &OwnedName,
+        from_events: bool,
+    ) -> Option<usize> {
+        let uri = &*name.uri;
+        if uri.is_empty() || uri == XML_NS {
+            return None;
+        }
+        let own = name.prefix.as_deref().filter(|p| !p.is_empty());
+        if from_events {
+            if let Some(p) = own.filter(|p| *p != "xml") {
+                if let Some(i) =
+                    self.bindings.iter().rposition(|(prefix, _)| prefix == p)
+                {
+                    if self.bindings[i].1 == uri {
+                        return Some(i);
+                    }
+                }
+            }
+        }
+        if let Some(i) = self
+            .bindings
+            .iter()
+            .rposition(|(p, _)| !p.is_empty() && self.lookup(p) == Some(uri))
+        {
+            return Some(i);
+        }
+        let prefix = match own {
+            Some(p) if p != "xmlns" && self.lookup(p).is_none() => p.into(),
+            _ => {
+                let mut k = 1;
+                loop {
+                    let p = format!("ns{k}");
+                    if self.lookup(&p).is_none() {
+                        break p;
+                    }
+                    k += 1;
+                }
+            }
+        };
+        self.bindings.push((prefix, uri.into()));
+        Some(self.bindings.len() - 1)
     }
 
     fn end_doc(&mut self) -> Result<()> {

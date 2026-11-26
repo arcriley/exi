@@ -179,10 +179,10 @@ Findings so far (synthetic XMPP data):
   `ErrorKind`.
 - Strings are `exi_str { ptr, len }`, UTF-8. Strings libexi returns also end with a NUL
   that `len` does not count.
-- `include/exi.h` is generated from `src/capi/mod.rs` by cbindgen and committed:
-  `cbindgen --config cbindgen.toml --crate exi -o include/exi.h`. `tests/c_api.rs`
-  fails when it is out of date. The `dom` modules and `impl Float` are marked
-  `cbindgen:ignore`.
+- `include/exi.h` is written by hand: declarations, defines and types only, no
+  generator. Change it with `src/capi/mod.rs`. `tests/c_api.rs` checks the function
+  types, `#define` values, and struct sizes and offsets against the Rust, and compiles
+  it as C11 and C++17 with `exi_dom.h`.
 
 ## Unfinished work
 

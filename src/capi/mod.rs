@@ -8,8 +8,8 @@
 // are welcome only if this notice remains unchanged clearly
 // communicating that changes are made under these same conditions.
 //
-//! `include/exi.h` is generated from this module by cbindgen
-//! (`cbindgen.toml`) and committed; `tests/c_api.rs` checks it.
+//! `include/exi.h` declares this module for C, written by hand;
+//! `tests/c_api.rs` checks it against the code.
 //! Names, numbers and layouts here are the ABI. Layer 2, the document
 //! tree, is [`dom`], declared by the hand-written `include/exi_dom.h`.
 //!
@@ -19,7 +19,7 @@
 //! |---|---|
 //! | Status codes | `exi_status` (`int32_t`): `EXI_OK` 0, `EXI_END` 1, `EXI_NEED_INPUT` 2, negative codes one per `ErrorKind` (see [`crate::ErrorKind`]) |
 //! | Strings | `exi_str { ptr, len }`, UTF-8. Strings libexi returns also have a NUL at `ptr[len]` that `len` does not count (D32). Strings passed in need no NUL. An `exi_str` with `len` 0 may have a NULL `ptr` |
-//! | Objects | opaque pointers. `_free(NULL)` is a no-op. Every handle starts with a magic tag; debug builds check it on each call and return `EXI_E_ARG` for a wrong or freed handle |
+//! | Objects | opaque pointers. `_free(NULL)` is a no-op. Every handle starts with a magic tag; each call checks it and returns `EXI_E_ARG` (or NULL) for a wrong or freed handle |
 //! | Config structs | start with `uint32_t size` = `sizeof` the struct the caller was compiled with. They only grow at the end; fields beyond `size` read as zero, and zero means the default. Constants are plain integers: an unknown value is `EXI_E_ARG` |
 //! | Panics | every export catches panics and returns `EXI_E_INTERNAL` (or NULL); the object is poisoned. Callbacks are plain `extern "C"` and must not unwind |
 //! | Poisoning | after a fatal error every call on the object except `_free` returns `EXI_E_STATE`. `EXI_E_UNENCODABLE` is not fatal (D23) |
@@ -60,8 +60,8 @@
 #![allow(non_camel_case_types)]
 
 use core::ffi::{c_char, c_int, c_void};
+use std::boxed::Box;
 
-/// cbindgen:ignore
 #[cfg(feature = "dom")]
 pub mod dom;
 mod imp;
@@ -89,52 +89,50 @@ unsafe fn writer<'a>(w: *mut exi_writer) -> Option<&'a mut WriterObj> {
     (o.magic == MAGIC_WRITER).then_some(o)
 }
 
-/// Runs an export: a panic poisons the object and returns
-/// `EXI_E_INTERNAL`.
+/// Runs an export on a block: `EXI_E_ARG` without one; a panic poisons
+/// the block and returns `EXI_E_INTERNAL`.
+fn on_block<B: Block>(
+    b: Option<&mut B>,
+    f: impl FnOnce(&mut B) -> exi_status,
+) -> exi_status {
+    let Some(b) = b else { return EXI_E_ARG };
+    let p: *mut B = b;
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(b)))
+        .unwrap_or_else(|_| {
+            // SAFETY: still live: only `_free` ends it.
+            unsafe { (*p).poison() };
+            EXI_E_INTERNAL
+        })
+}
+
 fn on_reader(
     r: *mut exi_reader,
     f: impl FnOnce(&mut ReaderObj) -> exi_status,
 ) -> exi_status {
-    guard(EXI_E_INTERNAL, || {
-        // SAFETY: the export's contract.
-        match unsafe { reader(r) } {
-            Some(o) => {
-                let p: *mut ReaderObj = o;
-                let s = std::panic::catch_unwind(
-                    std::panic::AssertUnwindSafe(|| f(o)),
-                );
-                // SAFETY: still live: only `_free` ends it.
-                s.unwrap_or_else(|_| {
-                    unsafe { (*p).poisoned = true };
-                    EXI_E_INTERNAL
-                })
-            }
-            None => EXI_E_ARG,
-        }
-    })
+    // SAFETY: the export's contract.
+    guard(EXI_E_INTERNAL, || on_block(unsafe { reader(r) }, f))
 }
 
 fn on_writer(
     w: *mut exi_writer,
     f: impl FnOnce(&mut WriterObj) -> exi_status,
 ) -> exi_status {
-    guard(EXI_E_INTERNAL, || {
-        // SAFETY: the export's contract.
-        match unsafe { writer(w) } {
-            Some(o) => {
-                let p: *mut WriterObj = o;
-                let s = std::panic::catch_unwind(
-                    std::panic::AssertUnwindSafe(|| f(o)),
-                );
-                s.unwrap_or_else(|_| {
-                    // SAFETY: still live: only `_free` ends it.
-                    unsafe { (*p).poisoned = true };
-                    EXI_E_INTERNAL
-                })
-            }
-            None => EXI_E_ARG,
-        }
-    })
+    // SAFETY: the export's contract.
+    guard(EXI_E_INTERNAL, || on_block(unsafe { writer(w) }, f))
+}
+
+/// The grammar set behind a handle, or `None` for NULL or a wrong
+/// handle.
+///
+/// # Safety
+///
+/// `g` is NULL or a live grammar set.
+unsafe fn grammar_set<'a>(
+    g: *const exi_grammar_set,
+) -> Option<&'a GrammarSetObj> {
+    // SAFETY: the caller guarantees the pointer.
+    let o = unsafe { (g as *const GrammarSetObj).as_ref() }?;
+    (o.magic == MAGIC_GRAMMARS).then_some(o)
 }
 
 /// A status code.
@@ -571,6 +569,21 @@ pub extern "C" fn exi_abi_version() -> u32 {
 }
 
 /// The crate version, NUL-terminated, static.
+///
+/// ```
+/// use exi::capi::*;
+/// # use core::ptr::{null, null_mut};
+/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+/// # /// A writer config: byte-aligned, options agreed out of band.
+/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
+/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
+/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
+/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// unsafe {
+///     let v = core::ffi::CStr::from_ptr(exi_version_string()).to_str().unwrap();
+///     assert_eq!(v, env!("CARGO_PKG_VERSION"));
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub extern "C" fn exi_version_string() -> *const c_char {
     concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr().cast()
@@ -622,6 +635,25 @@ pub extern "C" fn exi_status_string(s: exi_status) -> *const c_char {
 /// # Safety
 ///
 /// `o` is NULL or points to writable memory for an `exi_options`.
+///
+/// ```
+/// use exi::capi::*;
+/// # use core::ptr::{null, null_mut};
+/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+/// # /// A writer config: byte-aligned, options agreed out of band.
+/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
+/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
+/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
+/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// unsafe {
+///     let mut o = core::mem::zeroed::<exi_options>();
+///     exi_options_init(&mut o);
+///     assert_eq!(o.size as usize, core::mem::size_of::<exi_options>());
+///     assert_eq!((o.coding, o.flags, o.preserve), (EXI_CODING_BIT_PACKED, 0, 0));
+///     assert_eq!(o.schema_id_kind, EXI_SCHEMA_ID_ABSENT);
+///     exi_options_init(null_mut());                                // no-op
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_options_init(o: *mut exi_options) {
     if !o.is_null() {
@@ -681,6 +713,24 @@ pub unsafe extern "C" fn exi_options_validate(
 /// # Safety
 ///
 /// `l` is NULL or writable.
+///
+/// ```
+/// use exi::capi::*;
+/// # use core::ptr::{null, null_mut};
+/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+/// # /// A writer config: byte-aligned, options agreed out of band.
+/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
+/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
+/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
+/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// unsafe {
+///     let mut l = core::mem::zeroed::<exi_limits>();
+///     exi_limits_init(&mut l);
+///     assert_eq!(l.size as usize, core::mem::size_of::<exi_limits>());
+///     assert_eq!(l.max_depth, exi::Limits::new().get_max_depth());
+///     exi_limits_init(null_mut());                                 // no-op
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_limits_init(l: *mut exi_limits) {
     if !l.is_null() {
@@ -698,6 +748,30 @@ pub unsafe extern "C" fn exi_limits_init(l: *mut exi_limits) {
 ///
 /// `cfg` is NULL or points to an `exi_strings_config` of at least
 /// `cfg->size` bytes.
+///
+/// ```
+/// use exi::capi::*;
+/// # use core::ptr::{null, null_mut};
+/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+/// # /// A writer config: byte-aligned, options agreed out of band.
+/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
+/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
+/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
+/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// unsafe {
+///     let t = exi_strings_new(null());                             // defaults
+///     assert!(!t.is_null());
+///     exi_strings_free(t);
+///     let mut c = core::mem::zeroed::<exi_strings_config>();
+///     c.size = core::mem::size_of::<exi_strings_config>() as u32;
+///     c.hash_bits = 32;
+///     let t = exi_strings_new(&c);
+///     assert!(!t.is_null());
+///     exi_strings_free(t);
+///     c.hash_bits = 7;                                             // 16 or 32 only
+///     assert!(exi_strings_new(&c).is_null());
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_strings_new(
     cfg: *const exi_strings_config,
@@ -725,12 +799,10 @@ pub unsafe extern "C" fn exi_strings_new(
             }
         }
         match crate::strings::GlobalStrings::new(g) {
-            Ok(strings) => {
-                std::boxed::Box::into_raw(std::boxed::Box::new(StringsObj {
-                    magic: MAGIC_STRINGS,
-                    strings,
-                })) as *mut exi_strings
-            }
+            Ok(strings) => Box::into_raw(Box::new(StringsObj {
+                magic: MAGIC_STRINGS,
+                strings,
+            })) as *mut exi_strings,
             Err(_) => core::ptr::null_mut(),
         }
     })
@@ -740,6 +812,28 @@ pub unsafe extern "C" fn exi_strings_new(
 ///
 /// `s` is NULL or from `exi_strings_new`, and no reader or writer still
 /// uses it.
+///
+/// ```
+/// use exi::capi::*;
+/// # use core::ptr::{null, null_mut};
+/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+/// # /// A writer config: byte-aligned, options agreed out of band.
+/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
+/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
+/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
+/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// unsafe {
+///     // Tables shared by two readers, freed after both.
+///     let t = exi_strings_new(null());
+///     let mut cfg = reader_config(&byte);
+///     cfg.strings = t;
+///     let (a, b) = (exi_reader_new(&cfg), exi_reader_new(&cfg));
+///     exi_reader_free(a);
+///     exi_reader_free(b);
+///     exi_strings_free(t);
+///     exi_strings_free(null_mut());                                // no-op
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_strings_free(s: *mut exi_strings) {
     let p = s as *mut StringsObj;
@@ -747,8 +841,10 @@ pub unsafe extern "C" fn exi_strings_free(s: *mut exi_strings) {
     if let Some(o) = unsafe { p.as_mut() } {
         if o.magic == MAGIC_STRINGS {
             o.magic = 0;
-            // SAFETY: from Box::into_raw in `exi_strings_new`.
-            guard((), || drop(unsafe { std::boxed::Box::from_raw(p) }));
+            guard((), || {
+                // SAFETY: from Box::into_raw in `exi_strings_new`.
+                drop(unsafe { Box::from_raw(p) })
+            });
         }
     }
 }
@@ -757,6 +853,24 @@ pub unsafe extern "C" fn exi_strings_free(s: *mut exi_strings) {
 
 /// The schema-less grammar set: static; retain and release do nothing
 /// to it.
+///
+/// ```
+/// use exi::capi::*;
+/// # use core::ptr::{null, null_mut};
+/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+/// # /// A writer config: byte-aligned, options agreed out of band.
+/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
+/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
+/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
+/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// unsafe {
+///     let g = exi_grammar_set_schemaless();
+///     assert_eq!(g, exi_grammar_set_schemaless());                 // one static set
+///     exi_grammar_set_release(exi_grammar_set_retain(g));          // no counting
+///     let mut d = [0 as core::ffi::c_char; EXI_DIGEST_LEN];
+///     assert_eq!(exi_grammar_set_digest(g, d.as_mut_ptr()), EXI_E_ARG);   // no .exig form
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub extern "C" fn exi_grammar_set_schemaless() -> *mut exi_grammar_set {
     imp::schemaless() as *mut exi_grammar_set
@@ -767,12 +881,42 @@ pub extern "C" fn exi_grammar_set_schemaless() -> *mut exi_grammar_set {
 /// # Safety
 ///
 /// `g` is a live grammar set.
+///
+/// ```
+/// use exi::capi::*;
+/// # use core::ptr::{null, null_mut};
+/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+/// # /// A writer config: byte-aligned, options agreed out of band.
+/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
+/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
+/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
+/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// unsafe {
+/// # #[cfg(feature = "exig")] {
+/// # let mut b = exi::grammar::GrammarSet::builder();
+/// # let empty = b.empty_type(None);
+/// # let a = b.element(exi::OwnedName::new("", "a"), empty, false);
+/// # b.global(a);
+/// # let file = b.build().unwrap().to_exig().unwrap();
+///     let mut g = null_mut();
+///     assert_eq!(exi_grammar_set_from_exig(file.as_ptr(), file.len(), &mut g), EXI_OK);
+///     let mut cfg = reader_config(&byte);
+///     cfg.grammars = exi_grammar_set_retain(g);                    // a second reference
+///     exi_grammar_set_release(g);                                  // the first
+///     let r = exi_reader_new(&cfg);                                // the set is still live
+///     assert!(!r.is_null());
+///     exi_reader_free(r);
+///     exi_grammar_set_release(cfg.grammars);                       // freed here
+/// # }
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_grammar_set_retain(
     g: *mut exi_grammar_set,
 ) -> *mut exi_grammar_set {
-    if !g.is_null() {
-        // SAFETY: the caller guarantees a live set.
+    // SAFETY: the caller guarantees a live set.
+    if unsafe { grammar_set(g) }.is_some() {
+        // SAFETY: as above.
         unsafe { imp::retain(g as *mut GrammarSetObj) };
     }
     g
@@ -783,20 +927,73 @@ pub unsafe extern "C" fn exi_grammar_set_retain(
 /// # Safety
 ///
 /// `g` is NULL or a live grammar set the caller holds a reference to.
+///
+/// ```
+/// use exi::capi::*;
+/// # use core::ptr::{null, null_mut};
+/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+/// # /// A writer config: byte-aligned, options agreed out of band.
+/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
+/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
+/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
+/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// unsafe {
+/// # #[cfg(feature = "exig")] {
+/// # let mut b = exi::grammar::GrammarSet::builder();
+/// # let empty = b.empty_type(None);
+/// # let a = b.element(exi::OwnedName::new("", "a"), empty, false);
+/// # b.global(a);
+/// # let file = b.build().unwrap().to_exig().unwrap();
+///     let mut g = null_mut();
+///     assert_eq!(exi_grammar_set_from_exig(file.as_ptr(), file.len(), &mut g), EXI_OK);
+///     let r = exi_reader_new(&{ let mut c = reader_config(&byte); c.grammars = g; c });
+///     exi_grammar_set_release(g);                                  // the reader holds its own
+///     let mut ev = core::mem::zeroed::<exi_event>();
+///     exi_reader_feed(r, [0x80u8, 0x00].as_ptr().cast(), 2, EXI_FEED_FINAL, null_mut());
+///     assert_eq!(exi_reader_next(r, &mut ev), EXI_OK);             // SD
+///     assert_eq!(exi_reader_next(r, &mut ev), EXI_OK);             // SE(a)
+///     assert_eq!(ev.r#type, EXI_EV_SE);
+///     exi_reader_free(r);                                          // and drops it
+///     exi_grammar_set_release(null_mut());                         // no-op
+/// # }
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_grammar_set_release(g: *mut exi_grammar_set) {
-    if !g.is_null() {
-        // SAFETY: the caller guarantees a live set and a reference.
+    // SAFETY: the caller guarantees NULL or a live set.
+    if unsafe { grammar_set(g) }.is_some() {
+        // SAFETY: the caller holds a reference.
         unsafe { imp::release(g as *mut GrammarSetObj) };
     }
 }
 
 /// The fixed numbers of a declared name; `EXI_E_ARG` when it is not an
-/// initial entry.
+/// initial entry, or an output is NULL.
 ///
 /// # Safety
 ///
 /// `g` is live; `uri_id` and `local_id` are writable.
+///
+/// ```
+/// use exi::capi::*;
+/// let s = |t: &str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+/// let g = exi_grammar_set_schemaless();
+/// let (mut u, mut l) = (0, 0);
+/// unsafe {
+///     let xml = "http://www.w3.org/XML/1998/namespace";
+///     assert_eq!(exi_grammar_set_name_id(g, s(xml), s("lang"), &mut u, &mut l), EXI_OK);
+///     assert_eq!((u, l), (1, 2));                              // base, id, lang, space
+///     assert_eq!(exi_grammar_set_name_id(g, s(""), s("nope"), &mut u, &mut l), EXI_E_ARG);
+///     assert_eq!(exi_grammar_set_name_id(g, s(xml), s("lang"), core::ptr::null_mut(), &mut l), EXI_E_ARG);
+///     // A pointer that is not a grammar set is refused, not used.
+///     let mut not_a_set = [0u64; 8];
+///     let bogus = not_a_set.as_mut_ptr().cast::<exi_grammar_set>();
+///     assert_eq!(exi_grammar_set_name_id(bogus, s(xml), s("lang"), &mut u, &mut l), EXI_E_ARG);
+///     assert_eq!(exi_grammar_set_retain(bogus), bogus);        // nothing done
+///     exi_grammar_set_release(bogus);
+///     assert_eq!(not_a_set, [0; 8]);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_grammar_set_name_id(
     g: *const exi_grammar_set,
@@ -807,14 +1004,14 @@ pub unsafe extern "C" fn exi_grammar_set_name_id(
 ) -> exi_status {
     guard(EXI_E_INTERNAL, || {
         // SAFETY: the caller guarantees the pointers and strings.
-        let (Some(o), Some(u), Some(l)) = (
-            unsafe { (g as *const GrammarSetObj).as_ref() },
-            unsafe { str_of(uri) },
-            unsafe { str_of(local) },
-        ) else {
+        let (Some(o), Some(u), Some(l)) =
+            (unsafe { grammar_set(g) }, unsafe { str_of(uri) }, unsafe {
+                str_of(local)
+            })
+        else {
             return EXI_E_ARG;
         };
-        if o.magic != MAGIC_GRAMMARS {
+        if uri_id.is_null() || local_id.is_null() {
             return EXI_E_ARG;
         }
         match o.set.name_id(u, l) {
@@ -878,15 +1075,15 @@ pub unsafe extern "C" fn exi_grammar_set_from_exig(
         if out.is_null() || (data.is_null() && len != 0) {
             return EXI_E_ARG;
         }
-        // SAFETY: the caller guarantees `data` for `len` bytes.
         let bytes: &[u8] = if len == 0 {
             &[]
         } else {
+            // SAFETY: the caller guarantees `data` for `len` bytes.
             unsafe { core::slice::from_raw_parts(data, len) }
         };
         match crate::grammar::GrammarSet::from_exig(bytes) {
             Ok(set) => {
-                let obj = std::boxed::Box::new(GrammarSetObj {
+                let obj = Box::new(GrammarSetObj {
                     magic: MAGIC_GRAMMARS,
                     refs: core::sync::atomic::AtomicUsize::new(1),
                     is_static: false,
@@ -894,9 +1091,7 @@ pub unsafe extern "C" fn exi_grammar_set_from_exig(
                 });
                 // SAFETY: the caller guarantees `out` is writable.
                 unsafe {
-                    out.write(
-                        std::boxed::Box::into_raw(obj) as *mut exi_grammar_set
-                    )
+                    out.write(Box::into_raw(obj) as *mut exi_grammar_set)
                 };
                 EXI_OK
             }
@@ -913,6 +1108,32 @@ pub unsafe extern "C" fn exi_grammar_set_from_exig(
 /// # Safety
 ///
 /// `g` is live.
+///
+/// ```
+/// use exi::capi::*;
+/// # use core::ptr::{null, null_mut};
+/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+/// # /// A writer config: byte-aligned, options agreed out of band.
+/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
+/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
+/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
+/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// unsafe {
+/// # #[cfg(feature = "exig")] {
+/// # let mut b = exi::grammar::GrammarSet::builder();
+/// # let empty = b.empty_type(None);
+/// # let a = b.element(exi::OwnedName::new("", "a"), empty, false);
+/// # b.global(a);
+/// # let file = b.build().unwrap().to_exig().unwrap();
+///     let mut g = null_mut();
+///     assert_eq!(exi_grammar_set_from_exig(file.as_ptr(), file.len(), &mut g), EXI_OK);
+///     extern "C" fn refuse(_: *mut core::ffi::c_void, _: *const u8, _: usize) -> exi_status { EXI_E_IO }
+///     assert_eq!(exi_grammar_set_to_exig(g, Some(refuse), null_mut()), EXI_E_IO);   // its status
+///     assert_eq!(exi_grammar_set_to_exig(g, None, null_mut()), EXI_E_ARG);
+///     exi_grammar_set_release(g);
+/// # }
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_grammar_set_to_exig(
     g: *const exi_grammar_set,
@@ -921,14 +1142,9 @@ pub unsafe extern "C" fn exi_grammar_set_to_exig(
 ) -> exi_status {
     guard(EXI_E_INTERNAL, || {
         // SAFETY: the caller guarantees `g`.
-        let (Some(o), Some(write)) =
-            (unsafe { (g as *const GrammarSetObj).as_ref() }, write)
-        else {
+        let (Some(o), Some(write)) = (unsafe { grammar_set(g) }, write) else {
             return EXI_E_ARG;
         };
-        if o.magic != MAGIC_GRAMMARS {
-            return EXI_E_ARG;
-        }
         match o.set.to_exig() {
             Ok(bytes) => write(user, bytes.as_ptr(), bytes.len()),
             Err(e) => status_of(e.kind()),
@@ -946,6 +1162,35 @@ pub const EXI_DIGEST_LEN: usize = 72;
 /// # Safety
 ///
 /// `g` is live; `out` is writable for `EXI_DIGEST_LEN` bytes.
+///
+/// ```
+/// use exi::capi::*;
+/// # use core::ptr::{null, null_mut};
+/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+/// # /// A writer config: byte-aligned, options agreed out of band.
+/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
+/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
+/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
+/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// unsafe {
+/// # #[cfg(feature = "exig")] {
+/// # let mut b = exi::grammar::GrammarSet::builder();
+/// # let empty = b.empty_type(None);
+/// # let a = b.element(exi::OwnedName::new("", "a"), empty, false);
+/// # b.global(a);
+/// # let file = b.build().unwrap().to_exig().unwrap();
+///     let mut g = null_mut();
+///     assert_eq!(exi_grammar_set_from_exig(file.as_ptr(), file.len(), &mut g), EXI_OK);
+///     let mut d = [0 as core::ffi::c_char; EXI_DIGEST_LEN];
+///     assert_eq!(exi_grammar_set_digest(g, d.as_mut_ptr()), EXI_OK);
+///     let digest = core::ffi::CStr::from_ptr(d.as_ptr()).to_str().unwrap();
+///     assert_eq!(digest.len(), EXI_DIGEST_LEN - 1);
+///     assert!(digest.starts_with("sha256:"));
+///     assert_eq!(exi_grammar_set_digest(g, null_mut()), EXI_E_ARG);
+///     exi_grammar_set_release(g);
+/// # }
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_grammar_set_digest(
     g: *const exi_grammar_set,
@@ -953,10 +1198,8 @@ pub unsafe extern "C" fn exi_grammar_set_digest(
 ) -> exi_status {
     guard(EXI_E_INTERNAL, || {
         // SAFETY: the caller guarantees `g`.
-        let Some(o) = (unsafe { (g as *const GrammarSetObj).as_ref() }) else {
-            return EXI_E_ARG;
-        };
-        if o.magic != MAGIC_GRAMMARS || out.is_null() {
+        let Some(o) = (unsafe { grammar_set(g) }) else { return EXI_E_ARG };
+        if out.is_null() {
             return EXI_E_ARG;
         }
         match o.set.digest() {
@@ -1031,8 +1274,7 @@ pub unsafe extern "C" fn exi_reader_new(
         };
         // SAFETY: as above.
         match unsafe { imp::reader_new(&c) } {
-            Some(o) => std::boxed::Box::into_raw(std::boxed::Box::new(o))
-                as *mut exi_reader,
+            Some(o) => Box::into_raw(Box::new(o)) as *mut exi_reader,
             None => core::ptr::null_mut(),
         }
     })
@@ -1041,13 +1283,29 @@ pub unsafe extern "C" fn exi_reader_new(
 /// # Safety
 ///
 /// `r` is NULL or a live reader.
+///
+/// ```
+/// use exi::capi::*;
+/// # use core::ptr::{null, null_mut};
+/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+/// # /// A writer config: byte-aligned, options agreed out of band.
+/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
+/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
+/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
+/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// unsafe {
+///     let r = exi_reader_new(&reader_config(&byte));
+///     exi_reader_free(r);
+///     exi_reader_free(null_mut());                                 // no-op
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_reader_free(r: *mut exi_reader) {
     // SAFETY: the caller guarantees NULL or a live reader.
     if unsafe { reader(r) }.is_some() {
-        // SAFETY: from Box::into_raw in `exi_reader_new`.
         guard((), || {
-            drop(unsafe { std::boxed::Box::from_raw(r as *mut ReaderObj) })
+            // SAFETY: from Box::into_raw in `exi_reader_new`.
+            drop(unsafe { Box::from_raw(r as *mut ReaderObj) })
         });
     }
 }
@@ -1060,6 +1318,28 @@ pub unsafe extern "C" fn exi_reader_free(r: *mut exi_reader) {
 /// # Safety
 ///
 /// `r` is live; `data` is valid for `len` bytes.
+///
+/// ```
+/// use exi::capi::*;
+/// # use core::ptr::{null, null_mut};
+/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+/// # /// A writer config: byte-aligned, options agreed out of band.
+/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
+/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
+/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
+/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// unsafe {
+///     let mut cfg = reader_config(&byte);
+///     cfg.input_buffer_size = 64;
+///     let r = exi_reader_new(&cfg);
+///     let input = [0u8; 100];
+///     let mut taken = 0;
+///     assert_eq!(exi_reader_feed(r, input.as_ptr().cast(), input.len(), EXI_FEED_FINAL, &mut taken), EXI_OK);
+///     assert_eq!(taken, 64);                                       // the ring is full; FINAL not applied
+///     assert_eq!(exi_reader_feed(r, null(), 0, 1 << 9, null_mut()), EXI_E_ARG);     // unknown flag
+///     exi_reader_free(r);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_reader_feed(
     r: *mut exi_reader,
@@ -1077,10 +1357,10 @@ pub unsafe extern "C" fn exi_reader_feed(
         {
             return EXI_E_ARG;
         }
-        // SAFETY: the caller guarantees `data` for `len` bytes.
         let bytes: &[u8] = if len == 0 {
             &[]
         } else {
+            // SAFETY: the caller guarantees `data` for `len` bytes.
             unsafe { core::slice::from_raw_parts(data.cast(), len) }
         };
         let n = o.reader.feed(bytes);
@@ -1105,6 +1385,31 @@ pub unsafe extern "C" fn exi_reader_feed(
 /// # Safety
 ///
 /// `r` is live; `len` is writable.
+///
+/// ```
+/// use exi::capi::*;
+/// # use core::ptr::{null, null_mut};
+/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+/// # /// A writer config: byte-aligned, options agreed out of band.
+/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
+/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
+/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
+/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// unsafe {
+///     let r = exi_reader_new(&reader_config(&byte));
+///     let mut room = 0;
+///     let buf = exi_reader_buffer(r, &mut room);
+///     assert!(room >= 5);
+///     let doc = [0x80u8, 0x01, 0x02, b'a', 0x00];                   // <a/>
+///     core::ptr::copy_nonoverlapping(doc.as_ptr(), buf, doc.len()); // e.g. read(2) into it
+///     assert_eq!(exi_reader_commit(r, doc.len()), EXI_OK);
+///     exi_reader_feed(r, null(), 0, EXI_FEED_FINAL, null_mut());
+///     let mut ev = core::mem::zeroed::<exi_event>();
+///     assert_eq!(exi_reader_next(r, &mut ev), EXI_OK);
+///     assert_eq!(ev.r#type, EXI_EV_SD);
+///     exi_reader_free(r);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_reader_buffer(
     r: *mut exi_reader,
@@ -1127,6 +1432,25 @@ pub unsafe extern "C" fn exi_reader_buffer(
 /// # Safety
 ///
 /// `r` is live; `n` is at most the length `exi_reader_buffer` gave.
+///
+/// ```
+/// use exi::capi::*;
+/// # use core::ptr::{null, null_mut};
+/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+/// # /// A writer config: byte-aligned, options agreed out of band.
+/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
+/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
+/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
+/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// unsafe {
+///     let r = exi_reader_new(&reader_config(&byte));
+///     let mut room = 0;
+///     exi_reader_buffer(r, &mut room);
+///     assert_eq!(exi_reader_commit(r, room + 1), EXI_E_ARG);       // more than there is room for
+///     assert_eq!(exi_reader_commit(r, 0), EXI_OK);
+///     exi_reader_free(r);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_reader_commit(
     r: *mut exi_reader,
@@ -1150,6 +1474,31 @@ pub unsafe extern "C" fn exi_reader_commit(
 /// # Safety
 ///
 /// `r` is live; `out` is writable.
+///
+/// ```
+/// use exi::capi::*;
+/// # use core::ptr::{null, null_mut};
+/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+/// # /// A writer config: byte-aligned, options agreed out of band.
+/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
+/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
+/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
+/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// unsafe {
+///     let r = exi_reader_new(&reader_config(&byte));
+///     let mut ev = core::mem::zeroed::<exi_event>();
+///     assert_eq!(exi_reader_next(r, &mut ev), EXI_NEED_INPUT);
+///     let doc = [0x80u8, 0x01, 0x02, b'a', 0x00];
+///     exi_reader_feed(r, doc.as_ptr().cast(), doc.len(), EXI_FEED_FINAL, null_mut());
+///     assert_eq!(exi_reader_next(r, &mut ev), EXI_OK);             // SD
+///     assert_eq!(exi_reader_next(r, &mut ev), EXI_OK);
+///     assert_eq!((ev.r#type, ev.depth), (EXI_EV_SE, 1));
+///     let local = core::slice::from_raw_parts(ev.name.local.ptr.cast::<u8>(), ev.name.local.len + 1);
+///     assert_eq!(local, b"a\0");                                   // NUL-terminated too
+///     assert_eq!(exi_reader_next(r, null_mut()), EXI_E_ARG);
+///     exi_reader_free(r);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_reader_next(
     r: *mut exi_reader,
@@ -1165,11 +1514,63 @@ pub unsafe extern "C" fn exi_reader_next(
 }
 
 /// The stream's options once the header is read, else NULL. Valid while
-/// the reader lives.
+/// the reader lives; with `EXI_SEQ_STREAMS`, a later stream's header
+/// changes what it holds.
 ///
 /// # Safety
 ///
 /// `r` is live.
+///
+/// ```
+/// # #[cfg(feature = "exig")] {
+/// use exi::capi::*;
+/// use exi::{Coding, EventSink, OwnedName, Options, SchemaId, Writer, WriterConfig};
+/// use exi::grammar::GrammarSet;
+/// # use exi::strings::{GlobalConfig, GlobalStrings};
+/// let mut b = GrammarSet::builder();
+/// let empty = b.empty_type(None);
+/// let a = b.element(OwnedName::new("", "a"), empty, false);
+/// b.global(a);
+/// let set = b.build()?;
+/// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+/// let grammars = set.attach(&strings)?;
+/// // Two streams back to back, the second with a schemaId.
+/// let mut input = Vec::new();
+/// for id in [SchemaId::Absent, SchemaId::Id("urn:a".into())] {
+///     let o = Options::builder().coding(Coding::ByteAligned).schema_id(id).build()?;
+///     let mut w = Writer::new(Vec::new(), WriterConfig::new(o, &grammars))?;
+///     w.start_element("a")?;
+///     w.end_element()?;
+///     w.end_document()?;
+///     input.extend(w.into_sink());
+/// }
+/// unsafe {
+///     let mut cfg = core::mem::zeroed::<exi_reader_config>();
+///     cfg.size = core::mem::size_of::<exi_reader_config>() as u32;
+///     cfg.sequence = EXI_SEQ_STREAMS;
+///     let exig = set.to_exig()?;
+///     assert_eq!(exi_grammar_set_from_exig(exig.as_ptr(), exig.len(), &mut cfg.grammars), EXI_OK);
+///     let r = exi_reader_new(&cfg);
+///     assert!(exi_reader_options(r).is_null());               // no header read yet
+///     exi_reader_feed(r, input.as_ptr().cast(), input.len(), EXI_FEED_FINAL, core::ptr::null_mut());
+///     let mut ev = core::mem::zeroed::<exi_event>();
+///     let mut kinds = Vec::new();
+///     loop {
+///         match exi_reader_next(r, &mut ev) {
+///             EXI_OK if ev.r#type == EXI_EV_SD => kinds.push((*exi_reader_options(r)).schema_id_kind),
+///             EXI_OK => {}
+///             s => { assert_eq!(s, EXI_END); break }
+///         }
+///     }
+///     assert_eq!(kinds, [EXI_SCHEMA_ID_ABSENT, EXI_SCHEMA_ID_VALUE]);
+///     let id = (*exi_reader_options(r)).schema_id;
+///     assert_eq!(core::slice::from_raw_parts(id.ptr.cast::<u8>(), id.len + 1), b"urn:a\0");
+///     exi_reader_free(r);
+///     exi_grammar_set_release(cfg.grammars);
+/// }
+/// # }
+/// # Ok::<(), exi::Error>(())
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_reader_options(
     r: *const exi_reader,
@@ -1179,15 +1580,12 @@ pub unsafe extern "C" fn exi_reader_options(
         let Some(o) = (unsafe { reader(r as *mut exi_reader) }) else {
             return core::ptr::null();
         };
-        if o.options.is_none() {
-            let mut keep = None;
-            let c = o.reader.options().map(|opts| options_to(opts, &mut keep));
-            o.options = c;
-            o.options_keep = keep;
+        let Some(now) = o.reader.options() else { return core::ptr::null() };
+        if o.options.as_ref().is_none_or(|(was, _)| was != now) {
+            let c = options_to(now, &mut o.options_keep);
+            o.options = Some((now.clone(), c));
         }
-        o.options
-            .as_ref()
-            .map_or(core::ptr::null(), |c| c as *const exi_options)
+        o.options.as_ref().map_or(core::ptr::null(), |(_, c)| c as *const _)
     })
 }
 
@@ -1197,6 +1595,30 @@ pub unsafe extern "C" fn exi_reader_options(
 /// # Safety
 ///
 /// `r` is live; out pointers are NULL or writable.
+///
+/// ```
+/// use exi::capi::*;
+/// # use core::ptr::{null, null_mut};
+/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+/// # /// A writer config: byte-aligned, options agreed out of band.
+/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
+/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
+/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
+/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// unsafe {
+///     let r = exi_reader_new(&reader_config(&byte));
+///     assert_eq!(exi_reader_error(r, null_mut(), null_mut(), null_mut()), EXI_OK);  // none yet
+///     exi_reader_feed(r, [0x80u8, 0x04].as_ptr().cast(), 2, EXI_FEED_FINAL, null_mut());
+///     let mut ev = core::mem::zeroed::<exi_event>();
+///     exi_reader_next(r, &mut ev);                                 // SD
+///     assert_eq!(exi_reader_next(r, &mut ev), EXI_E_GRAMMAR);      // a URI that does not exist
+///     let (mut msg, mut byte_offset, mut event) = (null(), 0, 0);
+///     assert_eq!(exi_reader_error(r, &mut msg, &mut byte_offset, &mut event), EXI_E_GRAMMAR);
+///     assert!(!core::ffi::CStr::from_ptr(msg).to_bytes().is_empty());
+///     assert_eq!(byte_offset, 1);
+///     exi_reader_free(r);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_reader_error(
     r: *const exi_reader,
@@ -1341,8 +1763,7 @@ pub unsafe extern "C" fn exi_writer_new(
         };
         // SAFETY: as above.
         match unsafe { imp::writer_new(&c) } {
-            Some(o) => std::boxed::Box::into_raw(std::boxed::Box::new(o))
-                as *mut exi_writer,
+            Some(o) => Box::into_raw(Box::new(o)) as *mut exi_writer,
             None => core::ptr::null_mut(),
         }
     })
@@ -1351,13 +1772,29 @@ pub unsafe extern "C" fn exi_writer_new(
 /// # Safety
 ///
 /// `w` is NULL or a live writer.
+///
+/// ```
+/// use exi::capi::*;
+/// # use core::ptr::{null, null_mut};
+/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+/// # /// A writer config: byte-aligned, options agreed out of band.
+/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
+/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
+/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
+/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// unsafe {
+///     let w = exi_writer_new(&writer_config(&byte));
+///     exi_writer_free(w);
+///     exi_writer_free(null_mut());                                 // no-op
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_writer_free(w: *mut exi_writer) {
     // SAFETY: the caller guarantees NULL or a live writer.
     if unsafe { writer(w) }.is_some() {
-        // SAFETY: from Box::into_raw in `exi_writer_new`.
         guard((), || {
-            drop(unsafe { std::boxed::Box::from_raw(w as *mut WriterObj) })
+            // SAFETY: from Box::into_raw in `exi_writer_new`.
+            drop(unsafe { Box::from_raw(w as *mut WriterObj) })
         });
     }
 }
@@ -1367,6 +1804,32 @@ pub unsafe extern "C" fn exi_writer_free(w: *mut exi_writer) {
 /// # Safety
 ///
 /// `w` is live; `ev` points to a filled `exi_event`.
+///
+/// ```
+/// use exi::capi::*;
+/// unsafe {
+///     let mut cfg = core::mem::zeroed::<exi_writer_config>();
+///     cfg.size = core::mem::size_of::<exi_writer_config>() as u32;
+///     cfg.flags = 1 << 30;                                    // not a writer flag
+///     assert!(exi_writer_new(&cfg).is_null());
+///     cfg.flags = 0;
+///     let w = exi_writer_new(&cfg);
+///     let s = |t: &str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+///     assert_eq!(exi_writer_start_element(w, s(""), s("at")), EXI_OK);
+///     let mut ev = core::mem::zeroed::<exi_event>();
+///     ev.r#type = EXI_EV_CH;
+///     ev.value.r#type = EXI_V_DATETIME;
+///     ev.value.u.datetime.kind = EXI_DATETIME_DATE;
+///     ev.value.u.datetime.year = 2026;
+///     ev.value.u.datetime.month = 11;
+///     ev.value.u.datetime.day = 25;
+///     assert_eq!(exi_writer_event(w, &ev), EXI_OK);
+///     ev.value.u.datetime.has_tz = 1;
+///     ev.value.u.datetime.tz_minutes = 1 << 20;               // beyond any zone
+///     assert_eq!(exi_writer_event(w, &ev), EXI_E_ARG);
+///     exi_writer_free(w);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_writer_event(
     w: *mut exi_writer,
@@ -1389,6 +1852,29 @@ pub unsafe extern "C" fn exi_writer_event(
 /// # Safety
 ///
 /// `w` is live; the strings are valid.
+///
+/// ```
+/// use exi::capi::*;
+/// # use core::ptr::{null, null_mut};
+/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+/// # /// A writer config: byte-aligned, options agreed out of band.
+/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
+/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
+/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
+/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// unsafe {
+///     let mut cfg = writer_config(&byte);
+///     cfg.format = EXI_FORMAT_XML;
+///     let w = exi_writer_new(&cfg);
+///     let xml = |w| { let (mut p, mut n) = (null(), 0); assert_eq!(exi_writer_take(w, &mut p, &mut n), EXI_OK); String::from_utf8(core::slice::from_raw_parts(p, n).to_vec()).unwrap() };
+///     assert_eq!(exi_writer_start_element(w, s("urn:x"), s("a")), EXI_OK);
+///     assert_eq!(exi_writer_end_element(w), EXI_OK);
+///     assert_eq!(exi_writer_end_document(w), EXI_OK);
+///     assert_eq!(xml(w), "<a xmlns=\"urn:x\"/>");
+///     assert_eq!(exi_writer_start_element(w, s(""), exi_str { ptr: null(), len: 1 }), EXI_E_ARG);
+///     exi_writer_free(w);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_writer_start_element(
     w: *mut exi_writer,
@@ -1409,6 +1895,29 @@ pub unsafe extern "C" fn exi_writer_start_element(
 /// # Safety
 ///
 /// `w` is live; the strings are valid.
+///
+/// ```
+/// use exi::capi::*;
+/// # use core::ptr::{null, null_mut};
+/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+/// # /// A writer config: byte-aligned, options agreed out of band.
+/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
+/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
+/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
+/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// unsafe {
+///     let mut cfg = writer_config(&byte);
+///     cfg.format = EXI_FORMAT_XML;
+///     let w = exi_writer_new(&cfg);
+///     let xml = |w| { let (mut p, mut n) = (null(), 0); assert_eq!(exi_writer_take(w, &mut p, &mut n), EXI_OK); String::from_utf8(core::slice::from_raw_parts(p, n).to_vec()).unwrap() };
+///     exi_writer_start_element(w, s(""), s("a"));
+///     assert_eq!(exi_writer_attribute(w, s(""), s("k"), s("1 < 2")), EXI_OK);
+///     exi_writer_end_element(w);
+///     exi_writer_end_document(w);
+///     assert_eq!(xml(w), "<a k=\"1 &lt; 2\"/>");
+///     exi_writer_free(w);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_writer_attribute(
     w: *mut exi_writer,
@@ -1437,6 +1946,29 @@ pub unsafe extern "C" fn exi_writer_attribute(
 /// # Safety
 ///
 /// `w` is live; `text` is valid.
+///
+/// ```
+/// use exi::capi::*;
+/// # use core::ptr::{null, null_mut};
+/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+/// # /// A writer config: byte-aligned, options agreed out of band.
+/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
+/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
+/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
+/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// unsafe {
+///     let mut cfg = writer_config(&byte);
+///     cfg.format = EXI_FORMAT_XML;
+///     let w = exi_writer_new(&cfg);
+///     let xml = |w| { let (mut p, mut n) = (null(), 0); assert_eq!(exi_writer_take(w, &mut p, &mut n), EXI_OK); String::from_utf8(core::slice::from_raw_parts(p, n).to_vec()).unwrap() };
+///     exi_writer_start_element(w, s(""), s("a"));
+///     assert_eq!(exi_writer_text(w, s("x & y")), EXI_OK);
+///     exi_writer_end_element(w);
+///     exi_writer_end_document(w);
+///     assert_eq!(xml(w), "<a>x &amp; y</a>");
+///     exi_writer_free(w);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_writer_text(
     w: *mut exi_writer,
@@ -1452,6 +1984,23 @@ pub unsafe extern "C" fn exi_writer_text(
 /// # Safety
 ///
 /// `w` is live.
+///
+/// ```
+/// use exi::capi::*;
+/// # use core::ptr::{null, null_mut};
+/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+/// # /// A writer config: byte-aligned, options agreed out of band.
+/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
+/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
+/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
+/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// unsafe {
+///     let w = exi_writer_new(&writer_config(&byte));
+///     assert_eq!(exi_writer_end_element(w), EXI_E_STATE);          // nothing open
+///     assert_eq!(exi_writer_start_element(w, s(""), s("a")), EXI_E_STATE);   // poisoned
+///     exi_writer_free(w);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_writer_end_element(
     w: *mut exi_writer,
@@ -1466,6 +2015,31 @@ pub unsafe extern "C" fn exi_writer_end_element(
 /// # Safety
 ///
 /// `w` is live.
+///
+/// ```
+/// use exi::capi::*;
+/// # use core::ptr::{null, null_mut};
+/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+/// # /// A writer config: byte-aligned, options agreed out of band.
+/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
+/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
+/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
+/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// unsafe {
+///     let w = exi_writer_new(&writer_config(&byte));
+///     exi_writer_start_element(w, s(""), s("a"));
+///     assert_eq!(exi_writer_end_document(w), EXI_E_STATE);         // <a> is still open
+///     exi_writer_free(w);
+///     let w = exi_writer_new(&writer_config(&byte));
+///     exi_writer_start_element(w, s(""), s("a"));
+///     exi_writer_end_element(w);
+///     assert_eq!(exi_writer_end_document(w), EXI_OK);
+///     let (mut p, mut n) = (null(), 0);
+///     exi_writer_take(w, &mut p, &mut n);
+///     assert_eq!(core::slice::from_raw_parts(p, n), [0x80, 0x01, 0x02, b'a', 0x00]);
+///     exi_writer_free(w);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_writer_end_document(
     w: *mut exi_writer,
@@ -1479,6 +2053,32 @@ pub unsafe extern "C" fn exi_writer_end_document(
 /// # Safety
 ///
 /// `w` is live.
+///
+/// ```
+/// use exi::capi::*;
+/// # use core::ptr::{null, null_mut};
+/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+/// # /// A writer config: byte-aligned, options agreed out of band.
+/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
+/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
+/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
+/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// unsafe {
+///     let mut bits = byte;
+///     bits.coding = EXI_CODING_BIT_PACKED;
+///     let w = exi_writer_new(&writer_config(&bits));
+///     exi_writer_start_element(w, s(""), s("a"));
+///     let mut pending = 0;
+///     assert_eq!(exi_writer_flush(w, &mut pending), EXI_OK);
+///     assert!(pending > 0 && pending < 8);                         // mid-octet
+///     let b = exi_writer_new(&writer_config(&byte));
+///     exi_writer_start_element(b, s(""), s("a"));
+///     assert_eq!(exi_writer_flush(b, &mut pending), EXI_OK);
+///     assert_eq!(pending, 0);                                      // byte-aligned
+///     exi_writer_free(w);
+///     exi_writer_free(b);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_writer_flush(
     w: *mut exi_writer,
@@ -1504,6 +2104,36 @@ pub unsafe extern "C" fn exi_writer_flush(
 /// # Safety
 ///
 /// `w` is live; `data` and `len` are writable.
+///
+/// ```
+/// use exi::capi::*;
+/// # use core::ptr::{null, null_mut};
+/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+/// # /// A writer config: byte-aligned, options agreed out of band.
+/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
+/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
+/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
+/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// unsafe {
+///     let mut frag = byte;
+///     frag.flags = EXI_OPT_FRAGMENT;
+///     let mut cfg = writer_config(&frag);
+///     cfg.sequence = EXI_SEQ_FRAMES;
+///     let w = exi_writer_new(&cfg);
+///     let (mut p, mut n) = (null(), 0);
+///     exi_writer_start_element(w, s(""), s("m"));
+///     assert_eq!(exi_writer_end_frame(w, &mut p, &mut n), EXI_E_STATE);    // <m> is open
+///     exi_writer_free(w);
+///     let w = exi_writer_new(&cfg);
+///     for expect in [&[0x80u8, 0x00, 0x01, 0x02, b'm', 0x00][..], &[0x00, 0x00]] {
+///         exi_writer_start_element(w, s(""), s("m"));
+///         exi_writer_end_element(w);
+///         assert_eq!(exi_writer_end_frame(w, &mut p, &mut n), EXI_OK);
+///         assert_eq!(core::slice::from_raw_parts(p, n), expect);
+///     }
+///     exi_writer_free(w);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_writer_end_frame(
     w: *mut exi_writer,
@@ -1539,6 +2169,34 @@ pub unsafe extern "C" fn exi_writer_end_frame(
 /// # Safety
 ///
 /// `w` is live; `data` and `len` are writable.
+///
+/// ```
+/// use exi::capi::*;
+/// # use core::ptr::{null, null_mut};
+/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+/// # /// A writer config: byte-aligned, options agreed out of band.
+/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
+/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
+/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
+/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// unsafe {
+///     extern "C" fn sink(_: *mut core::ffi::c_void, _: *const u8, _: usize) -> exi_status { EXI_OK }
+///     let mut cfg = writer_config(&byte);
+///     cfg.write = Some(sink);
+///     let w = exi_writer_new(&cfg);
+///     let (mut p, mut n) = (null(), 0);
+///     assert_eq!(exi_writer_take(w, &mut p, &mut n), EXI_E_STATE); // output goes to `sink`
+///     exi_writer_free(w);
+///     let w = exi_writer_new(&writer_config(&byte));
+///     exi_writer_start_element(w, s(""), s("a"));
+///     exi_writer_flush(w, null_mut());
+///     assert_eq!(exi_writer_take(w, &mut p, &mut n), EXI_OK);
+///     assert_eq!(n, 4);                                            // header and SE(a)
+///     assert_eq!(exi_writer_take(w, &mut p, &mut n), EXI_OK);
+///     assert_eq!(n, 0);                                            // emptied
+///     exi_writer_free(w);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_writer_take(
     w: *mut exi_writer,
@@ -1571,6 +2229,26 @@ pub unsafe extern "C" fn exi_writer_take(
 /// # Safety
 ///
 /// `w` is live; `msg` is NULL or writable.
+///
+/// ```
+/// use exi::capi::*;
+/// # use core::ptr::{null, null_mut};
+/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
+/// # /// A writer config: byte-aligned, options agreed out of band.
+/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
+/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
+/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
+/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// unsafe {
+///     let w = exi_writer_new(&writer_config(&byte));
+///     assert_eq!(exi_writer_error(w, null_mut()), EXI_OK);         // none yet
+///     exi_writer_end_element(w);
+///     let mut msg = null();
+///     assert_eq!(exi_writer_error(w, &mut msg), EXI_E_STATE);
+///     assert!(!core::ffi::CStr::from_ptr(msg).to_bytes().is_empty());
+///     exi_writer_free(w);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_writer_error(
     w: *const exi_writer,

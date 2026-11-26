@@ -45,7 +45,7 @@ use std::string::{String, ToString};
 use std::thread_local;
 use std::vec::Vec;
 
-use super::imp::{ReaderObj, Scratch, WriterObj, guard, value_from};
+use super::imp::{Scratch, guard, value_from};
 use super::{
     EXI_E_ARG, EXI_E_INTERNAL, EXI_E_STATE, EXI_OK, exi_reader, exi_status,
     exi_strings, exi_value, exi_writer,
@@ -214,6 +214,24 @@ fn bring(d: &mut Document<'_>, n: *mut RawCommon) -> Option<NodeId> {
 /// # Safety
 ///
 /// `version` is NULL or NUL-terminated.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiNewDoc(s!("1.0"));
+///     assert_eq!((*d).r#type, EXI_DOCUMENT_NODE);
+///     assert!(exiDocGetRootElement(d).is_null());
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNewDoc(_version: *const exiChar) -> exiDocPtr {
     guard(ptr::null_mut(), || Document::new(default_strings()).into_raw())
@@ -226,6 +244,31 @@ pub unsafe extern "C" fn exiNewDoc(_version: *const exiChar) -> exiDocPtr {
 /// # Safety
 ///
 /// `strings` is a live `exi_strings`.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     use exi::capi::{exi_strings_free, exi_strings_new};
+///     let strings = exi_strings_new(null());
+///     let d = exiNewDocWithStrings(s!("1.0"), strings);
+///     let a = exiNewDocNode(d, null_mut(), s!("a"), null());
+///     exiDocSetRootElement(d, a);
+///     let (mut uri, mut local) = (0, 0);
+///     assert_eq!(exiNameLookup(d, s!(""), s!("a"), &mut uri, &mut local), 1);
+///     assert_eq!(((*a).uriId, (*a).localId), (uri, local));      // ids from `strings`
+///     assert!(exiNewDocWithStrings(s!("1.0"), null_mut()).is_null());
+///     exiFreeDoc(d);
+///     exi_strings_free(strings);                                  // after the document
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNewDocWithStrings(
     _version: *const exiChar,
@@ -258,12 +301,32 @@ unsafe fn strings_of<'a>(s: *mut exi_strings) -> Option<&'a GlobalStrings> {
 /// # Safety
 ///
 /// `d` is NULL or a live document, not used again.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a><b/></a>"));
+///     let loose = exiNewDocNode(d, null_mut(), s!("c"), null());   // never linked
+///     assert!(!loose.is_null());
+///     exiFreeDoc(d);                                               // frees both
+///     exiFreeDoc(null_mut());                                      // no-op
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiFreeDoc(d: exiDocPtr) {
-    if d.is_null() || d == nursery() {
+    // SAFETY: the caller's contract; `doc` checks the node type.
+    if d == nursery() || unsafe { doc(d) }.is_none() {
         return;
     }
-    // SAFETY: the caller's contract.
+    // SAFETY: as above.
     guard((), || drop(unsafe { Document::<'static>::from_raw(d) }));
 }
 
@@ -272,6 +335,24 @@ pub unsafe extern "C" fn exiFreeDoc(d: exiDocPtr) {
 /// # Safety
 ///
 /// `d` is NULL or live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<!--first--><a/>"));
+///     assert_eq!(name(exiDocGetRootElement(d)), "a");
+///     assert!(exiDocGetRootElement(null()).is_null());
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiDocGetRootElement(d: *const RawDoc) -> exiNodePtr {
     guard(ptr::null_mut(), || {
@@ -286,6 +367,28 @@ pub unsafe extern "C" fn exiDocGetRootElement(d: *const RawDoc) -> exiNodePtr {
 /// # Safety
 ///
 /// `d` and `root` are live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a/>"));
+///     let b = exiNewDocNode(d, null_mut(), s!("b"), null());
+///     let old = exiDocSetRootElement(d, b);
+///     assert_eq!(name(old), "a");
+///     assert!((*old).parent.is_null());                            // unlinked
+///     assert_eq!(exiDocGetRootElement(d), b);
+///     exiFreeNode(old);
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiDocSetRootElement(
     d: exiDocPtr,
@@ -309,6 +412,25 @@ pub unsafe extern "C" fn exiDocSetRootElement(
 /// # Safety
 ///
 /// `d` is live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a><b/></a>"));
+///     let (full, bare) = (exiCopyDoc(d, 1), exiCopyDoc(d, 0));
+///     assert_eq!(kids(exiDocGetRootElement(full)), ["b"]);
+///     assert!(exiDocGetRootElement(bare).is_null());               // no children
+///     for x in [d, full, bare] { exiFreeDoc(x); }
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiCopyDoc(
     d: exiDocPtr,
@@ -367,6 +489,29 @@ fn element_in(
 /// # Safety
 ///
 /// `d` is live; `ns` NULL or live; strings NUL-terminated.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiNewDoc(s!("1.0"));
+///     let r = exiNewDocNode(d, null_mut(), s!("r"), null());
+///     exiDocSetRootElement(d, r);
+///     let ns = exiNewNs(r, s!("urn:x"), s!("x"));
+///     let e = exiNewDocNode(d, ns, s!("e"), s!("some text"));
+///     exiAddChild(r, e);
+///     assert_eq!((*e).ns, ns);
+///     assert_eq!(text(exiNodeGetContent(e)), "some text");
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNewDocNode(
     d: exiDocPtr,
@@ -395,6 +540,26 @@ pub unsafe extern "C" fn exiNewDocNode(
 /// # Safety
 ///
 /// As `exiNewDocNode`.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let n = exiNewNode(null_mut(), s!("a"));                     // no document yet
+///     let d = exiNewDoc(s!("1.0"));
+///     exiDocSetRootElement(d, n);                                  // moved, same pointer
+///     assert_eq!(exiDocGetRootElement(d), n);
+///     assert_eq!((*n).doc, d);
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNewNode(
     ns: exiNsPtr,
@@ -411,6 +576,27 @@ pub unsafe extern "C" fn exiNewNode(
 /// # Safety
 ///
 /// `parent` is live; `ns` NULL or live; strings NUL-terminated.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<r xmlns='urn:x'/>"));
+///     let r = exiDocGetRootElement(d);
+///     let c = exiNewChild(r, null_mut(), s!("c"), s!("a < b"));
+///     assert_eq!((*c).ns, (*r).ns);                                // the parent's namespace
+///     assert_eq!(text(exiNodeGetContent(c)), "a < b");             // text, not markup
+///     assert_eq!(kids(r), ["c"]);
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNewChild(
     parent: exiNodePtr,
@@ -447,6 +633,26 @@ pub unsafe extern "C" fn exiNewChild(
 /// # Safety
 ///
 /// As `exiNewChild`.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<r/>"));
+///     let r = exiDocGetRootElement(d);
+///     let c = exiNewTextChild(r, null_mut(), s!("c"), s!("<b/>"));
+///     assert_eq!(text(exiNodeGetContent(c)), "<b/>");
+///     assert_eq!(exiChildElementCount(c), 0);
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNewTextChild(
     parent: exiNodePtr,
@@ -476,6 +682,27 @@ fn leaf(
 /// # Safety
 ///
 /// `d` NULL or live; `content` NUL-terminated.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a/>"));
+///     let a = exiDocGetRootElement(d);
+///     let t = exiNewDocText(d, s!("hi"));
+///     assert_eq!(exiNodeIsText(t), 1);
+///     exiAddChild(a, t);
+///     assert_eq!(text(exiNodeGetContent(a)), "hi");
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNewDocText(
     d: *const RawDoc,
@@ -491,6 +718,25 @@ pub unsafe extern "C" fn exiNewDocText(
 /// # Safety
 ///
 /// `d` NULL or live; `content` valid for `len` bytes.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiNewDoc(s!("1.0"));
+///     let t = exiNewDocTextLen(d, s!("hello"), 4);
+///     assert_eq!(text(exiNodeGetContent(t)), "hell");
+///     assert!(exiNewDocTextLen(d, s!("hello"), -1).is_null());
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNewDocTextLen(
     d: exiDocPtr,
@@ -507,6 +753,27 @@ pub unsafe extern "C" fn exiNewDocTextLen(
 /// # Safety
 ///
 /// `content` is NUL-terminated.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let t = exiNewText(s!("hi"));                                // no document yet
+///     let d = exiParseDoc(s!("<a/>"));
+///     let a = exiDocGetRootElement(d);
+///     assert_eq!(exiAddChild(a, t), t);
+///     assert_eq!((*t).doc, d);
+///     assert_eq!(text(exiNodeGetContent(a)), "hi");
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNewText(content: *const exiChar) -> exiNodePtr {
     // SAFETY: the caller's contract.
@@ -518,6 +785,23 @@ pub unsafe extern "C" fn exiNewText(content: *const exiChar) -> exiNodePtr {
 /// # Safety
 ///
 /// `content` is valid for `len` bytes.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let t = exiNewTextLen(s!("hi there"), 2);
+///     assert_eq!(text(exiNodeGetContent(t)), "hi");
+///     exiFreeNode(t);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNewTextLen(
     content: *const exiChar,
@@ -532,6 +816,26 @@ pub unsafe extern "C" fn exiNewTextLen(
 /// # Safety
 ///
 /// `d` NULL or live; `content` NUL-terminated.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a/>"));
+///     let c = exiNewDocComment(d, s!(" note "));
+///     assert_eq!((*c).r#type, EXI_COMMENT_NODE);
+///     exiAddChild(exiDocGetRootElement(d), c);
+///     assert_eq!(text(exiNodeGetContent(c)), " note ");
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNewDocComment(
     d: exiDocPtr,
@@ -547,6 +851,24 @@ pub unsafe extern "C" fn exiNewDocComment(
 /// # Safety
 ///
 /// `content` is NUL-terminated.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let c = exiNewComment(s!("note"));
+///     assert_eq!((*c).r#type, EXI_COMMENT_NODE);
+///     assert_eq!(exiNodeIsText(c), 0);
+///     exiFreeNode(c);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNewComment(content: *const exiChar) -> exiNodePtr {
     // SAFETY: the caller's contract.
@@ -558,6 +880,27 @@ pub unsafe extern "C" fn exiNewComment(content: *const exiChar) -> exiNodePtr {
 /// # Safety
 ///
 /// `d` NULL or live; strings NUL-terminated (`content` may be NULL).
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a/>"));
+///     let pi = exiNewDocPI(d, s!("style"), s!("href='x.css'"));
+///     assert_eq!((*pi).r#type, EXI_PI_NODE);
+///     assert_eq!(name(pi), "style");
+///     assert_eq!(text(exiNodeGetContent(pi)), "href='x.css'");
+///     assert!(!exiNewDocPI(d, s!("empty"), null()).is_null());    // content may be NULL
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNewDocPI(
     d: exiDocPtr,
@@ -574,6 +917,24 @@ pub unsafe extern "C" fn exiNewDocPI(
 /// # Safety
 ///
 /// As `exiNewDocPI`.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let pi = exiNewPI(s!("target"), s!("data"));
+///     assert_eq!((*pi).r#type, EXI_PI_NODE);
+///     assert_eq!(name(pi), "target");
+///     exiFreeNode(pi);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNewPI(
     name: *const exiChar,
@@ -588,6 +949,25 @@ pub unsafe extern "C" fn exiNewPI(
 /// # Safety
 ///
 /// `d` NULL or live; `name` NUL-terminated.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a/>"));
+///     let r = exiNewReference(d, s!("&nbsp;"));                    // or "nbsp"
+///     assert_eq!((*r).r#type, EXI_ENTITY_REF_NODE);
+///     assert_eq!(name(r), "nbsp");
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNewReference(
     d: *const RawDoc,
@@ -617,6 +997,30 @@ fn plain_text(d: &Document<'_>, n: NodeId) -> Option<String> {
 /// # Safety
 ///
 /// Both NULL or live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a>x</a>"));
+///     let a = exiDocGetRootElement(d);
+///     let held = exiAddChild(a, exiNewDocText(d, s!("y")));        // merged, and freed
+///     assert_eq!(held, (*a).children);
+///     assert_eq!(text(exiNodeGetContent(a)), "xy");
+///     let b = exiNewDocNode(d, null_mut(), s!("b"), null());
+///     assert_eq!(exiAddChild(a, b), b);
+///     assert_eq!((*a).last, b);
+///     assert!(exiAddChild(a, a).is_null());
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiAddChild(
     parent: exiNodePtr,
@@ -663,6 +1067,28 @@ pub unsafe extern "C" fn exiAddChild(
 /// # Safety
 ///
 /// As `exiAddChild`; `cur` heads a list of unlinked siblings.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<r><from><a/><b/></from><to/></r>"));
+///     let r = exiDocGetRootElement(d);
+///     let (from, to) = ((*r).children, (*r).last);
+///     let last = exiAddChildList(to, (*from).children);
+///     assert_eq!(name(last), "b");
+///     assert_eq!(kids(to), ["a", "b"]);
+///     assert!(kids(from).is_empty());
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiAddChildList(
     parent: exiNodePtr,
@@ -718,6 +1144,26 @@ fn add_sibling(cur: exiNodePtr, elem: exiNodePtr, after: bool) -> exiNodePtr {
 /// # Safety
 ///
 /// Both NULL or live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<r><a/><c/></r>"));
+///     let r = exiDocGetRootElement(d);
+///     let b = exiNewDocNode(d, null_mut(), s!("b"), null());
+///     assert_eq!(exiAddNextSibling((*r).children, b), b);
+///     assert_eq!(kids(r), ["a", "b", "c"]);
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiAddNextSibling(
     cur: exiNodePtr,
@@ -731,6 +1177,26 @@ pub unsafe extern "C" fn exiAddNextSibling(
 /// # Safety
 ///
 /// Both NULL or live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<r><b/></r>"));
+///     let r = exiDocGetRootElement(d);
+///     let a = exiNewDocNode(d, null_mut(), s!("a"), null());
+///     assert_eq!(exiAddPrevSibling((*r).children, a), a);
+///     assert_eq!(kids(r), ["a", "b"]);
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiAddPrevSibling(
     cur: exiNodePtr,
@@ -744,6 +1210,26 @@ pub unsafe extern "C" fn exiAddPrevSibling(
 /// # Safety
 ///
 /// Both NULL or live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<r><a/><b/></r>"));
+///     let r = exiDocGetRootElement(d);
+///     let z = exiNewDocNode(d, null_mut(), s!("z"), null());
+///     exiAddSibling((*r).children, z);                             // after the last, b
+///     assert_eq!(kids(r), ["a", "b", "z"]);
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiAddSibling(
     cur: exiNodePtr,
@@ -764,6 +1250,30 @@ pub unsafe extern "C" fn exiAddSibling(
 /// # Safety
 ///
 /// `cur` is NULL or live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<r><a/><b/></r>"));
+///     let r = exiDocGetRootElement(d);
+///     let a = (*r).children;
+///     exiUnlinkNode(a);
+///     assert_eq!(kids(r), ["b"]);
+///     assert!((*a).parent.is_null() && (*a).next.is_null());
+///     assert_eq!((*a).doc, d);                                     // still the document's
+///     exiAddChild(r, a);                                           // and can go back
+///     assert_eq!(kids(r), ["b", "a"]);
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiUnlinkNode(cur: exiNodePtr) {
     guard((), || {
@@ -780,6 +1290,26 @@ pub unsafe extern "C" fn exiUnlinkNode(cur: exiNodePtr) {
 /// # Safety
 ///
 /// `cur` is NULL or live, and not used again.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<r><a><deep/></a><b/></r>"));
+///     let r = exiDocGetRootElement(d);
+///     exiFreeNode((*r).children);                                  // unlinked first
+///     assert_eq!(kids(r), ["b"]);
+///     exiFreeNode(null_mut());
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiFreeNode(cur: exiNodePtr) {
     if cur.is_null() {
@@ -803,6 +1333,25 @@ pub unsafe extern "C" fn exiFreeNode(cur: exiNodePtr) {
 /// # Safety
 ///
 /// As `exiFreeNode`.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<r><a/><b/><c/></r>"));
+///     let r = exiDocGetRootElement(d);
+///     exiFreeNodeList((*(*r).children).next);                      // b and c
+///     assert_eq!(kids(r), ["a"]);
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiFreeNodeList(cur: exiNodePtr) {
     let mut c = cur;
@@ -821,6 +1370,30 @@ pub unsafe extern "C" fn exiFreeNodeList(cur: exiNodePtr) {
 /// # Safety
 ///
 /// Both NULL or live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<r><a/><b/><c/></r>"));
+///     let r = exiDocGetRootElement(d);
+///     let b = (*(*r).children).next;
+///     let x = exiNewDocNode(d, null_mut(), s!("x"), null());
+///     assert_eq!(exiReplaceNode(b, x), b);
+///     assert_eq!(kids(r), ["a", "x", "c"]);
+///     assert!((*b).parent.is_null());
+///     exiReplaceNode(x, null_mut());                               // only unlinks
+///     assert_eq!(kids(r), ["a", "c"]);
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiReplaceNode(
     old: exiNodePtr,
@@ -849,6 +1422,28 @@ pub unsafe extern "C" fn exiReplaceNode(
 /// # Safety
 ///
 /// `n` is live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a k='v'><b/></a>"));
+///     let a = exiDocGetRootElement(d);
+///     let (deep, shallow) = (exiCopyNode(a, 1), exiCopyNode(a, 2));
+///     assert_eq!(kids(deep), ["b"]);
+///     assert!(kids(shallow).is_empty());
+///     assert_eq!(text(exiGetProp(shallow, s!("k"))), "v");
+///     assert!((*deep).parent.is_null());                           // unlinked, in `d`
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiCopyNode(
     n: exiNodePtr,
@@ -872,6 +1467,27 @@ pub unsafe extern "C" fn exiCopyNode(
 /// # Safety
 ///
 /// `n` and `d` are live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let (d, other) = (exiParseDoc(s!("<a><b/></a>")), exiNewDoc(s!("1.0")));
+///     let copy = exiDocCopyNode(exiDocGetRootElement(d), other, 1);
+///     assert_eq!((*copy).doc, other);
+///     exiDocSetRootElement(other, copy);
+///     assert_eq!(kids(exiDocGetRootElement(other)), ["b"]);
+///     exiFreeDoc(d);
+///     exiFreeDoc(other);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiDocCopyNode(
     n: exiNodePtr,
@@ -904,6 +1520,24 @@ pub unsafe extern "C" fn exiDocCopyNode(
 /// # Safety
 ///
 /// `n` is NULL or live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a>x<b>y</b><!--not text-->z</a>"));
+///     assert_eq!(text(exiNodeGetContent(exiDocGetRootElement(d))), "xyz");
+///     assert!(exiNodeGetContent(null()).is_null());
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNodeGetContent(n: *const RawNode) -> *mut exiChar {
     guard(ptr::null_mut(), || {
@@ -931,6 +1565,26 @@ fn set_content(n: exiNodePtr, s: Option<&str>) -> c_int {
 /// # Safety
 ///
 /// `n` is live; `content` NULL or NUL-terminated.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a>old<b/></a>"));
+///     let a = exiDocGetRootElement(d);
+///     assert_eq!(exiNodeSetContent(a, s!("new")), 0);
+///     assert_eq!(text(exiNodeGetContent(a)), "new");
+///     assert_eq!(exiChildElementCount(a), 0);                      // children replaced
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNodeSetContent(
     n: exiNodePtr,
@@ -945,6 +1599,25 @@ pub unsafe extern "C" fn exiNodeSetContent(
 /// # Safety
 ///
 /// `n` is live; `content` valid for `len` bytes.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a>old</a>"));
+///     let a = exiDocGetRootElement(d);
+///     assert_eq!(exiNodeSetContentLen(a, s!("newer"), 3), 0);
+///     assert_eq!(text(exiNodeGetContent(a)), "new");
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNodeSetContentLen(
     n: exiNodePtr,
@@ -972,6 +1645,25 @@ fn add_content(n: exiNodePtr, s: Option<&str>) -> c_int {
 /// # Safety
 ///
 /// `n` is live; `content` NUL-terminated.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a>one</a>"));
+///     let a = exiDocGetRootElement(d);
+///     exiNodeAddContent(a, s!(", two"));
+///     assert_eq!(text(exiNodeGetContent(a)), "one, two");
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNodeAddContent(
     n: exiNodePtr,
@@ -986,6 +1678,25 @@ pub unsafe extern "C" fn exiNodeAddContent(
 /// # Safety
 ///
 /// `n` is live; `content` valid for `len` bytes.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a>one</a>"));
+///     let a = exiDocGetRootElement(d);
+///     exiNodeAddContentLen(a, s!("+2 more"), 2);
+///     assert_eq!(text(exiNodeGetContent(a)), "one+2");
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNodeAddContentLen(
     n: exiNodePtr,
@@ -1003,6 +1714,28 @@ pub unsafe extern "C" fn exiNodeAddContentLen(
 /// # Safety
 ///
 /// `list` is NULL or live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a>x</a>"));
+///     let a = exiDocGetRootElement(d);
+///     exiAddChild(a, exiNewReference(d, s!("e")));
+///     exiAddChild(a, exiNewDocText(d, s!("y")));
+///     assert_eq!(text(exiNodeListGetString(d, (*a).children, 0)), "x&e;y");
+///     assert_eq!(text(exiNodeListGetString(d, (*a).children, 1)), "xy");
+///     assert!(exiNodeListGetString(d, null(), 0).is_null());       // empty
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNodeListGetString(
     _d: exiDocPtr,
@@ -1038,6 +1771,24 @@ pub unsafe extern "C" fn exiNodeListGetString(
 /// # Safety
 ///
 /// `n` is NULL or live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a>t</a>"));
+///     let a = exiDocGetRootElement(d);
+///     assert_eq!((exiNodeIsText((*a).children), exiNodeIsText(a), exiNodeIsText(null())), (1, 0, 0));
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNodeIsText(n: *const RawNode) -> c_int {
     // SAFETY: the caller's contract.
@@ -1049,6 +1800,27 @@ pub unsafe extern "C" fn exiNodeIsText(n: *const RawNode) -> c_int {
 /// # Safety
 ///
 /// `n` is NULL or live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a> <b/>x</a>"));
+///     let a = exiDocGetRootElement(d);
+///     let blank = (*a).children;
+///     assert_eq!(exiIsBlankNode(blank), 1);
+///     assert_eq!(exiIsBlankNode((*a).last), 0);                    // "x"
+///     assert_eq!(exiIsBlankNode(a), 0);
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiIsBlankNode(n: *const RawNode) -> c_int {
     guard(0, || {
@@ -1063,6 +1835,27 @@ pub unsafe extern "C" fn exiIsBlankNode(n: *const RawNode) -> c_int {
 /// # Safety
 ///
 /// `n` is live; `name` NUL-terminated.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<x:a xmlns:x='urn:x'/>"));
+///     let a = exiDocGetRootElement(d);
+///     let ns = (*a).ns;
+///     exiNodeSetName(a, s!("z"));
+///     assert_eq!(name(a), "z");
+///     assert_eq!((*a).ns, ns);                                     // the namespace stays
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNodeSetName(n: exiNodePtr, name: *const exiChar) {
     guard((), || {
@@ -1091,13 +1884,32 @@ pub unsafe extern "C" fn exiNodeSetName(n: exiNodePtr, name: *const exiChar) {
 /// # Safety
 ///
 /// `n` is NULL or live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a>\n\n<b/></a>"));
+///     let a = exiDocGetRootElement(d);
+///     assert_eq!(exiGetLineNo(a), 1);
+///     assert_eq!(exiGetLineNo((*a).last), 3);
+///     assert_eq!(exiGetLineNo(exiNewDocNode(d, null_mut(), s!("new"), null())), -1);
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiGetLineNo(n: *const RawNode) -> c_long {
     // SAFETY: the caller's contract.
-    if n.is_null() || unsafe { (*n).line } == 0 {
-        -1
-    } else {
-        unsafe { (*n).line as c_long }
+    match unsafe { n.as_ref() } {
+        Some(n) if n.line != 0 => c_long::from(n.line),
+        _ => -1,
     }
 }
 
@@ -1106,6 +1918,25 @@ pub unsafe extern "C" fn exiGetLineNo(n: *const RawNode) -> c_long {
 /// # Safety
 ///
 /// `n` is NULL or live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<r><a/><a/></r>"));
+///     let r = exiDocGetRootElement(d);
+///     assert_eq!(text(exiGetNodePath(r)), "/r");
+///     assert_eq!(text(exiGetNodePath((*r).last)), "/r/a[2]");
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiGetNodePath(n: *const RawNode) -> *mut exiChar {
     guard(ptr::null_mut(), || {
@@ -1124,6 +1955,29 @@ pub unsafe extern "C" fn exiGetNodePath(n: *const RawNode) -> *mut exiChar {
 /// # Safety
 ///
 /// `n` is live; `out` points to an `exi_value`.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     use exi::capi::{EXI_E_ARG, EXI_OK, EXI_V_STRING, exi_value};
+///     let d = exiParseDoc(s!("<a>5</a>"));
+///     let a = exiDocGetRootElement(d);
+///     let mut v = core::mem::zeroed::<exi_value>();
+///     assert_eq!(exiNodeGetValue((*a).children, &mut v), EXI_OK);
+///     assert_eq!(v.r#type, EXI_V_STRING);                          // schema-less: text
+///     assert_eq!(core::slice::from_raw_parts(v.text.ptr.cast::<u8>(), v.text.len), b"5");
+///     assert_eq!(exiNodeGetValue(a, &mut v), EXI_E_ARG);           // not a text node
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNodeGetValue(
     n: *const RawNode,
@@ -1167,6 +2021,29 @@ pub unsafe extern "C" fn exiNodeGetValue(
 /// # Safety
 ///
 /// `n` is live; `v` points to a filled `exi_value`.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     use exi::capi::{EXI_OK, EXI_V_INT, exi_value};
+///     let d = exiParseDoc(s!("<a>old</a>"));
+///     let a = exiDocGetRootElement(d);
+///     let mut v = core::mem::zeroed::<exi_value>();
+///     v.r#type = EXI_V_INT;
+///     v.u.integer = -42;
+///     assert_eq!(exiNodeSetValue((*a).children, &v), EXI_OK);
+///     assert_eq!(text(exiNodeGetContent(a)), "-42");
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNodeSetValue(
     n: exiNodePtr,
@@ -1264,6 +2141,30 @@ fn set_prop(
 /// # Safety
 ///
 /// `node` NULL or live; strings NUL-terminated (`value` may be NULL).
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a/>"));
+///     let a = exiDocGetRootElement(d);
+///     let k = exiNewProp(a, s!("k"), s!("1"));
+///     assert_eq!((*k).r#type, EXI_ATTRIBUTE_NODE);
+///     assert_eq!(exiNewProp(a, s!("k"), s!("2")), exiHasProp(a, s!("k")));  // one k
+///     assert_eq!(text(exiGetProp(a, s!("k"))), "2");
+///     let loose = exiNewProp(null_mut(), s!("j"), s!("3"));        // detached
+///     exiAddChild(a, loose.cast());                                // onto `a`
+///     assert_eq!(text(exiGetProp(a, s!("j"))), "3");
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNewProp(
     n: exiNodePtr,
@@ -1278,6 +2179,28 @@ pub unsafe extern "C" fn exiNewProp(
 /// # Safety
 ///
 /// As `exiNewProp`; `ns` NULL or live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a/>"));
+///     let a = exiDocGetRootElement(d);
+///     let x = exiNewNs(a, s!("urn:x"), s!("x"));
+///     let k = exiNewNsProp(a, x, s!("k"), s!("v"));
+///     assert_eq!((*k).ns, x);
+///     assert_eq!(text(exiGetNsProp(a, s!("k"), s!("urn:x"))), "v");
+///     assert!(exiGetNoNsProp(a, s!("k")).is_null());
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNewNsProp(
     n: exiNodePtr,
@@ -1293,6 +2216,28 @@ pub unsafe extern "C" fn exiNewNsProp(
 /// # Safety
 ///
 /// `node` live; strings NUL-terminated (`value` may be NULL).
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a xmlns:x='urn:x'/>"));
+///     let a = exiDocGetRootElement(d);
+///     exiSetProp(a, s!("x:k"), s!("in x"));                        // the prefix resolved at `a`
+///     exiSetProp(a, s!("k"), s!("in none"));
+///     assert_eq!(text(exiGetNsProp(a, s!("k"), s!("urn:x"))), "in x");
+///     assert_eq!(text(exiGetNoNsProp(a, s!("k"))), "in none");
+///     assert!(exiSetProp(null_mut(), s!("k"), s!("v")).is_null());
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiSetProp(
     n: exiNodePtr,
@@ -1310,6 +2255,27 @@ pub unsafe extern "C" fn exiSetProp(
 /// # Safety
 ///
 /// As `exiSetProp`; `ns` NULL or live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a/>"));
+///     let a = exiDocGetRootElement(d);
+///     let x = exiNewNs(a, s!("urn:x"), s!("x"));
+///     exiSetNsProp(a, x, s!("k"), s!("1"));
+///     exiSetNsProp(a, x, s!("k"), s!("2"));                        // replaces
+///     assert_eq!(text(exiGetNsProp(a, s!("k"), s!("urn:x"))), "2");
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiSetNsProp(
     n: exiNodePtr,
@@ -1349,13 +2315,33 @@ fn find_prop(n: *const RawNode, local: &str, uri: Option<&str>) -> exiAttrPtr {
 /// # Safety
 ///
 /// `n` NULL or live; `name` NUL-terminated.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a xmlns:x='urn:x' x:k='1'/>"));
+///     let a = exiDocGetRootElement(d);
+///     let k = exiHasProp(a, s!("k"));                              // any namespace
+///     assert_eq!((*k).r#type, EXI_ATTRIBUTE_NODE);
+///     assert!(exiHasProp(a, s!("missing")).is_null());
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiHasProp(
     n: *const RawNode,
     name: *const exiChar,
 ) -> exiAttrPtr {
-    // SAFETY: the caller's contract.
     guard(ptr::null_mut(), || {
+        // SAFETY: the caller's contract.
         unsafe { cs(name) }.map_or(ptr::null_mut(), |l| find_prop(n, l, None))
     })
 }
@@ -1365,17 +2351,39 @@ pub unsafe extern "C" fn exiHasProp(
 /// # Safety
 ///
 /// As `exiHasProp`.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a xmlns:x='urn:x' x:k='1' j='2'/>"));
+///     let a = exiDocGetRootElement(d);
+///     assert!(!exiHasNsProp(a, s!("k"), s!("urn:x")).is_null());
+///     assert!(exiHasNsProp(a, s!("k"), null()).is_null());         // not in no namespace
+///     assert!(!exiHasNsProp(a, s!("j"), null()).is_null());
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiHasNsProp(
     n: *const RawNode,
     name: *const exiChar,
     nameSpace: *const exiChar,
 ) -> exiAttrPtr {
-    // SAFETY: the caller's contract.
     guard(ptr::null_mut(), || {
-        unsafe { cs(name) }.map_or(ptr::null_mut(), |l| {
-            find_prop(n, l, Some(unsafe { cs(nameSpace) }.unwrap_or("")))
-        })
+        // SAFETY: the caller's contract.
+        let (Some(l), uri) = (unsafe { cs(name) }, unsafe { cs(nameSpace) })
+        else {
+            return ptr::null_mut();
+        };
+        find_prop(n, l, Some(uri.unwrap_or("")))
     })
 }
 
@@ -1395,13 +2403,34 @@ fn prop_value(a: exiAttrPtr) -> *mut exiChar {
 /// # Safety
 ///
 /// As `exiHasProp`.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a k='v &amp; w'/>"));
+///     let a = exiDocGetRootElement(d);
+///     assert_eq!(text(exiGetProp(a, s!("k"))), "v & w");
+///     assert!(exiGetProp(a, s!("j")).is_null());
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiGetProp(
     n: *const RawNode,
     name: *const exiChar,
 ) -> *mut exiChar {
-    // SAFETY: the caller's contract.
-    guard(ptr::null_mut(), || prop_value(unsafe { exiHasProp(n, name) }))
+    guard(ptr::null_mut(), || {
+        // SAFETY: the caller's contract.
+        prop_value(unsafe { exiHasProp(n, name) })
+    })
 }
 
 /// `xmlGetNoNsProp`.
@@ -1409,13 +2438,31 @@ pub unsafe extern "C" fn exiGetProp(
 /// # Safety
 ///
 /// As `exiHasProp`.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a xmlns:x='urn:x' x:k='in x' k='in none'/>"));
+///     let a = exiDocGetRootElement(d);
+///     assert_eq!(text(exiGetNoNsProp(a, s!("k"))), "in none");
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiGetNoNsProp(
     n: *const RawNode,
     name: *const exiChar,
 ) -> *mut exiChar {
-    // SAFETY: the caller's contract.
     guard(ptr::null_mut(), || {
+        // SAFETY: the caller's contract.
         prop_value(unsafe { exiHasNsProp(n, name, ptr::null()) })
     })
 }
@@ -1425,14 +2472,33 @@ pub unsafe extern "C" fn exiGetNoNsProp(
 /// # Safety
 ///
 /// As `exiHasProp`.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a xmlns:x='urn:x' x:k='in x' k='in none'/>"));
+///     let a = exiDocGetRootElement(d);
+///     assert_eq!(text(exiGetNsProp(a, s!("k"), s!("urn:x"))), "in x");
+///     assert!(exiGetNsProp(a, s!("k"), s!("urn:y")).is_null());
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiGetNsProp(
     n: *const RawNode,
     name: *const exiChar,
     nameSpace: *const exiChar,
 ) -> *mut exiChar {
-    // SAFETY: the caller's contract.
     guard(ptr::null_mut(), || {
+        // SAFETY: the caller's contract.
         prop_value(unsafe { exiHasNsProp(n, name, nameSpace) })
     })
 }
@@ -1442,6 +2508,27 @@ pub unsafe extern "C" fn exiGetNsProp(
 /// # Safety
 ///
 /// `a` NULL or live, not used again.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a k='v'/>"));
+///     let a = exiDocGetRootElement(d);
+///     assert_eq!(exiRemoveProp(exiHasProp(a, s!("k"))), 0);
+///     assert!(exiHasProp(a, s!("k")).is_null());
+///     assert_eq!(exiRemoveProp(null_mut()), -1);
+///     assert_eq!(exiRemoveProp(a.cast()), -1);                     // not an attribute
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiRemoveProp(a: exiAttrPtr) -> c_int {
     guard(-1, || {
@@ -1461,6 +2548,25 @@ pub unsafe extern "C" fn exiRemoveProp(a: exiAttrPtr) -> c_int {
 /// # Safety
 ///
 /// As `exiRemoveProp`.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a k='v'/>"));
+///     let a = exiDocGetRootElement(d);
+///     exiFreeProp(exiHasProp(a, s!("k")));
+///     assert!((*a).properties.is_null());
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiFreeProp(a: exiAttrPtr) {
     // SAFETY: the caller's contract.
@@ -1473,6 +2579,25 @@ pub unsafe extern "C" fn exiFreeProp(a: exiAttrPtr) {
 /// # Safety
 ///
 /// As `exiHasProp`.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a k='v'/>"));
+///     let a = exiDocGetRootElement(d);
+///     assert_eq!(exiUnsetProp(a, s!("k")), 0);
+///     assert_eq!(exiUnsetProp(a, s!("k")), -1);                    // none left
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiUnsetProp(
     n: exiNodePtr,
@@ -1487,6 +2612,26 @@ pub unsafe extern "C" fn exiUnsetProp(
 /// # Safety
 ///
 /// As `exiHasProp`; `ns` NULL or live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a xmlns:x='urn:x' x:k='1' k='2'/>"));
+///     let a = exiDocGetRootElement(d);
+///     let x = exiSearchNs(d, a, s!("x"));
+///     assert_eq!(exiUnsetNsProp(a, x, s!("k")), 0);
+///     assert_eq!(text(exiGetProp(a, s!("k"))), "2");               // the one in no namespace
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiUnsetNsProp(
     n: exiNodePtr,
@@ -1508,6 +2653,32 @@ pub unsafe extern "C" fn exiUnsetNsProp(
 /// # Safety
 ///
 /// `n` live; strings NUL-terminated (`prefix` may be NULL).
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a/>"));
+///     let a = exiDocGetRootElement(d);
+///     let x = exiNewNs(a, s!("urn:x"), s!("x"));
+///     assert_eq!(core::ffi::CStr::from_ptr((*x).href.cast()).to_str().unwrap(), "urn:x");
+///     assert_eq!((*a).nsDef, x);                                   // declared on `a`
+///     // A default namespace would move `a`, which is in none, into it: refused.
+///     assert!(exiNewNs(a, s!("urn:d"), null()).is_null());
+///     let d2 = exiParseDoc(s!("<b xmlns='urn:d'/>"));
+///     let dflt = exiNewNs(exiDocGetRootElement(d2), s!("urn:d"), null());
+///     assert!((*dflt).prefix.is_null());
+///     exiFreeDoc(d);
+///     exiFreeDoc(d2);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNewNs(
     n: exiNodePtr,
@@ -1533,6 +2704,27 @@ pub unsafe extern "C" fn exiNewNs(
 /// # Safety
 ///
 /// `n` live; `prefix` NULL or NUL-terminated.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a xmlns='urn:d' xmlns:x='urn:x'><b/></a>"));
+///     let b = (*exiDocGetRootElement(d)).children;
+///     let x = exiSearchNs(d, b, s!("x"));                          // found on the parent
+///     assert_eq!(core::ffi::CStr::from_ptr((*x).href.cast()).to_str().unwrap(), "urn:x");
+///     assert!(!exiSearchNs(d, b, null()).is_null());               // the default
+///     assert!(exiSearchNs(d, b, s!("y")).is_null());
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiSearchNs(
     _d: exiDocPtr,
@@ -1555,6 +2747,26 @@ pub unsafe extern "C" fn exiSearchNs(
 /// # Safety
 ///
 /// `n` live; `href` NUL-terminated.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a xmlns:x='urn:x'><b/></a>"));
+///     let b = (*exiDocGetRootElement(d)).children;
+///     let x = exiSearchNsByHref(d, b, s!("urn:x"));
+///     assert_eq!(core::ffi::CStr::from_ptr((*x).prefix.cast()).to_str().unwrap(), "x");
+///     assert!(exiSearchNsByHref(d, b, s!("urn:y")).is_null());
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiSearchNsByHref(
     _d: exiDocPtr,
@@ -1578,6 +2790,29 @@ pub unsafe extern "C" fn exiSearchNsByHref(
 /// # Safety
 ///
 /// `n` live; `ns` NULL or live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a xmlns:x='urn:x'><b/></a>"));
+///     let a = exiDocGetRootElement(d);
+///     let b = (*a).children;
+///     let x = exiSearchNs(d, a, s!("x"));
+///     exiSetNs(b, x);
+///     assert_eq!((*b).ns, x);
+///     exiSetNs(b, null_mut());                                     // no namespace
+///     assert!((*b).ns.is_null());
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiSetNs(n: exiNodePtr, ns: exiNsPtr) {
     guard((), || {
@@ -1601,6 +2836,32 @@ pub unsafe extern "C" fn exiSetNs(n: exiNodePtr, ns: exiNsPtr) {
 /// # Safety
 ///
 /// `n` is live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a xmlns:x='urn:x' xmlns:y='urn:y'><b xmlns:x='urn:x2'/></a>"));
+///     let b = (*exiDocGetRootElement(d)).children;
+///     let list = exiGetNsList(d, b);
+///     let mut hrefs = Vec::new();
+///     let mut i = 0;
+///     while !(*list.add(i)).is_null() {
+///         hrefs.push(core::ffi::CStr::from_ptr((**list.add(i)).href.cast()).to_str().unwrap());
+///         i += 1;
+///     }
+///     assert_eq!(hrefs, ["urn:x2", "urn:y"]);                     // nearest first, one per prefix
+///     exiFree(list.cast());
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiGetNsList(
     _d: *const RawDoc,
@@ -1661,13 +2922,32 @@ unsafe fn elem_from(mut c: *mut RawNode, forward: bool) -> exiNodePtr {
 /// # Safety
 ///
 /// `n` NULL or live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<r>t<a/>u<b/>v</r>"));
+///     let r = exiDocGetRootElement(d);
+///     assert_eq!(name(exiFirstElementChild(r)), "a");              // past the text
+///     assert!(exiFirstElementChild(exiFirstElementChild(r)).is_null());
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiFirstElementChild(n: exiNodePtr) -> exiNodePtr {
     // SAFETY: the caller's contract.
-    if n.is_null() {
-        ptr::null_mut()
-    } else {
-        unsafe { elem_from((*n).children, true) }
+    match unsafe { n.as_ref() } {
+        // SAFETY: as above.
+        Some(n) => unsafe { elem_from(n.children, true) },
+        None => ptr::null_mut(),
     }
 }
 
@@ -1676,13 +2956,31 @@ pub unsafe extern "C" fn exiFirstElementChild(n: exiNodePtr) -> exiNodePtr {
 /// # Safety
 ///
 /// `n` NULL or live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<r>t<a/>u<b/>v</r>"));
+///     let r = exiDocGetRootElement(d);
+///     assert_eq!(name(exiLastElementChild(r)), "b");
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiLastElementChild(n: exiNodePtr) -> exiNodePtr {
     // SAFETY: the caller's contract.
-    if n.is_null() {
-        ptr::null_mut()
-    } else {
-        unsafe { elem_from((*n).last, false) }
+    match unsafe { n.as_ref() } {
+        // SAFETY: as above.
+        Some(n) => unsafe { elem_from(n.last, false) },
+        None => ptr::null_mut(),
     }
 }
 
@@ -1691,13 +2989,33 @@ pub unsafe extern "C" fn exiLastElementChild(n: exiNodePtr) -> exiNodePtr {
 /// # Safety
 ///
 /// `n` NULL or live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<r><a/>u<b/></r>"));
+///     let r = exiDocGetRootElement(d);
+///     let b = exiNextElementSibling(exiFirstElementChild(r));
+///     assert_eq!(name(b), "b");
+///     assert!(exiNextElementSibling(b).is_null());
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNextElementSibling(n: exiNodePtr) -> exiNodePtr {
     // SAFETY: the caller's contract.
-    if n.is_null() {
-        ptr::null_mut()
-    } else {
-        unsafe { elem_from((*n).next, true) }
+    match unsafe { n.as_ref() } {
+        // SAFETY: as above.
+        Some(n) => unsafe { elem_from(n.next, true) },
+        None => ptr::null_mut(),
     }
 }
 
@@ -1706,15 +3024,34 @@ pub unsafe extern "C" fn exiNextElementSibling(n: exiNodePtr) -> exiNodePtr {
 /// # Safety
 ///
 /// `n` NULL or live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<r><a/>u<b/></r>"));
+///     let r = exiDocGetRootElement(d);
+///     assert_eq!(name(exiPreviousElementSibling(exiLastElementChild(r))), "a");
+///     assert!(exiPreviousElementSibling(null_mut()).is_null());
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiPreviousElementSibling(
     n: exiNodePtr,
 ) -> exiNodePtr {
     // SAFETY: the caller's contract.
-    if n.is_null() {
-        ptr::null_mut()
-    } else {
-        unsafe { elem_from((*n).prev, false) }
+    match unsafe { n.as_ref() } {
+        // SAFETY: as above.
+        Some(n) => unsafe { elem_from(n.prev, false) },
+        None => ptr::null_mut(),
     }
 }
 
@@ -1723,6 +3060,24 @@ pub unsafe extern "C" fn exiPreviousElementSibling(
 /// # Safety
 ///
 /// `n` NULL or live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<r>t<a/><!--c--><b/></r>"));
+///     assert_eq!(exiChildElementCount(exiDocGetRootElement(d)), 2);
+///     assert_eq!(exiChildElementCount(null_mut()), 0);
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiChildElementCount(n: exiNodePtr) -> c_ulong {
     let mut k = 0;
@@ -1747,6 +3102,27 @@ pub unsafe extern "C" fn exiChildElementCount(n: exiNodePtr) -> c_ulong {
 /// # Safety
 ///
 /// `d` live; strings NUL-terminated; the outputs point to `uint32_t`.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a xmlns='urn:x'/>"));
+///     let a = exiDocGetRootElement(d);
+///     let (mut uri, mut local) = (0, 0);
+///     assert_eq!(exiNameLookup(d, s!("urn:x"), s!("a"), &mut uri, &mut local), 1);
+///     assert_eq!(((*a).uriId, (*a).localId), (uri, local));        // compare names as numbers
+///     assert_eq!(exiNameLookup(d, s!("urn:x"), s!("never-seen"), &mut uri, &mut local), 0);
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNameLookup(
     d: *const RawDoc,
@@ -1798,6 +3174,27 @@ fn read_xml(bytes: &[u8], url: Option<&str>, options: c_int) -> exiDocPtr {
 /// # Safety
 ///
 /// `buffer` valid for `size` bytes; `URL` NULL or NUL-terminated.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let xml = b"<a> <b/> </a>";
+///     let d = exiReadMemory(xml.as_ptr().cast(), xml.len() as _, c"mem:a".as_ptr(), null(), EXI_PARSE_NOBLANKS);
+///     let a = exiDocGetRootElement(d);
+///     assert_eq!(name((*a).children), "b");                        // no blank text
+///     assert_eq!(core::ffi::CStr::from_ptr((*d).URL.cast()).to_str().unwrap(), "mem:a");
+///     assert!(exiReadMemory(b"<a>".as_ptr().cast(), 3, null(), null(), 0).is_null());   // not well-formed
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiReadMemory(
     buffer: *const c_char,
@@ -1824,6 +3221,23 @@ pub unsafe extern "C" fn exiReadMemory(
 /// # Safety
 ///
 /// `cur` NUL-terminated; `URL` NULL or NUL-terminated.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiReadDoc(s!("<a> <b/></a>"), null(), null(), 0);
+///     assert_eq!(exiIsBlankNode((*exiDocGetRootElement(d)).children), 1);   // blanks kept
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiReadDoc(
     cur: *const exiChar,
@@ -1848,6 +3262,28 @@ pub unsafe extern "C" fn exiReadDoc(
 /// # Safety
 ///
 /// `filename` NUL-terminated.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let path = std::env::temp_dir().join(format!("exi-read-file-{}.xml", std::process::id()));
+///     std::fs::write(&path, "<a/>").unwrap();
+///     let p = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+///     let d = exiReadFile(p.as_ptr(), null(), 0);
+///     assert_eq!(name(exiDocGetRootElement(d)), "a");
+///     exiFreeDoc(d);
+///     std::fs::remove_file(&path).unwrap();
+///     assert!(exiReadFile(p.as_ptr(), null(), 0).is_null());       // gone
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiReadFile(
     filename: *const c_char,
@@ -1871,6 +3307,25 @@ pub unsafe extern "C" fn exiReadFile(
 /// # Safety
 ///
 /// `buffer` valid for `size` bytes.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let xml = b"<a/>trailing";
+///     assert!(exiParseMemory(xml.as_ptr().cast(), xml.len() as _).is_null());
+///     let d = exiParseMemory(xml.as_ptr().cast(), 4);              // the first 4 octets
+///     assert_eq!(name(exiDocGetRootElement(d)), "a");
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiParseMemory(
     buffer: *const c_char,
@@ -1885,6 +3340,24 @@ pub unsafe extern "C" fn exiParseMemory(
 /// # Safety
 ///
 /// `cur` NUL-terminated.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a><b/></a>"));
+///     assert_eq!(kids(exiDocGetRootElement(d)), ["b"]);
+///     assert!(exiParseDoc(null()).is_null());
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiParseDoc(cur: *const exiChar) -> exiDocPtr {
     // SAFETY: the caller's contract.
@@ -1896,6 +3369,27 @@ pub unsafe extern "C" fn exiParseDoc(cur: *const exiChar) -> exiDocPtr {
 /// # Safety
 ///
 /// `filename` NUL-terminated.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let path = std::env::temp_dir().join(format!("exi-parse-file-{}.xml", std::process::id()));
+///     std::fs::write(&path, "<a><b/></a>").unwrap();
+///     let p = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+///     let d = exiParseFile(p.as_ptr());
+///     assert_eq!(kids(exiDocGetRootElement(d)), ["b"]);
+///     exiFreeDoc(d);
+///     std::fs::remove_file(&path).unwrap();
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiParseFile(filename: *const c_char) -> exiDocPtr {
     // SAFETY: the caller's contract.
@@ -1911,17 +3405,45 @@ pub unsafe extern "C" fn exiParseFile(filename: *const c_char) -> exiDocPtr {
 /// # Safety
 ///
 /// `r` is live; `strings` NULL or live and outliving the document.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     use exi::capi::*;
+///     let mut cfg = core::mem::zeroed::<exi_reader_config>();
+///     cfg.size = core::mem::size_of::<exi_reader_config>() as u32;
+///     cfg.format = EXI_FORMAT_XML;                                 // or EXI
+///     let r = exi_reader_new(&cfg);
+///     let xml = b"<a><b/></a>";
+///     exi_reader_feed(r, xml.as_ptr().cast(), xml.len(), EXI_FEED_FINAL, null_mut());
+///     let d = exiDocReadFrom(r, null_mut());
+///     assert_eq!(kids(exiDocGetRootElement(d)), ["b"]);
+///     exiFreeDoc(d);
+///     exi_reader_free(r);
+///     // Without all its input, the reader cannot give a whole document.
+///     let r = exi_reader_new(&cfg);
+///     exi_reader_feed(r, xml.as_ptr().cast(), 4, 0, null_mut());
+///     assert!(exiDocReadFrom(r, null_mut()).is_null());
+///     assert_eq!(exi_reader_error(r, null_mut(), null_mut(), null_mut()), EXI_E_TRUNCATED);
+///     exi_reader_free(r);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiDocReadFrom(
     r: *mut exi_reader,
     strings: *mut exi_strings,
 ) -> exiDocPtr {
     guard(ptr::null_mut(), || {
-        let o = r as *mut ReaderObj;
         // SAFETY: the caller's contract.
-        let Some(o) = (unsafe { o.as_mut() })
-            .filter(|o| o.magic == super::imp::MAGIC_READER)
-        else {
+        let Some(o) = (unsafe { super::reader(r) }) else {
             return ptr::null_mut();
         };
         if o.poisoned {
@@ -1973,6 +3495,37 @@ impl EventSink for ToWriter<'_> {
 /// # Safety
 ///
 /// `d` and `w` are live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     use exi::capi::*;
+///     let mut o = core::mem::zeroed::<exi_options>();
+///     exi_options_init(&mut o);
+///     o.coding = EXI_CODING_BYTE_ALIGNED;
+///     let mut cfg = core::mem::zeroed::<exi_writer_config>();
+///     cfg.size = core::mem::size_of::<exi_writer_config>() as u32;
+///     cfg.options = &o;
+///     cfg.header = EXI_HDR_NO_OPTIONS;
+///     let w = exi_writer_new(&cfg);
+///     let (mut p, mut n) = (null(), 0);
+///     let d = exiParseDoc(s!("<a/>"));
+///     assert_eq!(exiDocWriteTo(d, w), EXI_OK);                     // ends the document
+///     assert_eq!(exi_writer_take(w, &mut p, &mut n), EXI_OK);
+///     assert_eq!(core::slice::from_raw_parts(p, n), [0x80, 0x01, 0x02, b'a', 0x00]);
+///     assert_eq!(exiDocWriteTo(d, null_mut()), EXI_E_ARG);
+///     exiFreeDoc(d);
+///     exi_writer_free(w);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiDocWriteTo(
     d: *const RawDoc,
@@ -1991,6 +3544,38 @@ pub unsafe extern "C" fn exiDocWriteTo(
 /// # Safety
 ///
 /// `n` and `w` are live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     use exi::capi::*;
+///     let mut o = core::mem::zeroed::<exi_options>();
+///     exi_options_init(&mut o);
+///     o.coding = EXI_CODING_BYTE_ALIGNED;
+///     let mut cfg = core::mem::zeroed::<exi_writer_config>();
+///     cfg.size = core::mem::size_of::<exi_writer_config>() as u32;
+///     cfg.options = &o;
+///     cfg.header = EXI_HDR_NO_OPTIONS;
+///     let w = exi_writer_new(&cfg);
+///     let (mut p, mut n) = (null(), 0);
+///     let d = exiParseDoc(s!("<stream><m/></stream>"));
+///     let m = (*exiDocGetRootElement(d)).children;
+///     assert_eq!(exiNodeWriteTo(m, w), EXI_OK);                    // one element, as a document
+///     assert_eq!(exi_writer_end_document(w), EXI_OK);
+///     assert_eq!(exi_writer_take(w, &mut p, &mut n), EXI_OK);
+///     assert_eq!(core::slice::from_raw_parts(p, n), [0x80, 0x01, 0x02, b'm', 0x00]);
+///     exiFreeDoc(d);
+///     exi_writer_free(w);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNodeWriteTo(
     n: *const RawNode,
@@ -2009,13 +3594,8 @@ fn write_with(
     w: *mut exi_writer,
     f: impl FnOnce(&mut ToWriter<'_>) -> Result<()>,
 ) -> exi_status {
-    let o = w as *mut WriterObj;
     // SAFETY: a live writer from the caller.
-    let Some(o) = (unsafe { o.as_mut() })
-        .filter(|o| o.magic == super::imp::MAGIC_WRITER)
-    else {
-        return EXI_E_ARG;
-    };
+    let Some(o) = (unsafe { super::writer(w) }) else { return EXI_E_ARG };
     if o.poisoned {
         return EXI_E_STATE;
     }
@@ -2045,6 +3625,27 @@ fn dump(d: &Document<'_>) -> Option<Vec<u8>> {
 /// # Safety
 ///
 /// `d` live; `mem` and `size` point to writable storage.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<!--c--><a k='v'><b/></a>"));
+///     let (mut mem, mut size) = (null_mut(), 0);
+///     exiDocDumpMemory(d, &mut mem, &mut size);
+///     let xml = text(mem);
+///     assert_eq!(xml, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!--c-->\n<a k=\"v\"><b/></a>\n");
+///     assert_eq!(size as usize, xml.len());
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiDocDumpMemory(
     d: *const RawDoc,
@@ -2063,10 +3664,11 @@ pub unsafe extern "C" fn exiDocDumpMemory(
             }
             let Some(d) = doc(d) else { return };
             let Some(b) = dump(&d) else { return };
+            let Ok(n) = c_int::try_from(b.len()) else { return };
             // The text is UTF-8: the XML writer writes only that.
             *mem = out_str(core::str::from_utf8_unchecked(&b));
-            if !size.is_null() {
-                *size = b.len() as c_int;
+            if !size.is_null() && !(*mem).is_null() {
+                *size = n;
             }
         }
     })
@@ -2077,6 +3679,25 @@ pub unsafe extern "C" fn exiDocDumpMemory(
 /// # Safety
 ///
 /// As `exiDocDumpMemory`.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a><b/></a>"));
+///     let (mut mem, mut size) = (null_mut(), 0);
+///     exiDocDumpFormatMemory(d, &mut mem, &mut size, 1);           // no indentation is added
+///     assert!(text(mem).ends_with("<a><b/></a>\n"));
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiDocDumpFormatMemory(
     d: *const RawDoc,
@@ -2094,6 +3715,26 @@ pub unsafe extern "C" fn exiDocDumpFormatMemory(
 /// # Safety
 ///
 /// As `exiDocDumpMemory`, for a node.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<r xmlns:x='urn:x'><x:m>hi</x:m></r>"));
+///     let m = (*exiDocGetRootElement(d)).children;
+///     let (mut mem, mut size) = (null_mut(), 0);
+///     exiNodeDumpMemory(m, &mut mem, &mut size);
+///     assert_eq!(text(mem), "<x:m xmlns:x=\"urn:x\">hi</x:m>");      // with what it needs
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiNodeDumpMemory(
     n: *const RawNode,
@@ -2117,9 +3758,10 @@ pub unsafe extern "C" fn exiNodeDumpMemory(
                 return;
             }
             let b = w.into_sink();
+            let Ok(n) = c_int::try_from(b.len()) else { return };
             *mem = out_str(core::str::from_utf8_unchecked(&b));
-            if !size.is_null() {
-                *size = b.len() as c_int;
+            if !size.is_null() && !(*mem).is_null() {
+                *size = n;
             }
         }
     })
@@ -2130,6 +3772,30 @@ pub unsafe extern "C" fn exiNodeDumpMemory(
 /// # Safety
 ///
 /// `filename` NUL-terminated; `d` live.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let path = std::env::temp_dir().join(format!("exi-save-file-{}.xml", std::process::id()));
+///     let p = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+///     let d = exiParseDoc(s!("<a/>"));
+///     let n = exiSaveFile(p.as_ptr(), d);
+///     let saved = std::fs::read_to_string(&path).unwrap();
+///     assert_eq!(n as usize, saved.len());
+///     assert!(saved.ends_with("<a/>\n"));
+///     std::fs::remove_file(&path).unwrap();
+///     assert_eq!(exiSaveFile(p.as_ptr(), null()), -1);
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiSaveFile(
     filename: *const c_char,
@@ -2143,7 +3809,9 @@ pub unsafe extern "C" fn exiSaveFile(
             return -1;
         };
         match dump(&d) {
-            Some(b) if std::fs::write(f, &b).is_ok() => b.len() as c_int,
+            Some(b) if std::fs::write(f, &b).is_ok() => {
+                c_int::try_from(b.len()).unwrap_or(-1)
+            }
             _ => -1,
         }
     })
@@ -2154,6 +3822,26 @@ pub unsafe extern "C" fn exiSaveFile(
 /// # Safety
 ///
 /// As `exiSaveFile`.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let path = std::env::temp_dir().join(format!("exi-save-format-{}.xml", std::process::id()));
+///     let p = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+///     let d = exiParseDoc(s!("<a/>"));
+///     assert!(exiSaveFormatFile(p.as_ptr(), d, 1) > 0);
+///     std::fs::remove_file(&path).unwrap();
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiSaveFormatFile(
     filename: *const c_char,
@@ -2169,6 +3857,25 @@ pub unsafe extern "C" fn exiSaveFormatFile(
 /// # Safety
 ///
 /// `p` is NULL or from this API, freed once.
+///
+/// ```
+/// # use exi::capi::dom::*;
+/// # use exi::dom::raw::*;
+/// # use core::ptr::{null, null_mut};
+/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
+/// # /// A malloc'd string from the API, freed.
+/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
+/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
+/// # /// The names of an element's children.
+/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// unsafe {
+///     let d = exiParseDoc(s!("<a>t</a>"));
+///     let p = exiNodeGetContent(exiDocGetRootElement(d));          // malloc'd
+///     exiFree(p.cast());
+///     exiFree(null_mut());                                         // no-op
+///     exiFreeDoc(d);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exiFree(p: *mut c_void) {
     // SAFETY: the caller's contract; the memory came from malloc.

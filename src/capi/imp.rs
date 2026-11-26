@@ -223,10 +223,11 @@ pub(super) unsafe fn options_from(
         .map_err(|_| c"options that cannot be combined: strict with preserved DTDs, prefixes, comments, PIs or selfContained; selfContained with compression; or blockSize 0")
 }
 
-/// The C form of `o`; the schema id text is kept in `keep`.
+/// The C form of `o`; the schema id text, NUL-terminated, is kept in
+/// `keep`.
 pub(super) fn options_to(
     o: &Options,
-    keep: &mut Option<CString>,
+    keep: &mut Vec<Box<[u8]>>,
 ) -> exi_options {
     let mut c = default_options();
     c.coding = match o.coding() {
@@ -249,9 +250,12 @@ pub(super) fn options_to(
         SchemaId::BuiltinTypes => c.schema_id_kind = EXI_SCHEMA_ID_BUILTIN,
         SchemaId::Id(s) => {
             c.schema_id_kind = EXI_SCHEMA_ID_VALUE;
-            let cs = CString::new(s.as_bytes()).unwrap_or_default();
-            c.schema_id = exi_str { ptr: cs.as_ptr(), len: s.len() };
-            *keep = Some(cs);
+            let mut b = Vec::with_capacity(s.len() + 1);
+            b.extend_from_slice(s.as_bytes());
+            b.push(0);
+            let b = b.into_boxed_slice();
+            c.schema_id = exi_str { ptr: b.as_ptr().cast(), len: s.len() };
+            keep.push(b);
         }
     }
     c
@@ -422,6 +426,7 @@ impl Parts {
                 // SAFETY: undo what was done above.
                 unsafe { release(set) };
                 if owns {
+                    // SAFETY: created above, and nothing borrows it.
                     drop(unsafe { Box::from_raw(strings) });
                 }
                 None
@@ -451,12 +456,28 @@ impl Drop for Parts {
 
 // ----- readers -----
 
+/// A reader on the heap. Its ring is inline, up to 64 KiB, so each size
+/// is built in a frame of its own rather than all sizes in one.
+#[inline(never)]
+fn exi_reader<const N: usize>(
+    cfg: ReaderConfig<'static>,
+) -> crate::Result<Box<Reader<'static, N>>> {
+    Reader::new(cfg).map(Box::new)
+}
+
+/// As [`exi_reader`], for XML text.
+#[inline(never)]
+fn xml_reader<const N: usize>(
+    cfg: XmlConfig,
+    g: &'static Grammars<'static>,
+) -> Box<XmlReader<'static, N>> {
+    Box::new(XmlReader::new(cfg, g))
+}
+
 macro_rules! any_reader {
     ($($v:ident $x:ident $n:literal),*) => {
-        // The ring is inline; the whole block is on the heap, so the size spread costs nothing.
-        #[allow(clippy::large_enum_variant)]
         pub(super) enum AnyReader {
-            $( $v(Reader<'static, $n>), $x(XmlReader<'static, $n>), )*
+            $( $v(Box<Reader<'static, $n>>), $x(Box<XmlReader<'static, $n>>), )*
         }
         macro_rules! with_reader {
             ($r:expr, $b:ident => $e:expr) => { match $r { $( AnyReader::$v($b) => $e, AnyReader::$x($b) => $e, )* } };
@@ -464,7 +485,7 @@ macro_rules! any_reader {
         impl AnyReader {
             pub fn new(size: u32, xml: bool, cfg: ReaderConfig<'static>, xcfg: XmlConfig, g: &'static Grammars<'static>) -> Option<crate::Result<AnyReader>> {
                 Some(match (size, xml) {
-                    $( ($n, false) => Reader::new(cfg).map(AnyReader::$v), ($n, true) => Ok(AnyReader::$x(XmlReader::new(xcfg, g))), )*
+                    $( ($n, false) => exi_reader(cfg).map(AnyReader::$v), ($n, true) => Ok(AnyReader::$x(xml_reader(xcfg, g))), )*
                     _ => return None,
                 })
             }
@@ -659,8 +680,14 @@ fn datetime_from(c: &exi_datetime) -> Option<DateTime> {
         hour: c.hour,
         minute: c.minute,
         second: c.second,
-        fraction: (c.has_frac != 0).then_some((c.frac, c.frac_digits as u8)),
-        tz_minutes: (c.has_tz != 0).then_some(c.tz_minutes as i16),
+        fraction: match c.has_frac {
+            0 => None,
+            _ => Some((c.frac, u8::try_from(c.frac_digits).ok()?)),
+        },
+        tz_minutes: match c.has_tz {
+            0 => None,
+            _ => Some(i16::try_from(c.tz_minutes).ok()?),
+        },
     })
 }
 
@@ -748,8 +775,11 @@ pub(super) struct ReaderObj {
     pub last: Option<Error>,
     pub last_msg: CString,
     pub scratch: Scratch,
-    pub options: Option<exi_options>,
-    pub options_keep: Option<CString>,
+    /// The C form of the stream's options and the options it came from;
+    /// made again when a stream of `EXI_SEQ_STREAMS` brings others.
+    pub options: Option<(Options, exi_options)>,
+    /// Schema id texts of `options`, kept while the reader lives.
+    pub options_keep: Vec<Box<[u8]>>,
 }
 
 impl Drop for ReaderObj {
@@ -760,6 +790,23 @@ impl Drop for ReaderObj {
             core::mem::ManuallyDrop::drop(&mut self.reader);
             core::mem::ManuallyDrop::drop(&mut self.parts);
         }
+    }
+}
+
+/// A reader or writer block: what an export does when its call panics.
+pub(super) trait Block {
+    fn poison(&mut self);
+}
+
+impl Block for ReaderObj {
+    fn poison(&mut self) {
+        self.poisoned = true;
+    }
+}
+
+impl Block for WriterObj {
+    fn poison(&mut self) {
+        self.poisoned = true;
     }
 }
 
@@ -913,6 +960,9 @@ pub(super) unsafe fn writer_new(c: &exi_writer_config) -> Option<WriterObj> {
     if c.sequence > EXI_SEQ_FRAMES
         || c.format > EXI_FORMAT_XML
         || c.header & !(EXI_HDR_COOKIE | EXI_HDR_NO_OPTIONS) != 0
+        || c.flags
+            & !(EXI_WR_XML_DECLARATION | EXI_WR_CANONICAL | EXI_WR_UTC_TIME)
+            != 0
     {
         return None;
     }
@@ -1029,7 +1079,7 @@ pub(super) unsafe fn reader_new(c: &exi_reader_config) -> Option<ReaderObj> {
         last_msg: CString::default(),
         scratch: Scratch::default(),
         options: None,
-        options_keep: None,
+        options_keep: Vec::new(),
     })
 }
 
@@ -1049,21 +1099,15 @@ pub(super) unsafe fn with_event<T>(
         let p = s(n.prefix)?;
         Some(if p.is_empty() { nm } else { nm.with_prefix(p) })
     };
-    let mut owned: Option<OwnedValue> = None;
-    // SAFETY: as above.
-    let value =
-        |v: &exi_value, owned: &mut Option<OwnedValue>| -> Option<()> {
-            *owned = Some(unsafe { value_from(v) }?);
-            Some(())
-        };
     let e = match ev.r#type {
         EXI_EV_SD => Event::StartDocument,
         EXI_EV_ED => Event::EndDocument,
         EXI_EV_SE => Event::StartElement(name(&ev.name)?),
         EXI_EV_EE => Event::EndElement(name(&ev.name)?),
         EXI_EV_AT | EXI_EV_CH => {
-            value(&ev.value, &mut owned)?;
-            let v = owned.as_ref().expect("set above").as_value();
+            // SAFETY: as above.
+            let owned = unsafe { value_from(&ev.value) }?;
+            let v = owned.as_value();
             let e = if ev.r#type == EXI_EV_AT {
                 Event::Attribute(name(&ev.name)?, v)
             } else {

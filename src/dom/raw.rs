@@ -201,16 +201,25 @@ pub(crate) struct Extra<'g> {
     pub slot: u32,
     pub uri: Option<Held<'g, Uri>>,
     pub local: Option<Held<'g, Local>>,
-    /// Owned text behind `content` (text, comments, PI data),
-    /// NUL-terminated.
-    pub text: Option<Box<[u8]>>,
-    /// Owned text behind `name` (PI target, entity name, DOCTYPE name),
-    /// NUL-terminated.
+    /// The backing buffer of a PI or entity name, or a wanted prefix.
     pub name_buf: Option<Box<[u8]>>,
-    /// A typed value; `content` is NULL then.
-    pub value: Option<OwnedValue>,
-    /// DOCTYPE: public id, system id, internal subset, NUL-terminated.
-    pub dtd: Option<[Box<[u8]>; 3]>,
+    pub content: Content,
+}
+
+/// Text backing the C pointer, or a boxed typed value used by EXI.
+pub(crate) enum Content {
+    None,
+    Text(Box<[u8]>),
+    Typed(Box<OwnedValue>),
+}
+
+impl Content {
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Text(text) => text_of(text),
+            _ => "",
+        }
+    }
 }
 
 impl Extra<'_> {
@@ -219,10 +228,8 @@ impl Extra<'_> {
             slot,
             uri: None,
             local: None,
-            text: None,
             name_buf: None,
-            value: None,
-            dtd: None,
+            content: Content::None,
         }
     }
 }
@@ -243,6 +250,8 @@ pub(crate) struct AttrBox<'g> {
 pub(crate) struct DtdBox<'g> {
     pub raw: RawDtd,
     pub x: Extra<'g>,
+    /// Public ID, system ID and internal subset, NUL-terminated.
+    pub ids: [Box<[u8]>; 3],
 }
 
 #[repr(C)]
@@ -390,14 +399,34 @@ impl RawDoc {
 ///
 /// `p` is a live node of a document with strings `'g`, not the document
 /// itself.
-pub(crate) unsafe fn extra<'a, 'g>(p: *mut RawCommon) -> &'a mut Extra<'g> {
-    // SAFETY: the box types are repr(C) with the raw struct first, and
-    // `type` says which box `p` is.
+pub(crate) unsafe fn extra<'a, 'g>(p: *mut RawCommon) -> &'a Extra<'g> {
+    // SAFETY: the caller keeps the node alive for the borrow.
+    unsafe { &*extra_ptr(p) }
+}
+
+/// Mutable metadata of a node.
+///
+/// # Safety
+///
+/// As `extra`, with exclusive access to the metadata for the borrow.
+pub(crate) unsafe fn extra_mut<'a, 'g>(
+    p: *mut RawCommon,
+) -> &'a mut Extra<'g> {
+    // SAFETY: the caller keeps the node alive and exclusively borrowed.
+    unsafe { &mut *extra_ptr(p) }
+}
+
+/// # Safety
+///
+/// `p` is a live node of the indicated box type, excluding the
+/// document.
+unsafe fn extra_ptr<'g>(p: *mut RawCommon) -> *mut Extra<'g> {
+    // SAFETY: each box is repr(C) with its public C struct first.
     unsafe {
         match (*p).r#type {
-            EXI_ATTRIBUTE_NODE => &mut (*(p as *mut AttrBox<'g>)).x,
-            EXI_DTD_NODE => &mut (*(p as *mut DtdBox<'g>)).x,
-            _ => &mut (*(p as *mut NodeBox<'g>)).x,
+            EXI_ATTRIBUTE_NODE => &raw mut (*(p as *mut AttrBox<'g>)).x,
+            EXI_DTD_NODE => &raw mut (*(p as *mut DtdBox<'g>)).x,
+            _ => &raw mut (*(p as *mut NodeBox<'g>)).x,
         }
     }
 }

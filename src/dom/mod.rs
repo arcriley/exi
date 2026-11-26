@@ -309,13 +309,16 @@ impl<'g> Document<'g> {
 
     // ----- ids and pointers -----
 
+    fn live_ptr(&self, n: NodeId) -> Option<*mut RawCommon> {
+        let slot = self.d().slots.get(n.index as usize)?;
+        (slot.generation == n.generation && !slot.ptr.is_null())
+            .then_some(slot.ptr)
+    }
+
     fn p(&self, n: NodeId) -> *mut RawCommon {
-        match self.d().slots.get(n.index as usize) {
-            Some(s) if s.generation == n.generation && !s.ptr.is_null() => {
-                s.ptr
-            }
-            _ => panic!("NodeId {n:?} is not a live node of this document"),
-        }
+        self.live_ptr(n).unwrap_or_else(|| {
+            panic!("NodeId {n:?} is not a live node of this document")
+        })
     }
 
     /// The id of a node of this document, from its pointer.
@@ -335,31 +338,56 @@ impl<'g> Document<'g> {
 
     /// Whether `n` is a live node of this document.
     pub fn contains(&self, n: NodeId) -> bool {
-        self.d()
-            .slots
-            .get(n.index as usize)
-            .is_some_and(|s| s.generation == n.generation && !s.ptr.is_null())
+        self.live_ptr(n).is_some()
     }
 
     /// The id for a node pointer from C. `None` if `p` is not a live
     /// node of this document.
+    ///
+    /// ```
+    /// # use exi::{dom::{Document, raw::RawCommon}, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let text = doc.new_text("reading");
+    /// let raw = doc.raw(text);
+    /// assert_eq!(doc.node_id(raw), Some(text));
+    /// doc.remove(text);
+    /// assert!(!doc.contains(text));
+    /// assert_eq!(doc.node_id(raw), None);
+    /// assert_eq!(doc.node_id(core::ptr::dangling::<RawCommon>()), None);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn node_id(&self, p: *const RawCommon) -> Option<NodeId> {
-        let p = p as *mut RawCommon;
-        if p.is_null() {
-            return None;
-        }
-        if p == self.doc_ptr() as *mut RawCommon {
-            return Some(self.id(p));
-        }
-        // SAFETY: only read after confirming the slot holds `p`; the
-        // caller's pointer is trusted to be some live node, as in
-        // libxml2.
-        let slot = unsafe { extra(p).slot };
         self.d()
             .slots
-            .get(slot as usize)
-            .filter(|s| s.ptr == p)
-            .map(|s| NodeId { index: slot, generation: s.generation })
+            .iter()
+            .enumerate()
+            .find(|(_, slot)| !slot.ptr.is_null() && ptr::eq(slot.ptr, p))
+            .map(|(index, slot)| NodeId {
+                index: index as u32,
+                generation: slot.generation,
+            })
+    }
+
+    /// Looks up a pointer whose backing node is known to be live.
+    ///
+    /// # Safety
+    ///
+    /// `p` is a non-null pointer to a live node allocated by this
+    /// crate.
+    #[cfg(feature = "capi")]
+    pub(crate) unsafe fn live_node_id(
+        &self,
+        p: *mut RawCommon,
+    ) -> Option<NodeId> {
+        let index = if p == self.doc_ptr().cast() {
+            0
+        } else {
+            unsafe { extra(p).slot }
+        };
+        let slot = self.d().slots.get(index as usize)?;
+        (slot.ptr == p)
+            .then_some(NodeId { index, generation: slot.generation })
     }
 
     /// The node's C struct: `exiNode*`, `exiAttr*`, `exiDtd*` or
@@ -401,11 +429,12 @@ impl<'g> Document<'g> {
         p
     }
 
-    fn alloc_dtd(&mut self) -> *mut RawCommon {
+    fn alloc_dtd(&mut self, ids: [Box<[u8]>; 3]) -> *mut RawCommon {
         let slot = self.reserve_slot();
         let b = Box::new(DtdBox {
             raw: RawDtd::blank(self.doc_ptr()),
             x: Extra::new(slot),
+            ids,
         });
         let p = Box::into_raw(b) as *mut RawCommon;
         self.dm().slots[slot as usize].ptr = p;
@@ -433,7 +462,7 @@ impl<'g> Document<'g> {
                     (*(p as *mut RawNode)).localId = l;
                 }
             }
-            let x = extra(p);
+            let x = extra_mut(p);
             x.uri = Some(uri);
             x.local = Some(local);
         }
@@ -446,7 +475,7 @@ impl<'g> Document<'g> {
         // SAFETY: a live element or attribute; `name_buf` is unused by
         // those otherwise.
         unsafe {
-            extra(p).name_buf = prefix.filter(|p| !p.is_empty()).map(cstr)
+            extra_mut(p).name_buf = prefix.filter(|p| !p.is_empty()).map(cstr)
         };
     }
 
@@ -538,7 +567,7 @@ impl<'g> Document<'g> {
                 // SAFETY: a live PI; the buffer is kept by it.
                 unsafe {
                     (*p).name = b.as_ptr();
-                    extra(p).name_buf = Some(b);
+                    extra_mut(p).name_buf = Some(b);
                 }
                 Ok(())
             }
@@ -604,28 +633,28 @@ impl<'g> Document<'g> {
 
     /// Sets the text of a text, comment or PI node.
     fn set_text(&mut self, p: *mut RawCommon, s: &str) {
+        self.set_text_buffer(p, cstr(s));
+    }
+
+    fn set_text_buffer(&mut self, p: *mut RawCommon, text: Box<[u8]>) {
         // SAFETY: `p` is a live node of this document with a `content`
-        // field.
+        // field. Its payload owns the NUL-terminated buffer.
         unsafe {
-            let x = extra(p);
-            let b = cstr(s);
-            (*(p as *mut RawNode)).content = b.as_ptr() as *mut u8;
-            x.text = Some(b);
-            x.value = None;
+            (*(p as *mut RawNode)).content = text.as_ptr() as *mut u8;
+            extra_mut(p).content = Content::Text(text);
         }
     }
 
     fn set_typed(&mut self, p: *mut RawCommon, v: OwnedValue) {
-        if let OwnedValue::Str(s) = &v {
-            let s = s.clone();
-            return self.set_text(p, &s);
-        }
-        // SAFETY: as `set_text`.
-        unsafe {
-            let x = extra(p);
-            (*(p as *mut RawNode)).content = ptr::null_mut();
-            x.text = None;
-            x.value = Some(v);
+        match v {
+            OwnedValue::Str(s) => self.set_text(p, &s),
+            v => {
+                // SAFETY: as in `set_text_buffer`.
+                unsafe {
+                    (*(p as *mut RawNode)).content = ptr::null_mut();
+                    extra_mut(p).content = Content::Typed(Box::new(v));
+                }
+            }
         }
     }
 
@@ -644,10 +673,14 @@ impl<'g> Document<'g> {
 
     /// A new text node (`xmlNewDocText`).
     pub fn new_text(&mut self, text: &str) -> NodeId {
+        self.new_text_buffer(cstr(text))
+    }
+
+    fn new_text_buffer(&mut self, text: Box<[u8]>) -> NodeId {
         let p = self.alloc_node(EXI_TEXT_NODE);
         // SAFETY: `p` is new.
         unsafe { (*p).name = TEXT_NAME.as_ptr() };
-        self.set_text(p, text);
+        self.set_text_buffer(p, text);
         self.id(p)
     }
 
@@ -689,7 +722,7 @@ impl<'g> Document<'g> {
         // SAFETY: `p` is new; the name buffer is kept by the node.
         unsafe {
             (*p).name = b.as_ptr();
-            extra(p).name_buf = Some(b);
+            extra_mut(p).name_buf = Some(b);
         }
         self.set_text(p, data);
         self.id(p)
@@ -702,35 +735,55 @@ impl<'g> Document<'g> {
         // SAFETY: as `new_pi`.
         unsafe {
             (*p).name = b.as_ptr();
-            extra(p).name_buf = Some(b);
+            extra_mut(p).name_buf = Some(b);
         }
         self.id(p)
     }
 
     /// Sets the document type declaration, replacing any before it
     /// (`xmlCreateIntSubset`). It goes before the root element.
+    ///
+    /// ```
+    /// # use exi::{dom::Document, strings::{GlobalConfig, GlobalStrings}, Doctype};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("reading")?;
+    /// doc.set_root(root)?;
+    /// let dtd = Doctype {
+    ///     name: "reading",
+    ///     public_id: "",
+    ///     system_id: "reading.dtd",
+    ///     text: "<!ELEMENT reading EMPTY>",
+    /// };
+    /// let node = doc.set_doctype(dtd);
+    /// assert_eq!(doc.children(doc.document_node()).collect::<Vec<_>>(), [node, root]);
+    /// assert_eq!(doc.doctype().unwrap().system_id, "reading.dtd");
+    /// assert_eq!(doc.doctype().unwrap().text, "<!ELEMENT reading EMPTY>");
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn set_doctype(&mut self, dt: Doctype<'_>) -> NodeId {
         if let Some(old) = self.doctype_node() {
             self.remove(old);
         }
-        let p = self.alloc_dtd();
-        let bufs = [cstr(dt.public_id), cstr(dt.system_id), cstr(dt.text)];
+        let p = self.alloc_dtd([
+            cstr(dt.public_id),
+            cstr(dt.system_id),
+            cstr(dt.text),
+        ]);
         let name = cstr(dt.name);
         let doc = self.doc_ptr();
         // SAFETY: `p` is a new DTD box; its strings are kept by it.
         unsafe {
-            let r = p as *mut RawDtd;
-            (*r).name = name.as_ptr();
+            let dtd = &mut *(p as *mut DtdBox<'g>);
+            dtd.raw.name = name.as_ptr();
             if !dt.public_id.is_empty() {
-                (*r).ExternalID = bufs[0].as_ptr();
+                dtd.raw.ExternalID = dtd.ids[0].as_ptr();
             }
             if !dt.system_id.is_empty() {
-                (*r).SystemID = bufs[1].as_ptr();
+                dtd.raw.SystemID = dtd.ids[1].as_ptr();
             }
-            let x = extra(p);
-            x.name_buf = Some(name);
-            x.dtd = Some(bufs);
-            (*doc).intSubset = r;
+            dtd.x.name_buf = Some(name);
+            (*doc).intSubset = p as *mut RawDtd;
             // Before the root element, or last if there is none.
             match self.root() {
                 Some(root) => insert_before_raw(self.p(root), p),
@@ -746,8 +799,7 @@ impl<'g> Document<'g> {
         let p = self.p(n);
         // SAFETY: a live DTD node; its strings live as long as `&self`.
         unsafe {
-            let x = extra(p);
-            let b = x.dtd.as_ref()?;
+            let b = &(*(p as *const DtdBox<'g>)).ids;
             Some(Doctype {
                 name: str_at((*p).name),
                 public_id: text_of(&b[0]),
@@ -965,12 +1017,11 @@ impl<'g> Document<'g> {
         unsafe {
             match (*p).r#type {
                 EXI_TEXT_NODE | EXI_CDATA_SECTION_NODE => {
-                    let x = extra(p);
-                    match (&x.value, &x.text) {
-                        (Some(v), _) => Some(v.as_value()),
-                        (None, Some(t)) => Some(Value::Str(text_of(t))),
-                        (None, None) => Some(Value::Str("")),
-                    }
+                    let content = &extra(p).content;
+                    Some(match content {
+                        Content::Typed(v) => v.as_value(),
+                        _ => Value::Str(content.text()),
+                    })
                 }
                 EXI_ATTRIBUTE_NODE => {
                     let c = (*p).children;
@@ -1005,14 +1056,13 @@ impl<'g> Document<'g> {
                 | EXI_CDATA_SECTION_NODE
                 | EXI_COMMENT_NODE
                 | EXI_PI_NODE => {
-                    let x = extra(p);
-                    match (&x.value, &x.text) {
-                        (Some(v), _) => out.push_str(
+                    let content = &extra(p).content;
+                    match content {
+                        Content::Typed(v) => out.push_str(
                             &crate::engine::lexical_string(&v.as_value())
                                 .unwrap_or_default(),
                         ),
-                        (None, Some(t)) => out.push_str(text_of(t)),
-                        _ => {}
+                        _ => out.push_str(content.text()),
                     }
                 }
                 EXI_ELEMENT_NODE | EXI_DOCUMENT_NODE | EXI_ATTRIBUTE_NODE => {
@@ -1409,7 +1459,7 @@ impl<'g> Document<'g> {
             }
             let mine = self.reserve_slot();
             self.dm().slots[mine as usize].ptr = p;
-            extra(p).slot = mine;
+            extra_mut(p).slot = mine;
             (*p).doc = self.doc_ptr();
             let t = (*p).r#type;
             if !same && matches!(t, EXI_ELEMENT_NODE | EXI_ATTRIBUTE_NODE) {
@@ -1661,20 +1711,19 @@ impl<'g> Document<'g> {
                 EXI_TEXT_NODE | EXI_CDATA_SECTION_NODE => {
                     let n = self.alloc_node(EXI_TEXT_NODE);
                     (*n).name = TEXT_NAME.as_ptr();
-                    match (&x.value, &x.text) {
-                        (Some(v), _) => self.set_typed(n, v.clone()),
-                        (None, Some(b)) => self.set_text(n, text_of(b)),
-                        _ => self.set_text(n, ""),
+                    match &x.content {
+                        Content::Typed(v) => self.set_typed(n, (**v).clone()),
+                        _ => self.set_text(n, x.content.text()),
                     }
                     return Ok(n);
                 }
                 EXI_COMMENT_NODE => {
-                    let s = x.text.as_ref().map_or("", |b| text_of(b));
+                    let s = x.content.text();
                     let n = self.new_comment(s);
                     return Ok(self.p(n));
                 }
                 EXI_PI_NODE => {
-                    let s = x.text.as_ref().map_or("", |b| text_of(b));
+                    let s = x.content.text();
                     let n = self.new_pi(str_at((*src).name), s);
                     return Ok(self.p(n));
                 }
@@ -1699,6 +1748,19 @@ impl<'g> Document<'g> {
     /// Replaces the content (`xmlNodeSetContent`): an element's or
     /// attribute's children become one text node; a text, comment or PI
     /// node gets this text.
+    ///
+    /// ```
+    /// # use exi::{dom::Document, strings::{GlobalConfig, GlobalStrings}, OwnedValue, Value};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let node = doc.new_text("warm");
+    /// doc.set_content_value(node, OwnedValue::Int(21))?;
+    /// assert_eq!(doc.value(node), Some(Value::Int(21)));
+    /// assert_eq!(doc.content(node), "21");
+    /// doc.set_content(node, "cool")?;
+    /// assert_eq!(doc.value(node), Some(Value::Str("cool")));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn set_content(&mut self, n: NodeId, text: &str) -> Result<()> {
         self.set_content_value(n, OwnedValue::Str(text.into()))
     }

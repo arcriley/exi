@@ -132,7 +132,7 @@ unsafe fn node<'a>(
             (*n).doc as *const RawDoc
         };
         let d = doc(d)?;
-        let id = d.node_id(n)?;
+        let id = d.live_node_id(n.cast_mut())?;
         Some((d, id))
     }
 }
@@ -199,12 +199,13 @@ unsafe fn ns_name<'a>(ns: *const RawNs) -> (&'a str, Option<&'a str>) {
 /// Makes `n` a node of `d`'s document, moving it there if it is another
 /// document's.
 fn bring(d: &mut Document<'_>, n: *mut RawCommon) -> Option<NodeId> {
-    if let Some(id) = d.node_id(n) {
-        return Some(id);
-    }
     // SAFETY: `n` is a live node of some document of this API.
     let (mut from, id) = unsafe { node(n)? };
-    d.adopt(&mut from, id).ok()
+    if from.as_raw() == d.as_raw() {
+        Some(id)
+    } else {
+        d.adopt(&mut from, id).ok()
+    }
 }
 
 // ----- documents -----

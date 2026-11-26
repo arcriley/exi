@@ -43,7 +43,7 @@ use crate::{Error, ErrorKind, Event, EventMeta, Name, NsDecl, Result, Value};
 /// ```
 pub struct DocumentBuilder<'g> {
     doc: Document<'g>,
-    stack: Vec<*mut RawNode>,
+    stack: Vec<NodeId>,
     /// The open element's namespace is chosen after its NS events.
     pending: bool,
     text: String,
@@ -67,6 +67,26 @@ impl<'g> DocumentBuilder<'g> {
 
     /// Leave out text that is whitespace only, such as indentation
     /// (libxml2's `XML_PARSE_NOBLANKS`). Off by default.
+    ///
+    /// ```
+    /// # use exi::{dom::DocumentBuilder, strings::{GlobalConfig, GlobalStrings}, EventSink};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut builder = DocumentBuilder::new(&strings).ignore_blanks(true);
+    /// builder.start_element("reading")?;
+    /// builder.text("\n  ")?;
+    /// builder.start_element("value")?;
+    /// builder.text("2")?;
+    /// builder.text("1")?;
+    /// builder.end_element()?;
+    /// builder.end_element()?;
+    /// let doc = builder.into_document();
+    /// let root = doc.root().unwrap();
+    /// let value = doc.first_element_child(root).unwrap();
+    /// assert_eq!(doc.children(root).count(), 1);
+    /// assert_eq!(doc.children(value).count(), 1);
+    /// assert_eq!(doc.content(value), "21");
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn ignore_blanks(mut self, on: bool) -> Self {
         self.ignore_blanks = on;
         self
@@ -77,13 +97,29 @@ impl<'g> DocumentBuilder<'g> {
         &self.doc
     }
 
+    /// Edits the tree built so far. If an edit removes an element
+    /// the builder still has open, that element can no longer receive
+    /// events. The builder reports `ErrorKind::State` when it reaches
+    /// it.
+    ///
+    /// ```
+    /// # use exi::{dom::DocumentBuilder, strings::{GlobalConfig, GlobalStrings}, ErrorKind, EventSink};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut builder = DocumentBuilder::new(&strings);
+    /// builder.start_element("reading")?;
+    /// let open = builder.current().unwrap();
+    /// builder.document_mut().remove(open);
+    /// assert_eq!(builder.current(), None);
+    /// assert_eq!(builder.text("21").unwrap_err().kind(), ErrorKind::State);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn document_mut(&mut self) -> &mut Document<'g> {
         &mut self.doc
     }
 
     /// The open element, if any.
     pub fn current(&self) -> Option<NodeId> {
-        self.stack.last().map(|&p| self.doc.id(p as *mut RawCommon))
+        self.stack.last().copied().filter(|&id| self.doc.contains(id))
     }
 
     /// The document, after its end.
@@ -120,11 +156,20 @@ impl<'g> DocumentBuilder<'g> {
         self.event(ev)
     }
 
-    fn parent(&self) -> *mut RawCommon {
-        match self.stack.last() {
-            Some(&p) => p as *mut RawCommon,
-            None => self.doc.doc_ptr() as *mut RawCommon,
-        }
+    fn open_element(&self) -> Result<Option<*mut RawNode>> {
+        self.stack
+            .last()
+            .map(|&id| {
+                self.doc.live_ptr(id).map(|p| p.cast()).ok_or_else(|| {
+                    Error::new(ErrorKind::State, "an open element was removed")
+                })
+            })
+            .transpose()
+    }
+
+    fn parent(&self) -> Result<*mut RawCommon> {
+        Ok(self.open_element()?.unwrap_or(self.doc.doc_ptr().cast())
+            as *mut RawCommon)
     }
 
     /// Chooses the open element's namespace, once its declarations are
@@ -132,7 +177,7 @@ impl<'g> DocumentBuilder<'g> {
     fn settle(&mut self) -> Result<()> {
         if self.pending {
             self.pending = false;
-            if let Some(&el) = self.stack.last() {
+            if let Some(el) = self.open_element()? {
                 self.doc.fix_ns(el, super::Declare::Here)?;
             }
         }
@@ -152,16 +197,18 @@ impl<'g> DocumentBuilder<'g> {
         {
             return Ok(());
         }
-        let n = self.doc.new_text(&text);
-        self.place(n);
-        Ok(())
+        let mut text = text.into_bytes();
+        text.push(0);
+        let n = self.doc.new_text_buffer(text.into_boxed_slice());
+        self.place(n)
     }
 
-    fn place(&mut self, n: NodeId) {
+    fn place(&mut self, n: NodeId) -> Result<()> {
         let p = self.doc.p(n);
         // SAFETY: a new node appended to the open element or the
         // document.
-        unsafe { append_raw(self.parent(), p) };
+        unsafe { append_raw(self.parent()?, p) };
+        Ok(())
     }
 
     fn start_ev(&mut self, name: Name<'_>) -> Result<()> {
@@ -175,15 +222,15 @@ impl<'g> DocumentBuilder<'g> {
         unsafe {
             (*(p as *mut RawNode)).line =
                 self.line.min(u16::MAX as u32) as u16;
-            append_raw(self.parent(), p);
+            append_raw(self.parent()?, p);
         }
-        self.stack.push(p as *mut RawNode);
+        self.stack.push(self.doc.id(p));
         self.pending = true;
         Ok(())
     }
 
     fn ns_ev(&mut self, d: &NsDecl<'_>) -> Result<()> {
-        let &el = self.stack.last().ok_or_else(|| {
+        let el = self.open_element()?.ok_or_else(|| {
             Error::new(ErrorKind::State, "a namespace outside an element")
         })?;
         let prefix = (!d.prefix.is_empty()).then_some(d.prefix);
@@ -200,7 +247,7 @@ impl<'g> DocumentBuilder<'g> {
 
     fn attribute_ev(&mut self, name: Name<'_>, v: &Value<'_>) -> Result<()> {
         self.settle()?;
-        let &el = self.stack.last().ok_or_else(|| {
+        let el = self.open_element()?.ok_or_else(|| {
             Error::new(ErrorKind::State, "an attribute outside an element")
         })?;
         let a = self.doc.alloc_attr();
@@ -209,7 +256,10 @@ impl<'g> DocumentBuilder<'g> {
         // SAFETY: a new attribute on the open element.
         unsafe { super::append_attr_raw(el, a as *mut RawAttr) };
         self.doc.fix_attr_ns(a as *mut RawAttr, super::Declare::Here)?;
-        let t = self.doc.new_value(v.to_owned());
+        let t = match v {
+            Value::Str(text) => self.doc.new_text(text),
+            _ => self.doc.new_value(v.to_owned()),
+        };
         let tp = self.doc.p(t);
         // SAFETY: a new text node under the new attribute.
         unsafe { append_raw(a, tp) };
@@ -226,7 +276,7 @@ impl<'g> DocumentBuilder<'g> {
             v => {
                 self.flush()?;
                 let n = self.doc.new_value(v.to_owned());
-                self.place(n);
+                self.place(n)?;
             }
         }
         Ok(())
@@ -241,6 +291,7 @@ impl EventSink for DocumentBuilder<'_> {
                 "an event after the end of the document",
             ));
         }
+        self.open_element()?;
         match ev {
             Event::StartDocument | Event::SelfContained => Ok(()),
             Event::StartElement(n) => self.start_ev(*n),
@@ -259,21 +310,21 @@ impl EventSink for DocumentBuilder<'_> {
                 self.flush()?;
                 self.settle()?;
                 let n = self.doc.new_comment(t);
-                self.place(n);
+                self.place(n)?;
                 Ok(())
             }
             Event::ProcessingInstruction { target, data } => {
                 self.flush()?;
                 self.settle()?;
                 let n = self.doc.new_pi(target, data);
-                self.place(n);
+                self.place(n)?;
                 Ok(())
             }
             Event::EntityReference(name) => {
                 self.flush()?;
                 self.settle()?;
                 let n = self.doc.new_entity_ref(name);
-                self.place(n);
+                self.place(n)?;
                 Ok(())
             }
             Event::Doctype(d) => {
@@ -515,7 +566,7 @@ impl<'g> Document<'g> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 enum St {
     Start,
     Enter(*mut RawCommon),
@@ -569,7 +620,7 @@ impl EventSource for DocEvents<'_, '_> {
             // `doc`, which is borrowed for the life of `self`, so the
             // strings returned live long enough.
             unsafe {
-                match self.state.clone() {
+                match self.state {
                     St::Start => {
                         let first = (*doc.doc_ptr()).children;
                         self.state = if first.is_null() {
@@ -608,17 +659,14 @@ impl EventSource for DocEvents<'_, '_> {
                             self.state = self.after(p);
                             let x = extra(p);
                             return Ok(Step::Event(
-                                Event::Comment(
-                                    x.text.as_ref().map_or("", |b| text_of(b)),
-                                ),
+                                Event::Comment(x.content.text()),
                                 meta,
                             ));
                         }
                         EXI_PI_NODE => {
                             self.state = self.after(p);
                             let x = extra(p);
-                            let data =
-                                x.text.as_ref().map_or("", |b| text_of(b));
+                            let data = x.content.text();
                             return Ok(Step::Event(
                                 Event::ProcessingInstruction {
                                     target: str_at((*p).name),

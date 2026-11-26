@@ -123,6 +123,15 @@ java -cp 'fixtures/jars/*' fixtures/MakeFixtures.java fixtures/manifest.tsv
 options are listed at the top of `fixtures/MakeFixtures.java`. Fixtures left out because
 of EXIficient bugs are noted in the manifest.
 
+`tests/w3c.rs` runs the interoperability cases of the W3C EXI test suite against the
+encodings EXIficient made of them in 2013. `fixtures/fetch-w3c.sh` puts both in
+`fixtures/w3c` (git-ignored, 21 MB); without them the test is skipped. Each encoding's
+options come from its file name. The test decodes EXIficient's encoding, encodes the
+input with the same options, and expects the same events from both. It compares events
+after allowing for quirks of the 2013 run, which the test's `normalize` documents.
+Failures listed in `tests/w3c-known.tsv` are expected. Anything else fails the test,
+including a listed case that now passes, so the list can only shrink.
+
 ## Interoperability policy
 
 Interoperability with EXIficient matters more than strict compliance. Where EXIficient
@@ -202,7 +211,9 @@ Findings so far (synthetic XMPP data):
   `thumbv7em-none-eabihf` and `riscv32imac-unknown-none-elf`, `wasm32-unknown-unknown`,
   the shared library, and header checks.
 - No fuzzing harness yet (the blueprint asks for 24 h clean on every target).
-- The W3C EXI test suite (github.com/w3c/exi-testsuite) is not wired in yet.
+- The W3C EXI test suite: `tests/w3c.rs` runs 3,172 interoperability encodings. 385 of
+  them fail, and `tests/w3c-known.tsv` lists each with its reason; 284 of those are
+  marked `investigate`.
 
 ### Performance
 

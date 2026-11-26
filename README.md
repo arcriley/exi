@@ -131,6 +131,14 @@ fixtures/fetch-exificient.sh
 java -cp 'fixtures/jars/*' fixtures/MakeFixtures.java fixtures/manifest.tsv
 ```
 
+The W3C EXI test suite's interoperability cases run when they have been fetched (git
+and unzip):
+
+```sh
+fixtures/fetch-w3c.sh
+cargo test --all-features --test w3c -- --nocapture
+```
+
 ## Benchmarks
 
 ```sh

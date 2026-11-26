@@ -8,10 +8,11 @@
 // are welcome only if this notice remains unchanged clearly
 // communicating that changes are made under these same conditions.
 //
-//! `include/exi.h` is written by hand. These tests hold it to `src/capi/mod.rs`:
-//! the same functions with the same C types, the same `#define` values, the same struct
-//! sizes, alignments and field offsets, and it compiles as strict C and C++ with
-//! `exi_dom.h` in either order.
+//! `include/exi.h` is written by hand. These tests hold it to
+//! `src/capi/mod.rs`: the same functions with the same C types, the
+//! same `#define` values, the same struct sizes, alignments and field
+//! offsets, and it compiles as strict C and C++ with `exi_dom.h` in
+//! either order.
 //!
 //! The checks that need a C compiler are skipped without one.
 #![cfg(feature = "capi")]
@@ -39,7 +40,8 @@ fn rust() -> String {
 }
 
 fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("exi-c-api-{}-{name}", std::process::id()));
+    let d = std::env::temp_dir()
+        .join(format!("exi-c-api-{}-{name}", std::process::id()));
     std::fs::create_dir_all(&d).unwrap();
     d
 }
@@ -48,18 +50,32 @@ fn include() -> String {
     format!("-I{}", root().join("include").display())
 }
 
-/// Compiles `src` with `cc` and the C standard `std` (warnings are errors); `out` NULL
-/// for a syntax check only.
+/// Compiles `src` with `cc` and the C standard `std` (warnings are
+/// errors); `out` NULL for a syntax check only.
 fn cc(cc: &str, std: &str, lang: &str, src: &Path, out: Option<&Path>) {
     let mut c = Command::new(cc);
-    c.args([std, "-Wall", "-Wextra", "-pedantic", "-Werror", &include(), "-x", lang])
-        .arg(src);
+    c.args([
+        std,
+        "-Wall",
+        "-Wextra",
+        "-pedantic",
+        "-Werror",
+        &include(),
+        "-x",
+        lang,
+    ])
+    .arg(src);
     match out {
         Some(o) => c.arg("-o").arg(o),
         None => c.arg("-fsyntax-only"),
     };
     let o = c.output().unwrap();
-    assert!(o.status.success(), "{cc} {}:\n{}", src.display(), String::from_utf8_lossy(&o.stderr));
+    assert!(
+        o.status.success(),
+        "{cc} {}:\n{}",
+        src.display(),
+        String::from_utf8_lossy(&o.stderr)
+    );
 }
 
 // ----- reading src/capi/mod.rs -----
@@ -70,13 +86,15 @@ fn consts(src: &str) -> Vec<(String, String)> {
         .filter_map(|l| l.strip_prefix("pub const "))
         .map(|l| {
             let (name, rest) = l.split_once(':').unwrap();
-            let value = rest.split_once('=').unwrap().1.trim().trim_end_matches(';');
+            let value =
+                rest.split_once('=').unwrap().1.trim().trim_end_matches(';');
             (name.to_string(), value.to_string())
         })
         .collect()
 }
 
-/// Every `pub struct` and `pub union` with public fields: name and field names.
+/// Every `pub struct` and `pub union` with public fields: name and
+/// field names.
 fn structs(src: &str) -> Vec<(String, Vec<String>)> {
     let mut out = Vec::new();
     let mut lines = src.lines();
@@ -194,9 +212,10 @@ fn exports(src: &str) -> Vec<(String, String, Vec<String>)> {
 
 // ----- the tests -----
 
-/// The header declares exactly the exports, and C sees each with the Rust types: a
-/// function pointer of the Rust signature takes the declared function, so a different
-/// parameter or return type does not compile.
+/// The header declares exactly the exports, and C sees each with the
+/// Rust types: a function pointer of the Rust signature takes the
+/// declared function, so a different parameter or return type does not
+/// compile.
 #[test]
 fn functions_match() {
     let ex = exports(&rust());
@@ -211,14 +230,18 @@ fn functions_match() {
     names.sort_unstable();
     let mut d = declared.clone();
     d.sort_unstable();
-    assert_eq!(d, names, "the functions exi.h declares and the ones src/capi/mod.rs exports");
+    assert_eq!(
+        d, names,
+        "the functions exi.h declares and the ones src/capi/mod.rs exports"
+    );
     if !have("cc") {
         eprintln!("no cc: types not checked");
         return;
     }
     let mut c = String::from("#include \"exi.h\"\n");
     for (name, ret, params) in &ex {
-        let p = if params.is_empty() { "void".into() } else { params.join(", ") };
+        let p =
+            if params.is_empty() { "void".into() } else { params.join(", ") };
         c.push_str(&format!("{ret} (*const check_{name})({p}) = {name};\n"));
     }
     let dir = tmp("functions");
@@ -228,8 +251,8 @@ fn functions_match() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// Every `#define EXI_*` is a Rust constant of the same value, and every constant is
-/// defined.
+/// Every `#define EXI_*` is a Rust constant of the same value, and
+/// every constant is defined.
 #[test]
 fn defines_match() {
     let rust = consts(&rust());
@@ -243,14 +266,19 @@ fn defines_match() {
     defined.sort_unstable();
     let mut names: Vec<&str> = rust.iter().map(|c| c.0.as_str()).collect();
     names.sort_unstable();
-    assert_eq!(defined, names, "the defines of exi.h and the constants of src/capi/mod.rs");
+    assert_eq!(
+        defined, names,
+        "the defines of exi.h and the constants of src/capi/mod.rs"
+    );
     if !have("cc") {
         eprintln!("no cc: values not checked");
         return;
     }
     let mut c = String::from("#include \"exi.h\"\n");
     for (name, value) in &rust {
-        let v = value.replace("u32::MAX", "UINT32_MAX").replace("u64::MAX", "UINT64_MAX");
+        let v = value
+            .replace("u32::MAX", "UINT32_MAX")
+            .replace("u64::MAX", "UINT64_MAX");
         c.push_str(&format!(
             "_Static_assert((unsigned long long)({name}) == (unsigned long long)({v}), \"{name}\");\n"
         ));
@@ -262,7 +290,8 @@ fn defines_match() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// Every struct and union: the same size, alignment and field offsets in C as in Rust.
+/// Every struct and union: the same size, alignment and field offsets
+/// in C as in Rust.
 #[test]
 fn layouts_match() {
     use core::mem::{align_of, offset_of, size_of};
@@ -305,10 +334,13 @@ fn layouts_match() {
         exi_writer_config { size, flags, header, sequence, format, _pad, options, grammars,
             write, write_user, limits, strings }
     };
-    // The list above has every struct of src/capi/mod.rs, field for field.
+    // The list above has every struct of src/capi/mod.rs, field for
+    // field.
     let mut listed: Vec<(String, Vec<String>)> = layout
         .iter()
-        .map(|(t, _, _, f)| (t.to_string(), f.iter().map(|x| x.0.to_string()).collect()))
+        .map(|(t, _, _, f)| {
+            (t.to_string(), f.iter().map(|x| x.0.to_string()).collect())
+        })
         .collect();
     let mut parsed = structs(&rust());
     listed.sort();
@@ -319,11 +351,17 @@ fn layouts_match() {
         eprintln!("no cc: layouts not checked");
         return;
     }
-    let mut c = String::from("#include <stdio.h>\n#include <stddef.h>\n#include \"exi.h\"\nint main(void) {\n");
+    let mut c = String::from(
+        "#include <stdio.h>\n#include <stddef.h>\n#include \"exi.h\"\nint main(void) {\n",
+    );
     for (t, _, _, fields) in &layout {
-        c.push_str(&format!("    printf(\"{t} %zu %zu\\n\", sizeof({t}), _Alignof({t}));\n"));
+        c.push_str(&format!(
+            "    printf(\"{t} %zu %zu\\n\", sizeof({t}), _Alignof({t}));\n"
+        ));
         for (f, _) in fields {
-            c.push_str(&format!("    printf(\"{t}.{f} %zu\\n\", offsetof({t}, {f}));\n"));
+            c.push_str(&format!(
+                "    printf(\"{t}.{f} %zu\\n\", offsetof({t}, {f}));\n"
+            ));
         }
     }
     c.push_str("    return 0;\n}\n");
@@ -331,7 +369,9 @@ fn layouts_match() {
     let (file, exe) = (dir.join("layouts.c"), dir.join("layouts"));
     std::fs::write(&file, c).unwrap();
     cc("cc", "-std=c11", "c", &file, Some(&exe));
-    let printed = String::from_utf8(Command::new(&exe).output().unwrap().stdout).unwrap();
+    let printed =
+        String::from_utf8(Command::new(&exe).output().unwrap().stdout)
+            .unwrap();
     let mut expected = String::new();
     for (t, size, align, fields) in &layout {
         expected.push_str(&format!("{t} {size} {align}\n"));
@@ -343,19 +383,24 @@ fn layouts_match() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// The headers compile as strict C11 and C++17, alone and together in either order.
+/// The headers compile as strict C11 and C++17, alone and together in
+/// either order.
 #[test]
 fn headers_compile() {
     let dir = tmp("compile");
-    for (i, order) in [&["exi.h"][..], &["exi.h", "exi_dom.h"], &["exi_dom.h", "exi.h"]]
-        .iter()
-        .enumerate()
+    for (i, order) in
+        [&["exi.h"][..], &["exi.h", "exi_dom.h"], &["exi_dom.h", "exi.h"]]
+            .iter()
+            .enumerate()
     {
-        let mut src: String = order.iter().map(|h| format!("#include \"{h}\"\n")).collect();
+        let mut src: String =
+            order.iter().map(|h| format!("#include \"{h}\"\n")).collect();
         src.push_str("int main(void) { return exi_abi_version() >> 16 != EXI_ABI_MAJOR; }\n");
         let file = dir.join(format!("t{i}.c"));
         std::fs::write(&file, src).unwrap();
-        for (compiler, std, lang) in [("cc", "-std=c11", "c"), ("c++", "-std=c++17", "c++")] {
+        for (compiler, std, lang) in
+            [("cc", "-std=c11", "c"), ("c++", "-std=c++17", "c++")]
+        {
             if have(compiler) {
                 cc(compiler, std, lang, &file, None);
             } else {

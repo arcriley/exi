@@ -102,6 +102,16 @@ pub fn grammars(version: u32) -> Option<&'static GrammarSet> {
 
 /// Grammars for a schema id from a stream's header, if it names a
 /// profile version.
+///
+/// ```
+/// use exi::html::profile::{self, LATEST, SCHEMA_V1};
+/// assert_eq!(profile::schema_id(LATEST), Some(SCHEMA_V1));
+/// assert_eq!(profile::version_of(SCHEMA_V1), Some(LATEST));
+/// assert!(core::ptr::eq(profile::resolve(SCHEMA_V1).unwrap(),
+///     profile::grammars(LATEST).unwrap()));
+/// assert!(profile::resolve("urn:unknown").is_none());
+/// assert_eq!(profile::options(0).unwrap_err().kind(), exi::ErrorKind::Arg);
+/// ```
 pub fn resolve(schema_id: &str) -> Option<&'static GrammarSet> {
     grammars(version_of(schema_id)?)
 }
@@ -204,7 +214,7 @@ pub fn report(html: &str, version: u32) -> Result<crate::Deviations> {
     let cfg = WriterConfig::new(options(version)?, &g)
         .header(crate::Header::Bare { cookie: false })
         .count_deviations(true);
-    let mut w = Writer::new(Vec::new(), cfg)?;
+    let mut w = Writer::new(crate::coding::IoSink(std::io::sink()), cfg)?;
     super::encode_html(html, &mut w, &super::HtmlOptions::new())?;
     Ok(w.deviations().cloned().unwrap_or_default())
 }

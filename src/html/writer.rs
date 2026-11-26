@@ -11,6 +11,7 @@
 //! Events to HTML text, by the HTML standard's fragment serialization
 //! algorithm.
 
+use std::borrow::Cow;
 use std::string::String;
 use std::vec::Vec;
 
@@ -42,6 +43,20 @@ const RAW: &[&str] = &[
 ];
 
 /// How [`HtmlWriter`] writes.
+///
+/// ```
+/// use exi::html::{HtmlWriter, HtmlWriterOptions};
+/// use exi::{Event, EventSink};
+/// let options = HtmlWriterOptions::new().doctype(false).reverse_coercion(false);
+/// let mut w = HtmlWriter::with_options(Vec::new(), options);
+/// w.start_element(("http://www.w3.org/1999/xhtml", "script"))?;
+/// w.attribute("U000040click", "go")?;
+/// w.text("a < b && c > d")?;
+/// w.end_element()?;
+/// w.event(&Event::EndDocument)?;
+/// assert_eq!(w.into_sink(), br#"<script U000040click="go">a < b && c > d</script>"#);
+/// # Ok::<(), exi::Error>(())
+/// ```
 #[derive(Clone, Debug)]
 pub struct HtmlWriterOptions {
     reverse_coercion: bool,
@@ -134,11 +149,11 @@ impl<S: Sink> HtmlWriter<S> {
         self.sink
     }
 
-    fn name<'n>(&self, local: &'n str) -> std::borrow::Cow<'n, str> {
+    fn name<'n>(&self, local: &'n str) -> Cow<'n, str> {
         if self.opts.reverse_coercion {
             uncoerce_name(local)
         } else {
-            std::borrow::Cow::Borrowed(local)
+            Cow::Borrowed(local)
         }
     }
 
@@ -212,14 +227,14 @@ impl<S: Sink> HtmlWriter<S> {
         self.close_tag()?;
         self.doctype()?;
         let known = matches!(n.uri(), XHTML | SVG | MATHML);
-        let local = self.name(n.local_name()).into_owned();
+        let local = self.name(n.local_name());
+        let html = n.uri() == XHTML;
+        let void = html && VOID.contains(&local.as_ref());
+        let raw = html && RAW.contains(&local.as_ref());
         let qname = match (known, n.prefix()) {
             (false, Some(p)) if !p.is_empty() => std::format!("{p}:{local}"),
-            _ => local.clone(),
+            _ => local.into_owned(),
         };
-        let html = n.uri() == XHTML;
-        let void = html && VOID.contains(&local.as_str());
-        let raw = html && RAW.contains(&local.as_str());
         self.put("<")?;
         self.put(&qname)?;
         self.in_tag = true;
@@ -237,20 +252,21 @@ impl<S: Sink> HtmlWriter<S> {
                 "an attribute after content",
             ));
         }
-        let local = self.name(n.local_name()).into_owned();
-        let name = match n.uri() {
-            "" => local,
-            XML_NS => std::format!("xml:{local}"),
-            XMLNS if local == "xmlns" => local,
-            XMLNS => std::format!("xmlns:{local}"),
-            XLINK => std::format!("xlink:{local}"),
-            _ => match n.prefix() {
-                Some(p) if !p.is_empty() => std::format!("{p}:{local}"),
-                _ => local,
-            },
+        let local = self.name(n.local_name());
+        let prefix = match n.uri() {
+            "" => None,
+            XML_NS => Some("xml"),
+            XMLNS if local == "xmlns" => None,
+            XMLNS => Some("xmlns"),
+            XLINK => Some("xlink"),
+            _ => n.prefix().filter(|p| !p.is_empty()),
         };
         self.put(" ")?;
-        self.put(&name)?;
+        if let Some(prefix) = prefix {
+            self.put(prefix)?;
+            self.put(":")?;
+        }
+        self.put(&local)?;
         self.put("=\"")?;
         let text = text_of(v)?;
         self.escape(&text, true)?;
@@ -276,10 +292,10 @@ impl<S: Sink> HtmlWriter<S> {
 }
 
 /// A value as its text.
-fn text_of<'v>(v: &'v Value<'_>) -> Result<std::borrow::Cow<'v, str>> {
-    match v {
-        Value::Str(s) => Ok(std::borrow::Cow::Borrowed(s)),
-        v => crate::engine::lexical_string(v).map(std::borrow::Cow::Owned),
+fn text_of<'v>(v: &'v Value<'_>) -> Result<Cow<'v, str>> {
+    match v.as_str() {
+        Some(s) => Ok(Cow::Borrowed(s)),
+        None => crate::engine::lexical_string(v).map(Cow::Owned),
     }
 }
 

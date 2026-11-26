@@ -66,12 +66,13 @@ pub use writer::{HtmlWriter, HtmlWriterOptions, decode_to_html};
 
 use std::borrow::Cow;
 use std::io;
-use std::string::{String, ToString};
+use std::string::String;
+use std::vec::Vec;
 
 use markup5ever::QualName;
 use markup5ever::serialize::{AttrRef, Serialize, Serializer, TraversalScope};
 
-use crate::xml::chars::{is_char, is_name_char, is_name_start};
+use crate::xml::chars::{is_char, is_name_char, is_name_start, is_ncname};
 use crate::{
     Doctype, Error, ErrorKind, Event, EventSink, Name, Result, Value,
 };
@@ -98,11 +99,37 @@ pub enum Coercion {
 }
 
 /// How an HTML tree becomes events. See the [module documentation](self).
-#[derive(Clone, Debug, Default)]
+///
+/// ```
+/// # #[cfg(feature = "html5ever")] {
+/// use exi::html::{Coercion, HtmlOptions, html_to_xhtml_with};
+/// let page = "<!doctype html><!--note--><p @click=go>x";
+/// let default = html_to_xhtml_with(page, &HtmlOptions::default())?;
+/// assert!(default.contains("<!--note-->"));
+/// assert!(default.contains("U000040click"));
+/// assert!(!default.contains("<!DOCTYPE"));
+/// let opts = HtmlOptions::new().keep_doctype(true).keep_comments(false)
+///     .coercion(Coercion::Drop);
+/// let xhtml = html_to_xhtml_with(page, &opts)?;
+/// assert!(xhtml.starts_with("<!DOCTYPE html>"));
+/// assert!(!xhtml.contains("<!--note-->"));
+/// assert!(!xhtml.contains("click"));
+/// let opts = HtmlOptions::new().coercion(Coercion::Reject);
+/// assert_eq!(html_to_xhtml_with(page, &opts).unwrap_err().kind(), exi::ErrorKind::Xml);
+/// # }
+/// # Ok::<(), exi::Error>(())
+/// ```
+#[derive(Clone, Debug)]
 pub struct HtmlOptions {
     coercion: Coercion,
     keep_doctype: bool,
     keep_comments: bool,
+}
+
+impl Default for HtmlOptions {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl HtmlOptions {
@@ -150,7 +177,7 @@ pub fn coerce_name(name: &str) -> Option<String> {
             is_name_char(c) && c != ':'
         }
     };
-    if !name.is_empty() && name.chars().enumerate().all(|(i, c)| ok(i, c)) {
+    if is_ncname(name) {
         return None;
     }
     let mut out = String::with_capacity(name.len() + 8);
@@ -174,38 +201,38 @@ pub fn coerce_name(name: &str) -> Option<String> {
 /// ```
 /// use exi::html::uncoerce_name;
 /// assert_eq!(uncoerce_name("U000040click"), "@click");
-/// assert_eq!(uncoerce_name("data-x"), "data-x");
+/// assert!(matches!(uncoerce_name("ÜU0000é"), std::borrow::Cow::Borrowed(_)));
+/// assert_eq!(uncoerce_name("U000040U00003A"), "@:");
+/// assert_eq!(uncoerce_name("U110000"), "U110000");
 /// ```
 pub fn uncoerce_name(name: &str) -> Cow<'_, str> {
-    if !name.contains('U') {
-        return Cow::Borrowed(name);
-    }
-    let b = name.as_bytes();
-    let mut out = String::with_capacity(name.len());
-    let mut i = 0;
-    let mut changed = false;
-    while i < b.len() {
-        if b[i] == b'U'
-            && i + 7 <= b.len()
-            && b[i + 1..i + 7]
-                .iter()
-                .all(|c| c.is_ascii_digit() || (b'A'..=b'F').contains(c))
+    let mut out = None;
+    let mut last = 0;
+    for (i, _) in name.match_indices('U') {
+        let Some(hex) = name.get(i + 1..i + 7) else { continue };
+        if !hex
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'A'..=b'F').contains(&c))
         {
-            let hex = &name[i + 1..i + 7];
-            if let Some(c) =
-                u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
-            {
-                out.push(c);
-                i += 7;
-                changed = true;
-                continue;
-            }
+            continue;
         }
-        let c = name[i..].chars().next().expect("in bounds");
+        let Some(c) =
+            u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
+        else {
+            continue;
+        };
+        let out = out.get_or_insert_with(|| String::with_capacity(name.len()));
+        out.push_str(&name[last..i]);
         out.push(c);
-        i += c.len_utf8();
+        last = i + 7;
     }
-    if changed { Cow::Owned(out) } else { Cow::Borrowed(name) }
+    match out {
+        Some(mut out) => {
+            out.push_str(&name[last..]);
+            Cow::Owned(out)
+        }
+        None => Cow::Borrowed(name),
+    }
 }
 
 /// Text with form feeds as spaces and characters XML does not allow as
@@ -251,6 +278,20 @@ pub(crate) fn xml_comment(s: &str) -> Cow<'_, str> {
 /// Turns an HTML tree into events: markup5ever's [`Serializer`], over
 /// any [`EventSink`]. For trees that implement markup5ever's
 /// [`Serialize`] (RcDom, scraper, kuchikiki); [`encode_dom`] drives it.
+///
+/// ```
+/// use exi::html::{HtmlOptions, HtmlSerializer};
+/// use exi::OwnedEvent;
+/// use markup5ever::serialize::Serializer;
+/// let mut events = Vec::<OwnedEvent>::new();
+/// let mut serializer = HtmlSerializer::new(&mut events, HtmlOptions::new());
+/// serializer.write_text("a\u{c}b").unwrap();
+/// serializer.finish()?;
+/// assert_eq!(events, [OwnedEvent::StartDocument,
+///     OwnedEvent::Characters(exi::OwnedValue::Str("a b".into())),
+///     OwnedEvent::EndDocument]);
+/// # Ok::<(), exi::Error>(())
+/// ```
 pub struct HtmlSerializer<'s, S: EventSink> {
     sink: &'s mut S,
     opts: HtmlOptions,
@@ -328,8 +369,7 @@ impl<S: EventSink> Serializer for HtmlSerializer<'_, S> {
         self.emit(|s| {
             let local = s.local(&name.local)?;
             s.sink.event(&Event::StartElement(event_name(&name, &local)))?;
-            let mut seen: std::vec::Vec<(String, String)> =
-                std::vec::Vec::new();
+            let mut seen: Vec<(&str, Cow<'_, str>)> = Vec::new();
             for (q, v) in attrs {
                 if &*q.ns == XMLNS
                     || (q.ns.is_empty()
@@ -352,16 +392,18 @@ impl<S: EventSink> Serializer for HtmlSerializer<'_, S> {
                 };
                 // After rewriting two names can meet; the first stays,
                 // as html5ever keeps the first of duplicate attributes.
-                let key = (q.ns.to_string(), local.to_string());
-                if seen.contains(&key) {
+                if seen
+                    .iter()
+                    .any(|(ns, name)| *ns == &*q.ns && *name == local)
+                {
                     continue;
                 }
-                seen.push(key);
                 let value = xml_text(v);
                 s.sink.event(&Event::Attribute(
                     event_name(q, &local),
                     Value::Str(&value),
                 ))?;
+                seen.push((&q.ns, local));
             }
             Ok(())
         })
@@ -419,6 +461,24 @@ impl<S: EventSink> Serializer for HtmlSerializer<'_, S> {
 /// Writes a markup5ever tree's events to `sink`: StartDocument, the
 /// nodes `scope` selects (`ChildrenOnly(None)` for a document),
 /// EndDocument.
+///
+/// ```
+/// # #[cfg(feature = "html5ever")] {
+/// use exi::html::{HtmlOptions, encode_dom};
+/// use exi::OwnedEvent;
+/// use html5ever::{parse_document, tendril::TendrilSink};
+/// use markup5ever::serialize::TraversalScope;
+/// use markup5ever_rcdom::{RcDom, SerializableHandle};
+/// let dom = parse_document(RcDom::default(), Default::default()).one("<p>Hello");
+/// let tree = SerializableHandle::from(dom.document.clone());
+/// let mut events = Vec::<OwnedEvent>::new();
+/// encode_dom(&tree, TraversalScope::ChildrenOnly(None), &mut events, &HtmlOptions::new())?;
+/// assert_eq!(events.first(), Some(&OwnedEvent::StartDocument));
+/// assert_eq!(events.last(), Some(&OwnedEvent::EndDocument));
+/// assert!(events.contains(&OwnedEvent::Characters(exi::OwnedValue::Str("Hello".into()))));
+/// # }
+/// # Ok::<(), exi::Error>(())
+/// ```
 pub fn encode_dom<T: Serialize, S: EventSink>(
     tree: &T,
     scope: TraversalScope,

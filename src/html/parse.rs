@@ -27,7 +27,7 @@ use crate::{Error, ErrorKind, EventSink, Result};
 ///
 /// ```
 /// use exi::html::{encode_html, HtmlOptions};
-/// use exi::{OwnedEvent, OwnedValue};
+/// use exi::OwnedEvent;
 /// let mut events: Vec<OwnedEvent> = Vec::new();
 /// encode_html("<p @click=go>x", &mut events, &HtmlOptions::new())?;
 /// // html, head, body, p: the parser adds what the page leaves out.
@@ -48,9 +48,6 @@ pub fn encode_html<S: EventSink>(
     let mut ser = HtmlSerializer::new(sink, opts.clone());
     for child in dom.document.children.borrow().iter() {
         walk(child, &mut ser)?;
-    }
-    if let Some(e) = ser.error.take() {
-        return Err(e);
     }
     ser.finish()
 }

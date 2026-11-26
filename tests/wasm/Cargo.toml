@@ -1,0 +1,18 @@
+[package]
+name = "exi-wasm-test"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+exi = { path = "../..", default-features = false, features = ["bare-header-only"] }
+exi-esp32c6 = { path = "../../examples/esp32c6" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

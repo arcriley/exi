@@ -37,7 +37,7 @@
 //! 6. **Typed values** (schema-informed): a value given as text for a
 //!    typed slot is parsed into the slot's datatype; a typed value is
 //!    checked against it.
-//! 7. **Refused events** (D23): under `strict`, an event that fits no
+//! 7. **Refused events**: under `strict`, an event that fits no
 //!    production — an undeclared element or attribute, a value the type
 //!    cannot hold, a missing required attribute before content —
 //!    returns `ErrorKind::Unencodable`. Nothing is written and nothing
@@ -469,8 +469,8 @@ pub enum DeviationKind {
 }
 
 /// Counts of [`DeviationKind`]s, by element and name: what a page
-/// needed that the schema lacks, for proposing the next schema version
-/// (Appendix D.7).
+/// needed that the schema lacks, for proposing the next schema
+/// version.
 ///
 /// ```
 /// use exi::{DeviationKind, Deviations};
@@ -667,7 +667,7 @@ impl Deviations {
 /// Strict schema-informed: `<reading
 /// unit="C"><temp>21</temp></reading>` (the grammar of [`GrammarBuilder`](crate::grammar::informed::GrammarBuilder)'s example). Every code
 /// has one alternative except DocContent's, so only values take octets.
-/// A refused event changes nothing (D23).
+/// A refused event changes nothing.
 ///
 /// ```
 /// use exi::{Writer, WriterConfig, Options, Coding, Header, EventSink, ErrorKind, OwnedName};

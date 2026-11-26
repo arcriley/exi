@@ -9,7 +9,7 @@
 // communicating that changes are made under these same conditions.
 //
 //! Always compiled: the header and its options document are bit-packed
-//! in every stream (D18). Bit-packed *bodies* need the feature
+//! in every stream. Bit-packed *bodies* need the feature
 //! `bit-packed`.
 //!
 //! Bits are packed most significant first: the first bit written is bit

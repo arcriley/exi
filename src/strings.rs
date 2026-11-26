@@ -362,7 +362,7 @@ impl<K: Kind> GlobalTable<K> {
     /// # Ok::<(), exi::Error>(())
     /// ```
     ///
-    /// Each kind is its own table (ST1):
+    /// Each kind is its own table:
     ///
     /// ```
     /// # use exi::strings::{GlobalStrings, GlobalConfig};
@@ -372,7 +372,7 @@ impl<K: Kind> GlobalTable<K> {
     /// # Ok::<(), exi::Error>(())
     /// ```
     ///
-    /// A value id cannot be used with the URI table (ST7):
+    /// A value id cannot be used with the URI table:
     ///
     /// ```compile_fail
     /// # use exi::strings::{GlobalStrings, GlobalConfig};
@@ -519,7 +519,7 @@ impl<K: Kind> GlobalTable<K> {
     }
 }
 
-/// A reference to one string, released when dropped (ST5). Cloning adds
+/// A reference to one string, released when dropped. Cloning adds
 /// a reference.
 ///
 /// The string's bytes cannot change while a `Held` exists, so
@@ -768,7 +768,7 @@ impl<K: Kind> Drop for PendingStr<'_, K> {
     }
 }
 
-/// The four global tables (ST1). Sessions borrow one; sessions that
+/// The four global tables. Sessions borrow one; sessions that
 /// should not share memory or timing with each other, such as different
 /// tenants, use separate ones.
 ///

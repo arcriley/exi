@@ -1,6 +1,6 @@
 // src/xml/mod.rs
 //
-// XML 1.0 event reader and writer (D4)
+// XML 1.0 event reader and writer
 // Copyright © 2026 Arc Riley
 //
 // This file is free software and available for distribution by

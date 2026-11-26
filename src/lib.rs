@@ -59,13 +59,13 @@
 //! |---|---|
 //! | [`error`], [`limits`] | errors and limits for hostile input |
 //! | [`name`], [`value`], [`event`] | the data model |
-//! | [`stream`] | event sources, sinks, push handlers, `transcode` |
+//! | [`stream`] | event sources and sinks, `transcode` |
 //! | [`options`], [`header`] | options and the stream header |
-//! | [`coding`] | sinks, bit and byte coders, datatype and name coding |
+//! | [`coding`] | sinks, bit and byte coders, datatype coding |
 //! | [`strings`] | shared string storage |
 //! | [`grammar`] | built-in and schema-informed grammars, `.exig` files |
 //! | [`reader`], [`writer`] | EXI in and out |
-//! | [`xml`] | XML text in and out (feature `xml`) |
+//! | `xml` | XML text in and out (feature `xml`) |
 //! | `xsd` | XSD documents to grammars (feature `xsd`) |
 //! | `infer` | schemas learned from example documents (feature `infer`) |
 //! | `dom` | layer 2: the document tree, after libxml2's (feature `dom`) |
@@ -106,6 +106,7 @@
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
+#![deny(rustdoc::broken_intra_doc_links, rustdoc::private_intra_doc_links)]
 
 extern crate alloc;
 #[cfg(feature = "std")]

@@ -14,7 +14,7 @@
 //! (`exi::capi`), so the stable ABI stays small; specific reasons
 //! travel in [`Error::detail`].
 //!
-//! # Fatal and non-fatal errors (A5, D23)
+//! # Fatal and non-fatal errors
 //!
 //! After an error, a reader or writer is **poisoned**: every later call
 //! except dropping it returns `ErrorKind::State`. The one exception is
@@ -165,7 +165,7 @@ impl Error {
     pub const fn detail(&self) -> &'static str {
         self.detail
     }
-    /// False only for `ErrorKind::Unencodable` (D23).
+    /// False only for `ErrorKind::Unencodable`.
     ///
     /// ```
     /// use exi::{Error, ErrorKind, Position};

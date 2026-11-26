@@ -47,7 +47,7 @@ typedef int32_t exi_status;
 /* ----- version and features ----- */
 
 #define EXI_ABI_MAJOR 0
-#define EXI_ABI_MINOR 11
+#define EXI_ABI_MINOR 12
 
 #define EXI_FEAT_DEFLATE (1 << 0)
 #define EXI_FEAT_XML_TEXT (1 << 1)
@@ -279,7 +279,6 @@ typedef struct exi_strings_config {
 #define EXI_SEQ_STREAMS 1
 #define EXI_SEQ_FRAMES 2
 
-#define EXI_RD_START_TAG (1 << 1)
 #define EXI_RD_XML_DOCTYPE (1 << 3)
 #define EXI_RD_XML_PREDEFINED_ONLY (1 << 4)
 

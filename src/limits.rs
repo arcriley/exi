@@ -8,9 +8,9 @@
 // are welcome only if this notice remains unchanged clearly
 // communicating that changes are made under these same conditions.
 //
-//! Every limit is checked **before** the memory it guards is allocated
-//! (A8), and reaching one returns `ErrorKind::Limit`. A reader or
-//! writer is then poisoned (A5); the application drops it and, on a
+//! Every limit is checked **before** the memory it guards is allocated,
+//! and reaching one returns `ErrorKind::Limit`. A reader or writer is
+//! then poisoned; the application drops it and, on a
 //! connection, reconnects with a new stream.
 //!
 //! | Limit | Default | `device()` | Counts | Checked by |
@@ -31,7 +31,7 @@
 //! | `max_block_bytes` | 67 108 864 | 65 536 | octets one DEFLATE stream inflates to | reader |
 //!
 //! The defaults are placeholders until the benchmark suite tunes them
-//! against real documents (D34). A limit of 0 is allowed and means
+//! against real documents. A limit of 0 is allowed and means
 //! "none allowed": `max_depth(0)` rejects the first element.
 
 /// Limits for one reader, writer or XML reader. Builder methods,

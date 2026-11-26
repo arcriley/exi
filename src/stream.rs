@@ -1,6 +1,6 @@
 // src/stream.rs
 //
-// Event sources, event sinks and push handlers.
+// Event sources and event sinks.
 // Copyright © 2026 Arc Riley
 //
 // This file is free software and available for distribution by
@@ -12,6 +12,12 @@
 //! reader), and every back end an [`EventSink`] (the EXI [`Writer`](crate::Writer), the XML
 //! text writer). Converting one format into another is one loop:
 //! [`transcode`].
+//!
+//! Sources are pulled, not pushed: the caller owns the loop and calls
+//! `next` when it wants an event. A reader then needs no machinery to
+//! stop and resume a callback mid-document; it returns `NeedInput` and
+//! continues on the next call. A push (callback) style is a few lines
+//! over `next` where an application wants one.
 //!
 //! Call [`EventSource::next`] directly to inspect event metadata or
 //! stop after a particular event.

@@ -138,9 +138,9 @@
 //! from the application. A header carrying an options document returns
 //! `ErrorKind::Unsupported`.
 //!
-//! These tables were derived by hand from the options schema. Before
-//! this module is marked done, its header test vectors are confirmed
-//! against fixtures from a second implementation (D6).
+//! These tables were derived by hand from the options schema.
+//! `tests/fixtures.rs` checks headers with options against streams
+//! EXIficient wrote.
 
 use crate::coding::bits::{BitDecoder, BitEncoder};
 #[cfg(any(

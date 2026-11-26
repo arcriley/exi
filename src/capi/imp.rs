@@ -1026,12 +1026,7 @@ pub(super) unsafe fn writer_new(c: &exi_writer_config) -> Option<WriterObj> {
 pub(super) unsafe fn reader_new(c: &exi_reader_config) -> Option<ReaderObj> {
     if c.sequence > EXI_SEQ_FRAMES
         || c.format > EXI_FORMAT_XML
-        || (c.format == EXI_FORMAT_EXI && c.flags & EXI_RD_START_TAG != 0)
-        || c.flags
-            & !(EXI_RD_START_TAG
-                | EXI_RD_XML_DOCTYPE
-                | EXI_RD_XML_PREDEFINED_ONLY)
-            != 0
+        || c.flags & !(EXI_RD_XML_DOCTYPE | EXI_RD_XML_PREDEFINED_ONLY) != 0
     {
         return None;
     }

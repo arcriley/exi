@@ -113,7 +113,7 @@ cargo rustc --release --lib --features capi -- --crate-type cdylib
 On Linux this produces `target/release/libexi.so`. `include/exi.h` declares the
 reader, writer and grammar API. `include/exi_dom.h` declares the document tree,
 and `include/exi_libxml_compat.h` maps libxml2's tree API onto it. The C ABI is
-at version 0.11 and is not frozen.
+at version 0.12 and is not frozen.
 
 ## Building and testing
 

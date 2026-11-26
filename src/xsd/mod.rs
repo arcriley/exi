@@ -10,7 +10,7 @@
 //
 //! [`XsdCompiler`] reads XSD documents and builds a [`GrammarSet`] in
 //! memory: the same tables `GrammarSet::from_exig` loads from an
-//! `.exig` file and [`GrammarBuilder`] builds in code (A2). A set from
+//! `.exig` file and [`GrammarBuilder`] builds in code. A set from
 //! a schema is used directly, or saved with `GrammarSet::to_exig`.
 //!
 //! ```

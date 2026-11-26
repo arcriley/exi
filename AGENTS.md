@@ -197,7 +197,7 @@ Findings so far (synthetic XMPP data):
 
 ## C ABI
 
-- `EXI_ABI_MAJOR` 0, `EXI_ABI_MINOR` 11. Config structs grow only at the end.
+- `EXI_ABI_MAJOR` 0, `EXI_ABI_MINOR` 12. Config structs grow only at the end.
 - Status codes: `EXI_OK` 0, `EXI_END` 1, `EXI_NEED_INPUT` 2, negative codes one per
   `ErrorKind`.
 - Strings are `exi_str { ptr, len }`, UTF-8. Strings libexi returns also end with a NUL
@@ -224,10 +224,10 @@ Findings so far (synthetic XMPP data):
   a QName and cannot decode the reference stream.
 - The generator for `schemas/xhtml5-1.xsd` (`gen_xhtml5.py`) lives outside the repo.
   Add it, or record how the schema is maintained.
-- No CI yet. The blueprint plans `cargo hack --each-feature`, `no_std` builds for
+- No CI yet. Planned: `cargo hack --each-feature`, `no_std` builds for
   `thumbv7em-none-eabihf` and `riscv32imac-unknown-none-elf`, `wasm32-unknown-unknown`,
   the shared library, and header checks.
-- No fuzzing harness yet (the blueprint asks for 24 h clean on every target).
+- No fuzzing harness yet. The goal is 24 hours without a failure on every target.
 - The W3C EXI test suite: `tests/w3c.rs` runs 3,172 interoperability encodings. 385 of
   them fail, and `tests/w3c-known.tsv` lists each with its reason; 284 of those are
   marked `investigate`.
@@ -243,9 +243,7 @@ Findings so far (synthetic XMPP data):
 - The XMPP sessions are synthetic. Real logged sessions (chat, IoT, ad hoc commands)
   would make the numbers trustworthy.
 
-### Blueprint items not built yet (draft 14)
-
-Draft 14 of the blueprint is the current design. It lives outside the repo and is never added to it.
+### Designed, not built yet
 
 - Global string pool for many threads (`SyncStringPool`). Open: append-only chunks that
   readers reach without a lock, with locks only for the index and counts. Needs a
@@ -257,25 +255,28 @@ Draft 14 of the blueprint is the current design. It lives outside the repo and i
 - EXI Profile parameters.
 - Datatype representation maps (`dtrm`, optional under EXI §10.2).
 - Spec-notation event tracing (`trace`).
-- XMPP support (blueprint Appendix E).
+- XMPP support: the EXI binding of XEP-0322, which Arc is revising outside this repo
+  (see "Outside this repository").
 - A device crate for known schemas that builds for Cortex-M and RISC-V, with memory per
   connection measured. Devices are expected to have a heap (the MicroPython class) and
   load grammars from `.exig`.
 - The browser build (`wasm32`, `xhtml5`).
 - ABI 1.0 frozen after layer 2 is finished.
 
-Open questions in draft 14:
+Open questions:
 
 - Should C programs be able to supply their own allocator (per reader like expat, or
   per process like libxml2)? It can be added after 1.0.
 - Coarse error kinds with a message, or stable numbers for each specific fault?
-- `.exig` (Appendix C): the namespace URI and W3C location; ordering by canonical order
-  or by source-schema order; whether to carry representation maps; whether to define a
-  text form.
-- HTML (Appendix D): permanent profile identifiers in place of `urn:libexi:`; typed
+- `.exig` (`EXIG.md`): the namespace URI (`urn:exig:draft-1` is a placeholder) and W3C
+  location; whether to carry datatype representation maps; whether `.exig` files should
+  carry compression dictionaries, which is still being discussed. Order is settled: the
+  canonical order `EXIG.md` describes. The XML form `exi exig` prints serves as the text
+  form.
+- HTML profile: permanent profile identifiers in place of `urn:libexi:`; typed
   attributes in profile version 2 (`width`, `tabindex`); registering the `schema`
   parameter of `application/exi`.
-- XMPP (Appendix E): proposing grammars instead of schemas in XEP-0322 configurations.
+- XMPP: proposing grammars instead of schemas in XEP-0322 configurations.
 
 ### Not designed yet
 
@@ -290,8 +291,8 @@ These have not been discussed in depth. Ask Arc before starting any of them.
 
 ## Outside this repository
 
-- The blueprint documents (draft 14: core, stringtables, exig, html, xmpp, history,
-  examples) are design documents. They are never added to the repo.
+- Arc's design drafts are never added to the repo, and nothing here depends on them.
+  Whatever the code relies on is written in this file, `EXIG.md` or the module docs.
 - The XEP-0322 revision is a separate `xep-0322.xml` (draft 0.7.0). Keep XEP work out of
-  this repo and out of the blueprint.
+  this repo.
 - Arc is also writing a separate XEP to negotiate compression in XMPP.

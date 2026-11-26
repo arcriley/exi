@@ -23,7 +23,7 @@
 //! decodes as wrong data.
 //!
 //! [`SessionTables`] are those tables. Each entry is the id of a string
-//! in the [`GlobalStrings`] (ST2), so a string is stored once however
+//! in the [`GlobalStrings`], so a string is stored once however
 //! many sessions use it. The numbers are exactly EXI's; sharing changes
 //! nothing a stream writes.
 //!
@@ -141,7 +141,7 @@
 //! recent number. A libexi writer always looks first, so it never
 //! adds a duplicate.
 //!
-//! # Writer policy (ST3)
+//! # Writer policy
 //!
 //! libexi writers leave `valuePartitionCapacity` unset, so their value
 //! partitions only grow. When a session reaches
@@ -534,8 +534,7 @@ pub enum ValueHit {
     Miss,
 }
 
-/// EXI's string tables for one stream (R1), as arrays of global ids
-/// (ST2).
+/// EXI's string tables for one stream (R1), as arrays of global ids.
 ///
 /// Setup used by the examples:
 ///

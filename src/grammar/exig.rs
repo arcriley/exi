@@ -9,10 +9,10 @@
 // communicating that changes are made under these same conditions.
 //
 //! `.exig` grammar files: schema-informed grammars saved as EXI, and
-//! loaded back without an XSD compiler (Appendix C of the blueprint;
-//! the vocabulary is `schemas/exig-1.xsd`).
+//! loaded back without an XSD compiler. `EXIG.md` describes the format;
+//! the vocabulary is `schemas/exig-1.xsd`.
 //!
-//! A grammar set from [`GrammarSet::from_xsd`](crate::grammar::GrammarSet::from_xsd), from
+//! A grammar set from `GrammarSet::from_xsd` (feature `xsd`), from
 //! [`GrammarBuilder`](crate::grammar::informed::GrammarBuilder) or from an `.exig` file is
 //! the same in memory, and [`GrammarSet::to_exig`] writes any of them.
 //! Loading with [`GrammarSet::from_exig`] gives grammars that code
@@ -50,7 +50,7 @@
 //! EXI `schemaId`.
 //!
 //! Reading checks everything a stream relies on before the grammars are
-//! used (C.6): every number refers to something that exists,
+//! used: every number refers to something that exists,
 //! productions are in event-code order with no repeats, and facets fit
 //! their representation. A file that fails any check is
 //! `ErrorKind::Schema`.
@@ -313,7 +313,7 @@ impl Model {
         Ok(m)
     }
 
-    /// The grammar set: the builder checks everything (C.6).
+    /// The grammar set: the builder checks everything.
     pub(crate) fn build(&self) -> Result<GrammarSet> {
         let mut b = GrammarSet::builder();
         for r in &self.simple {
@@ -1379,7 +1379,7 @@ impl GrammarSet {
         with_exig(|g| write_doc(g, &d))
     }
 
-    /// Reads an `.exig` file and checks it (C.6) under default limits.
+    /// Reads an `.exig` file and checks it under default limits.
     ///
     /// ```
     /// use exi::grammar::GrammarSet;

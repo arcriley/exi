@@ -18,11 +18,11 @@
 //! | Rule | Detail |
 //! |---|---|
 //! | Status codes | `exi_status` (`int32_t`): `EXI_OK` 0, `EXI_END` 1, `EXI_NEED_INPUT` 2, negative codes one per `ErrorKind` (see [`crate::ErrorKind`]) |
-//! | Strings | `exi_str { ptr, len }`, UTF-8. Strings libexi returns also have a NUL at `ptr[len]` that `len` does not count (D32). Strings passed in need no NUL. An `exi_str` with `len` 0 may have a NULL `ptr` |
+//! | Strings | `exi_str { ptr, len }`, UTF-8. Strings libexi returns also have a NUL at `ptr[len]` that `len` does not count. Strings passed in need no NUL. An `exi_str` with `len` 0 may have a NULL `ptr` |
 //! | Objects | opaque pointers. `_free(NULL)` is a no-op. Every handle starts with a magic tag; each call checks it and returns `EXI_E_ARG` (or NULL) for a wrong or freed handle |
 //! | Config structs | start with `uint32_t size` = `sizeof` the struct the caller was compiled with. They only grow at the end; fields beyond `size` read as zero, and zero means the default. Constants are plain integers: an unknown value is `EXI_E_ARG` |
 //! | Panics | every export catches panics and returns `EXI_E_INTERNAL` (or NULL); the object is poisoned. Callbacks are plain `extern "C"` and must not unwind |
-//! | Poisoning | after a fatal error every call on the object except `_free` returns `EXI_E_STATE`. `EXI_E_UNENCODABLE` is not fatal (D23) |
+//! | Poisoning | after a fatal error every call on the object except `_free` returns `EXI_E_STATE`. `EXI_E_UNENCODABLE` is not fatal |
 //! | Threads | readers, writers and string tables: one thread at a time. Grammar sets are immutable and may be shared |
 //! | Lifetimes | an `exi_strings` must outlive every reader and writer using it. Event payloads are valid until the next call on the same reader |
 //!
@@ -160,7 +160,7 @@ pub const EXI_E_UNENCODABLE: exi_status = -16;
 
 /// The ABI version: major in the high 16 bits, minor in the low 16.
 pub const EXI_ABI_MAJOR: u32 = 0;
-pub const EXI_ABI_MINOR: u32 = 11;
+pub const EXI_ABI_MINOR: u32 = 12;
 
 /// Feature bits from [`exi_features`].
 pub const EXI_FEAT_XML_TEXT: u64 = 1 << 1;
@@ -444,7 +444,6 @@ pub const EXI_FORMAT_XML: u32 = 1;
 pub const EXI_SEQ_SINGLE: u32 = 0;
 pub const EXI_SEQ_STREAMS: u32 = 1;
 pub const EXI_SEQ_FRAMES: u32 = 2;
-pub const EXI_RD_START_TAG: u32 = 1 << 1;
 pub const EXI_RD_XML_DOCTYPE: u32 = 1 << 3;
 pub const EXI_RD_XML_PREDEFINED_ONLY: u32 = 1 << 4;
 pub const EXI_FEED_FINAL: u32 = 1 << 0;
@@ -1199,12 +1198,8 @@ pub unsafe extern "C" fn exi_grammar_set_digest(
 ///     assert_eq!(types, [EXI_EV_SD, EXI_EV_SE, EXI_EV_EE, EXI_EV_ED]);
 ///     exi_reader_free(r);
 ///     exi_reader_free(core::ptr::null_mut());                 // no-op
-///     cfg.flags = EXI_RD_START_TAG;
+///     cfg.flags = 1 << 1;                                     // not a reader flag
 ///     assert!(exi_reader_new(&cfg).is_null());
-///     cfg.format = EXI_FORMAT_XML;
-///     let xml = exi_reader_new(&cfg);
-///     assert!(!xml.is_null());
-///     exi_reader_free(xml);
 ///     cfg.flags = 0;
 ///     cfg.input_buffer_size = 100;                            // not an allowed size
 ///     assert!(exi_reader_new(&cfg).is_null());

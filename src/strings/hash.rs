@@ -8,7 +8,7 @@
 // are welcome only if this notice remains unchanged clearly
 // communicating that changes are made under these same conditions.
 //
-//! The string hash of the global tables (ST6).
+//! The string hash of the global tables.
 //!
 //! The hash only spreads strings over index keys. It is not
 //! cryptographic, and a wrong guess costs a byte comparison, never a

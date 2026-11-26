@@ -801,7 +801,7 @@ impl Schema {
 /// the order of their first member. No event code changes: equivalent
 /// states have the same productions in the same order.
 ///
-/// So a grammar has one form however it was built (A2): the XSD
+/// So a grammar has one form however it was built: the XSD
 /// compiler gives a repeated choice of N elements N states with the
 /// same productions, and they become one.
 ///

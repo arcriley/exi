@@ -45,7 +45,7 @@
 //!
 //! # libexi additions
 //!
-//! - `EndElement` carries the element's name (D13). EXI's EE has none;
+//! - `EndElement` carries the element's name. EXI's EE has none;
 //!   the reader keeps an element stack anyway and fills it in.
 //!
 //! # Attribute order
@@ -76,7 +76,7 @@ pub enum Event<'a> {
     StartDocument,
     EndDocument,
     StartElement(Name<'a>),
-    /// The name of the element that ends (D13).
+    /// The name of the element that ends.
     EndElement(Name<'a>),
     Attribute(Name<'a>, Value<'a>),
     Characters(Value<'a>),

@@ -8,8 +8,8 @@
 // are welcome only if this notice remains unchanged clearly
 // communicating that changes are made under these same conditions.
 //
-//! A released version is a frozen coding schema, `urn:libexi:xhtml5:N`
-//! (Appendix D). Its grammars ship with the library as an `.exig`, so
+//! A released version is a frozen coding schema, `urn:libexi:xhtml5:N`.
+//! Its grammars ship with the library as an `.exig`, so
 //! encoding and decoding pages needs no XSD compiler, and the grammar
 //! digest is pinned in tests: a decoder that holds other grammars under
 //! the same id must refuse them.
@@ -269,7 +269,7 @@ pub fn decode(exi: &[u8], version: u32) -> Result<String> {
 }
 
 /// What a page needs that the version's schema does not declare: the
-/// deviations its encoding counts (Appendix D.7). Merge them over many
+/// deviations its encoding counts. Merge them over many
 /// pages to propose the next version.
 ///
 /// ```

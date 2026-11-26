@@ -69,7 +69,7 @@ impl<'g, const N: usize> Reader<'g, N> {
             ));
         }
         if let Some((name, slot)) = b.last_deferred.take() {
-            b.pending.push(crate::block::PendingValue {
+            b.pending.push(crate::coding::block::PendingValue {
                 qi: self.queue.len() - 1,
                 name,
                 slot,

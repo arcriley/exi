@@ -232,11 +232,11 @@ zerobits-strict-pre	pre,strict	zerobits.xml	zerobits.xsd
 # The channels schema learned by exi infer --exact. Its rare and note channels hold one
 # enumerated value each, so their values take no octets: EXIficient writes an empty DEFLATE
 # stream for that group, which EXI 9.3 says not to do, and cannot read streams without it.
-# This crate writes the same (src/block.rs).
+# This crate writes the same (src/coding/block.rs).
 channels-strict-byte	byte,strict	channels.xml	inferred/channels-exact/schema.xsd
 channels-strict-pre	pre,strict	channels.xml	inferred/channels-exact/schema.xsd
 channels-strict-comp	compression,strict	channels.xml	inferred/channels-exact/schema.xsd
-# Empty DEFLATE streams: where EXIficient writes them (see src/block.rs). bigonly has no
+# Empty DEFLATE streams: where EXIficient writes them (see src/coding/block.rs). bigonly has no
 # channel of at most 100 values; onevalue's k channel holds one enumerated value, so it
 # takes no octets; zero60 with blocks of 60 ends with a block of zero-bit EE and ED.
 bigonly-comp	compression	bigonly.xml	-

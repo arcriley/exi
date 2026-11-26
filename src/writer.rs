@@ -55,7 +55,7 @@
 //! 10. **Blocks** (pre-compression and compression): values wait until
 //!     their block of `blockSize` values is complete, then go out in
 //!     channel order, with the string tables updated in that order (EXI
-//!     §9, `crate::block`). The DEFLATE level is
+//!     §9, `crate::coding::block`). The DEFLATE level is
 //!     [`WriterConfig::deflate_level`].
 //! 11. **Ends.** `end_document` writes ED, pads to an octet, writes the
 //!     last block, and flushes. It is an error (`ErrorKind::State`)
@@ -1325,7 +1325,7 @@ impl<'g, S: Sink> Writer<'g, S> {
         let id = match t {
             Terminal::SE(id) | Terminal::AT(id) => {
                 if prefixes {
-                    engine::write_prefix(
+                    names::write_prefix(
                         &mut self.enc,
                         &self.tables,
                         id.uri,
@@ -1342,7 +1342,7 @@ impl<'g, S: Sink> Writer<'g, S> {
                     n.local_name(),
                 )?;
                 if prefixes {
-                    engine::write_prefix(
+                    names::write_prefix(
                         &mut self.enc,
                         &self.tables,
                         u,

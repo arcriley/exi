@@ -16,10 +16,12 @@
 //! |---|---|---|
 //! | `BitPacked` | [`BitEncoder`] | [`BitDecoder`] |
 //! | `ByteAligned` | [`ByteEncoder`] | [`ByteDecoder`] |
-//! | `PreCompression`, `Compression` | byte-aligned, into channel buffers (`crate::block`) | [`ByteDecoder`] over one channel's octets |
+//! | `PreCompression`, `Compression` | byte-aligned, into channel buffers (`crate::coding::block`) | [`ByteDecoder`] over one channel's octets |
 
 use alloc::string::String;
 
+#[cfg(feature = "compression")]
+use super::block::BlockEncoder;
 use crate::coding::bits::{BitDecoder, BitEncoder};
 use crate::coding::byte_aligned::{ByteDecoder, ByteEncoder};
 use crate::coding::{Channel, Decoder, Encoder, Sink};
@@ -30,7 +32,7 @@ pub(crate) enum BodyEncoder<S: Sink> {
     Byte(ByteEncoder<S>),
     Bit(BitEncoder<S>),
     #[cfg(feature = "compression")]
-    Block(crate::block::BlockEncoder<S>),
+    Block(BlockEncoder<S>),
 }
 
 impl<S: Sink> BodyEncoder<S> {
@@ -43,21 +45,17 @@ impl<S: Sink> BodyEncoder<S> {
         match options.coding() {
             Coding::BitPacked => BodyEncoder::Bit(BitEncoder::new(sink)),
             #[cfg(feature = "compression")]
-            Coding::PreCompression => {
-                BodyEncoder::Block(crate::block::BlockEncoder::new(
-                    sink,
-                    options.block_size(),
-                    None,
-                ))
-            }
+            Coding::PreCompression => BodyEncoder::Block(BlockEncoder::new(
+                sink,
+                options.block_size(),
+                None,
+            )),
             #[cfg(feature = "compression")]
-            Coding::Compression => {
-                BodyEncoder::Block(crate::block::BlockEncoder::new(
-                    sink,
-                    options.block_size(),
-                    Some(level),
-                ))
-            }
+            Coding::Compression => BodyEncoder::Block(BlockEncoder::new(
+                sink,
+                options.block_size(),
+                Some(level),
+            )),
             _ => BodyEncoder::Byte(ByteEncoder::new(sink)),
         }
     }

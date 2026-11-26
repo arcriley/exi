@@ -67,18 +67,7 @@ impl<S: Sink> ByteEncoder<S> {
 
 impl<S: Sink> Encoder for ByteEncoder<S> {
     fn nbit(&mut self, _ch: Channel, value: u32, width: u8) -> Result<()> {
-        if width > 32 {
-            return Err(Error::new(
-                ErrorKind::Internal,
-                "n-bit width above 32",
-            ));
-        }
-        if width < 32 && (value >> width) != 0 {
-            return Err(Error::new(
-                ErrorKind::Internal,
-                "n-bit value does not fit its width",
-            ));
-        }
+        super::check_nbit(value, width)?;
         let n = width.div_ceil(8) as usize;
         if n == 0 {
             return Ok(());
@@ -163,12 +152,7 @@ impl<'a> ByteDecoder<'a> {
 /// value is then out of range.
 impl Decoder for ByteDecoder<'_> {
     fn nbit(&mut self, _ch: Channel, width: u8) -> Result<u32> {
-        if width > 32 {
-            return Err(Error::new(
-                ErrorKind::Internal,
-                "n-bit width above 32",
-            ));
-        }
+        super::check_width(width)?;
         let n = width.div_ceil(8) as usize;
         if n > self.remaining() {
             return Err(Error::new(

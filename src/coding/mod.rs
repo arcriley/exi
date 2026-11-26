@@ -62,10 +62,30 @@ use alloc::vec::Vec;
 use crate::{Error, ErrorKind, NameId, Result};
 
 pub mod bits;
+#[cfg(feature = "compression")]
+pub(crate) mod block;
 pub(crate) mod body;
 pub mod byte_aligned;
 pub mod datatypes;
 pub mod names;
+
+fn check_width(width: u8) -> Result<()> {
+    if width > 32 {
+        return Err(Error::new(ErrorKind::Internal, "n-bit width above 32"));
+    }
+    Ok(())
+}
+
+fn check_nbit(value: u32, width: u8) -> Result<()> {
+    check_width(width)?;
+    if width < 32 && (value >> width) != 0 {
+        return Err(Error::new(
+            ErrorKind::Internal,
+            "n-bit value does not fit its width",
+        ));
+    }
+    Ok(())
+}
 
 /// Where encoded octets go.
 ///

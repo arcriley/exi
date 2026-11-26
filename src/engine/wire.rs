@@ -203,25 +203,6 @@ fn read_string<D: Decoder>(d: &mut D, limits: &Limits) -> Result<String> {
     Ok(s)
 }
 
-fn read_prefix<D: Decoder, T: ReadTables + ?Sized>(
-    d: &mut D,
-    t: &T,
-    uri: u32,
-) -> Result<Option<u32>> {
-    let m = t.prefix_count(uri);
-    if m == 0 {
-        return Ok(None);
-    }
-    let n = d.nbit(Channel::Structure, width(m))?;
-    if n >= m {
-        return Err(err(
-            ErrorKind::Grammar,
-            "prefix number beyond the partition",
-        ));
-    }
-    Ok(Some(n))
-}
-
 /// True when a value of this slot and name travels in a value channel:
 /// everything but `xsi:type` and a typed `xsi:nil`, which choose the
 /// grammar (EXI 9.2.1).
@@ -268,13 +249,17 @@ pub(crate) fn decode<D: Decoder, T: ReadTables + ?Sized>(
      -> Result<(NameId, Option<u32>)> {
         match term {
             Terminal::SE(id) | Terminal::AT(id) => {
-                let p =
-                    if prefixes { read_prefix(d, t, id.uri)? } else { None };
+                let p = if prefixes {
+                    names::read_prefix(d, t, id.uri)?
+                } else {
+                    None
+                };
                 Ok((id, p))
             }
             Terminal::SeUri(u) | Terminal::AtUri(u) => {
                 let local = names::read_local(d, t, u, &limits)?;
-                let p = if prefixes { read_prefix(d, t, u)? } else { None };
+                let p =
+                    if prefixes { names::read_prefix(d, t, u)? } else { None };
                 Ok((NameId { uri: u, local }, p))
             }
             _ => names::read_name(d, t, prefixes, &limits),
@@ -344,7 +329,11 @@ pub(crate) fn decode_value<D: Decoder, T: ReadTables + ?Sized>(
         Slot::QName | Slot::TypeName => {
             let uri = names::read_uri(d, t, &limits)?;
             let local = names::read_local(d, t, uri, &limits)?;
-            let p = if st.prefixes() { read_prefix(d, t, uri)? } else { None };
+            let p = if st.prefixes() {
+                names::read_prefix(d, t, uri)?
+            } else {
+                None
+            };
             Ok(DVal::QName(NameId { uri, local }, p))
         }
         Slot::NilText => Ok(DVal::Str(read_value_charset(
@@ -784,7 +773,7 @@ pub(crate) fn emit_value<E: Encoder>(
             let u = names::write_uri(e, t, uri)?;
             names::write_local(e, t, u, local)?;
             if prefixes {
-                write_prefix(e, t, u, prefix.as_deref())?;
+                names::write_prefix(e, t, u, prefix.as_deref())?;
             }
             Ok(())
         }
@@ -823,25 +812,6 @@ fn emit_typed<E: Encoder>(e: &mut E, ch: Channel, v: &Prepared) -> Result<()> {
         }
         Prepared::Enum(i, n) => write_enum(e, ch, *i, *n),
     }
-}
-
-/// The prefix of a name with a known URI: n-bit, `width(m)` bits, when
-/// the URI has `m > 0` prefixes; 0 bits otherwise. An unknown prefix is
-/// sent as number 0.
-pub(crate) fn write_prefix<E: Encoder>(
-    e: &mut E,
-    t: &SessionTables<'_>,
-    uri: u32,
-    prefix: Option<&str>,
-) -> Result<()> {
-    let m = t.prefix_count(uri);
-    if m == 0 {
-        return Ok(());
-    }
-    let n = prefix
-        .and_then(|p| (0..m).find(|i| t.prefix_str(uri, *i) == Some(p)))
-        .unwrap_or(0);
-    e.nbit(Channel::Structure, n, width(m))
 }
 
 /// The owned name of numbers in the tables.

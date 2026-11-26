@@ -83,13 +83,13 @@ impl<S: Sink> BitEncoder<S> {
 
 impl<S: Sink> Encoder for BitEncoder<S> {
     fn nbit(&mut self, _ch: Channel, value: u32, width: u8) -> Result<()> {
-        check_width(value, width)?;
+        super::check_nbit(value, width)?;
         // The held bits, then the value's: at most 7 + 32 bits, so at
         // most 4 full octets.
         let bits = ((self.acc as u64) << width) | value as u64;
         let n = self.held + width;
         let full = (n / 8) as usize;
-        let mut out = [0u8; 5];
+        let mut out = [0u8; 4];
         for (i, o) in out[..full].iter_mut().enumerate() {
             *o = (bits >> (n as usize - 8 * (i + 1))) as u8;
         }
@@ -194,12 +194,7 @@ impl<'a> BitDecoder<'a> {
 
 impl Decoder for BitDecoder<'_> {
     fn nbit(&mut self, _ch: Channel, width: u8) -> Result<u32> {
-        if width > 32 {
-            return Err(Error::new(
-                ErrorKind::Internal,
-                "n-bit width above 32",
-            ));
-        }
+        super::check_width(width)?;
         if self.bit + width as u64 > self.len_bits() {
             return Err(Error::new(
                 ErrorKind::Truncated,
@@ -237,17 +232,4 @@ impl Decoder for BitDecoder<'_> {
     fn bit_position(&self) -> u64 {
         self.bit
     }
-}
-
-fn check_width(value: u32, width: u8) -> Result<()> {
-    if width > 32 {
-        return Err(Error::new(ErrorKind::Internal, "n-bit width above 32"));
-    }
-    if width < 32 && (value >> width) != 0 {
-        return Err(Error::new(
-            ErrorKind::Internal,
-            "n-bit value does not fit its width",
-        ));
-    }
-    Ok(())
 }

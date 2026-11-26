@@ -237,15 +237,7 @@ pub fn write_name<E: Encoder>(
     let uri = write_uri(e, t, name.uri())?;
     let local = write_local(e, t, uri, name.local_name())?;
     if prefixes {
-        let m = t.prefix_count(uri);
-        if m > 0 {
-            let idx = name
-                .prefix()
-                .and_then(|p| t.global_strings_prefix(p))
-                .and_then(|id| t.find_prefix(uri, id))
-                .unwrap_or(0);
-            e.nbit(S, idx, width(m))?;
-        }
+        write_prefix(e, t, uri, name.prefix())?;
     }
     Ok(NameId { uri, local })
 }
@@ -261,18 +253,45 @@ pub fn read_name<D: Decoder, T: ReadTables + ?Sized>(
 ) -> Result<(NameId, Option<u32>)> {
     let uri = read_uri(d, t, limits)?;
     let local = read_local(d, t, uri, limits)?;
-    let mut prefix = None;
-    if prefixes {
-        let m = t.prefix_count(uri);
-        if m > 0 {
-            let n = d.nbit(S, width(m))?;
-            if n >= m {
-                return Err(grammar("prefix number beyond the partition"));
-            }
-            prefix = Some(n);
-        }
-    }
+    let prefix = if prefixes { read_prefix(d, t, uri)? } else { None };
     Ok((NameId { uri, local }, prefix))
+}
+
+/// Writes a QName prefix for a known URI. An unknown prefix uses index
+/// zero.
+pub(crate) fn write_prefix<E: Encoder>(
+    e: &mut E,
+    t: &SessionTables<'_>,
+    uri: u32,
+    prefix: Option<&str>,
+) -> Result<()> {
+    let m = t.prefix_count(uri);
+    if m == 0 {
+        return Ok(());
+    }
+    let idx = prefix
+        .and_then(|p| t.global_strings_prefix(p))
+        .and_then(|id| t.find_prefix(uri, id))
+        .unwrap_or(0);
+    e.nbit(S, idx, width(m))
+}
+
+/// Reads a QName prefix for a known URI. An empty partition has no
+/// prefix field.
+pub(crate) fn read_prefix<D: Decoder, T: ReadTables + ?Sized>(
+    d: &mut D,
+    t: &T,
+    uri: u32,
+) -> Result<Option<u32>> {
+    let m = t.prefix_count(uri);
+    if m == 0 {
+        return Ok(None);
+    }
+    let n = d.nbit(S, width(m))?;
+    if n >= m {
+        return Err(grammar("prefix number beyond the partition"));
+    }
+    Ok(Some(n))
 }
 
 /// Writes an NS event's content: URI, prefix, `local_element_ns`.

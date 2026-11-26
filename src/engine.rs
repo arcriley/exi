@@ -53,9 +53,12 @@ use crate::{Error, ErrorKind, Limits, NameId, Options, Preserve, Result};
 
 mod wire;
 
+#[cfg(feature = "compression")]
+pub(crate) use wire::decode_value;
+
 pub(crate) use wire::{
-    DVal, Decoded, Prepared, Probe, decode, decode_value, emit_value,
-    lexical_string, owned_name, prepare, value_str, write_prefix,
+    DVal, Decoded, Prepared, Probe, decode, emit_value, lexical_string,
+    owned_name, prepare, value_str,
 };
 
 pub(crate) const XSI_NIL: NameId = NameId { uri: 2, local: 0 };

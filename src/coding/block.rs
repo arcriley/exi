@@ -1,4 +1,4 @@
-// src/block.rs
+// src/coding/block.rs
 //
 // Compression blocks
 // Copyright © 2026 Arc Riley

@@ -91,6 +91,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::coding::Decoder;
+#[cfg(feature = "compression")]
+use crate::coding::block::BlockRead;
 use crate::coding::body::BodyDecoder;
 use crate::engine::{
     self, DVal, Decoded, Probe, Slot, State, Top, check_options, err,
@@ -509,7 +511,7 @@ pub struct Reader<'g, const N: usize = 4096> {
     /// many events at the front of the queue belong to blocks whose
     /// values are all read.
     #[cfg(feature = "compression")]
-    block: Option<crate::block::BlockRead>,
+    block: Option<BlockRead>,
     #[cfg(feature = "compression")]
     released: usize,
     /// An SE is waiting for its NS events; it is at `collect_at` in the
@@ -1287,12 +1289,11 @@ impl<'g, const N: usize> Reader<'g, N> {
         #[cfg(feature = "compression")]
         {
             self.block = match opts.coding() {
-                Coding::PreCompression => Some(crate::block::BlockRead::new(
-                    false,
-                    opts.block_size(),
-                )),
+                Coding::PreCompression => {
+                    Some(BlockRead::new(false, opts.block_size()))
+                }
                 Coding::Compression => {
-                    Some(crate::block::BlockRead::new(true, opts.block_size()))
+                    Some(BlockRead::new(true, opts.block_size()))
                 }
                 _ => None,
             };

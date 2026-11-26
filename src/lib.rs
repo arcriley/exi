@@ -112,8 +112,6 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
-#[cfg(feature = "compression")]
-mod block;
 pub mod canonical;
 #[cfg(feature = "capi")]
 pub mod capi;

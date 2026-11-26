@@ -49,7 +49,7 @@ works, how the code is laid out, how to build and test it, the decisions already
 |---|---|
 | `src/lib.rs` | Crate docs and module list |
 | `src/coding/` | Bit and byte coding, datatypes, names, `BodyEncoder`/`BodyDecoder` |
-| `src/block.rs` | Pre-compression and compression: blocks, channels, DEFLATE (feature `compression`) |
+| `src/coding/block.rs` | Pre-compression and compression: blocks, channels, DEFLATE (feature `compression`) |
 | `src/header.rs`, `src/options.rs` | Header, cookie and the options document |
 | `src/engine.rs`, `src/engine/wire.rs` | Shared grammar state and event/value coding |
 | `src/reader.rs`, `src/reader/blocks.rs` | Layer 1 reader, frame boundaries and compressed blocks |
@@ -130,7 +130,7 @@ differs from EXI 1.0, libexi follows EXIficient and documents the difference in 
 code. Arc plans to raise these with the EXIficient developer, for an EXI 1.0 erratum or
 a fix in EXIficient.
 
-Differences followed (documented in `src/block.rs` and `src/canonical.rs`):
+Differences followed (documented in `src/coding/block.rs` and `src/canonical.rs`):
 
 - In blocks of more than 100 values, EXIficient writes empty DEFLATE streams: one for
   the small-channel group when there are small channels, and one for each large channel.

@@ -82,3 +82,8 @@ required-features = ["infer", "xhtml5", "html5ever"]
 name = "device"
 harness = false
 required-features = ["std", "bit-packed", "exig"]
+
+[[bench]]
+name = "xhtml5"
+harness = false
+required-features = ["xhtml5", "html5ever"]

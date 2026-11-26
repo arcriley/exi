@@ -171,19 +171,35 @@ impl CodeTable {
     /// The number of values the part after `prefix` takes (`prefix`
     /// empty: the first part).
     pub fn count(&self, prefix: &[u32]) -> u32 {
-        let k = prefix.len();
-        self.entries
-            .iter()
-            .filter(|(_, c)| c.parts().len() > k && &c.parts()[..k] == prefix)
-            .map(|(_, c)| c.parts()[k] + 1)
-            .max()
-            .unwrap_or(0)
+        if prefix.is_empty() {
+            return self.entries.last().map_or(0, |(_, c)| c.parts()[0] + 1);
+        }
+        let depth = prefix.len();
+        let end = self.entries.partition_point(|(_, c)| {
+            let parts = c.parts();
+            &parts[..depth.min(parts.len())] <= prefix
+        });
+        self.entries[..end]
+            .last()
+            .and_then(|(_, c)| c.parts().strip_prefix(prefix))
+            .and_then(|suffix| suffix.first())
+            .map_or(0, |part| part + 1)
     }
     /// The production whose code is exactly `parts`, if any. When
     /// `parts` is the prefix of longer codes, returns `None`: read
     /// another part.
     pub fn lookup(&self, parts: &[u32]) -> Option<Terminal> {
-        self.entries.iter().find(|(_, c)| c.parts() == parts).map(|(t, _)| *t)
+        if let [first] = parts {
+            if let Some((term, code)) = self.entries.get(*first as usize) {
+                if code.parts() == parts {
+                    return Some(*term);
+                }
+            }
+        }
+        self.entries
+            .binary_search_by(|(_, c)| c.parts().cmp(parts))
+            .ok()
+            .map(|i| self.entries[i].0)
     }
 }
 
@@ -375,35 +391,29 @@ impl CodeTable {
         full: &[(Terminal, EventCode)],
         keep: impl Fn(Terminal) -> bool,
     ) -> CodeTable {
-        let kept: Vec<(Terminal, EventCode)> =
-            full.iter().copied().filter(|(t, _)| keep(*t)).collect();
-        let entries = kept
-            .iter()
-            .map(|(t, orig)| {
-                let mut parts = [0u32; 3];
-                let orig_parts = orig.parts();
-                for k in 0..orig_parts.len() {
-                    // The rank of this part among the distinct values
-                    // taken at level k by the productions that share
-                    // the earlier parts.
-                    let mut count = 0u32;
-                    let mut prev = None;
-                    for (_, o) in &kept {
-                        let op = o.parts();
-                        if op.len() > k
-                            && op[..k] == orig_parts[..k]
-                            && op[k] < orig_parts[k]
-                            && prev != Some(op[k])
-                        {
-                            count += 1;
-                            prev = Some(op[k]);
-                        }
-                    }
-                    parts[k] = count;
-                }
-                (*t, EventCode::new(&parts[..orig_parts.len()]))
-            })
-            .collect();
+        let mut entries = Vec::with_capacity(full.len());
+        let mut previous: Option<EventCode> = None;
+        let mut ranks = [0; 3];
+        for &(term, code) in full {
+            if !keep(term) {
+                continue;
+            }
+            if let Some(prev) = previous {
+                // Entries are leaves in code order. After a shared
+                // prefix, advance to the next sibling and restart its
+                // child ranks.
+                let level = prev
+                    .parts()
+                    .iter()
+                    .zip(code.parts())
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                ranks[level] += 1;
+                ranks[level + 1..].fill(0);
+            }
+            entries.push((term, EventCode::new(&ranks[..code.parts().len()])));
+            previous = Some(code);
+        }
         CodeTable { entries }
     }
 

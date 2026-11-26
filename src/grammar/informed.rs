@@ -718,7 +718,7 @@ impl GrammarBuilder {
             Schema { simple, types, elements, globals, fragment, closed };
         drop(local_ids);
         drop(uri_ids);
-        Ok(GrammarSet { entries, schema: Some(schema) })
+        Ok(GrammarSet::new(entries, Some(schema)))
     }
 }
 

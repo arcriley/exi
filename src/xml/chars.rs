@@ -39,6 +39,16 @@ pub(crate) fn is_name(s: &str) -> bool {
 
 /// `NCName`: a `Name` without `:`.
 pub(crate) fn is_ncname(s: &str) -> bool {
+    let Some((&first, rest)) = s.as_bytes().split_first() else {
+        return false;
+    };
+    if (first.is_ascii_alphabetic() || first == b'_')
+        && rest.iter().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_')
+        })
+    {
+        return true;
+    }
     is_name(s) && !s.contains(':')
 }
 

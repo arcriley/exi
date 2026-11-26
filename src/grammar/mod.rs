@@ -181,6 +181,12 @@ pub struct GrammarStats {
 /// shareable::<GrammarSet>();
 /// ```
 pub struct GrammarSet {
+    #[cfg(feature = "std")]
+    names: std::sync::OnceLock<hashbrown::HashTable<NameId>>,
+    #[cfg(feature = "std")]
+    tables: std::sync::Mutex<TableCache>,
+    #[cfg(feature = "std")]
+    tops: std::sync::Mutex<TopCache>,
     entries: InitialEntries,
     pub(crate) schema: Option<informed::Schema>,
 }
@@ -193,7 +199,20 @@ impl GrammarSet {
     /// assert!(!GrammarSet::schemaless().is_schema_informed());
     /// ```
     pub fn schemaless() -> GrammarSet {
-        GrammarSet { entries: InitialEntries::schemaless(), schema: None }
+        Self::new(InitialEntries::schemaless(), None)
+    }
+
+    fn new(entries: InitialEntries, schema: Option<informed::Schema>) -> Self {
+        Self {
+            entries,
+            schema,
+            #[cfg(feature = "std")]
+            names: Default::default(),
+            #[cfg(feature = "std")]
+            tables: Default::default(),
+            #[cfg(feature = "std")]
+            tops: Default::default(),
+        }
     }
     /// Starts a schema-informed grammar set built in code (see
     /// [`informed`]).
@@ -228,10 +247,18 @@ impl GrammarSet {
     /// assert_eq!(set.name_id("", "unknown"), None);
     /// ```
     pub fn name_id(&self, uri: &str, local: &str) -> Option<NameId> {
-        let u = self.entries.uris().iter().position(|x| *x == uri)? as u32;
-        let l =
-            self.entries.locals(u).iter().position(|x| *x == local)? as u32;
-        Some(NameId { uri: u, local: l })
+        #[cfg(feature = "std")]
+        if self.is_schema_informed() {
+            use core::hash::BuildHasher;
+            let names = self.names.get_or_init(|| self.entries.name_index());
+            let key = (uri, local);
+            return names
+                .find(rustc_hash::FxBuildHasher.hash_one(key), |&id| {
+                    self.entries.name_strings(id) == key
+                })
+                .copied();
+        }
+        self.entries.name_id(uri, local)
     }
     /// True when the grammars accept no name they do not declare:
     /// schema-informed, and no wildcard anywhere.
@@ -293,10 +320,6 @@ impl GrammarSet {
         Ok(Grammars {
             set: self,
             initial: self.entries.attach(strings)?,
-            #[cfg(feature = "std")]
-            tables: Default::default(),
-            #[cfg(feature = "std")]
-            tops: Default::default(),
         })
     }
 }
@@ -311,12 +334,17 @@ pub(crate) struct TableKey {
     pub flags: u16,
 }
 
+#[cfg(feature = "std")]
+type TableEntry = alloc::sync::Arc<crate::engine::CachedTable>;
+#[cfg(not(feature = "std"))]
+type TableEntry = alloc::boxed::Box<crate::engine::CachedTable>;
+
 /// Code tables built from a schema state on demand (the states of
 /// non-strict grammars, and first start tags with `xsi:type` or
 /// `xsi:nil`), shared by every stream using these grammars.
 pub(crate) type TableCache = hashbrown::HashMap<
     TableKey,
-    alloc::sync::Arc<builtin::CodeTable>,
+    TableEntry,
     rustc_hash::FxBuildHasher,
 >;
 
@@ -333,10 +361,6 @@ type TopCache = hashbrown::HashMap<
 pub struct Grammars<'g> {
     set: &'g GrammarSet,
     initial: Initial<'g>,
-    #[cfg(feature = "std")]
-    tables: std::sync::Mutex<TableCache>,
-    #[cfg(feature = "std")]
-    tops: std::sync::Mutex<TopCache>,
 }
 
 impl<'g> Grammars<'g> {
@@ -357,7 +381,7 @@ impl<'g> Grammars<'g> {
     }
     #[cfg(feature = "std")]
     pub(crate) fn table_cache(&self) -> &std::sync::Mutex<TableCache> {
-        &self.tables
+        &self.set.tables
     }
     #[cfg(feature = "std")]
     pub(crate) fn top_tables(
@@ -368,7 +392,7 @@ impl<'g> Grammars<'g> {
         // Only DT, CM and PI can change top-level productions.
         let keep = builtin::Keep { ns: false, sc: false, ..keep };
         let key = (opts.fragment(), opts.strict(), keep);
-        let mut tops = self.tops.lock().unwrap_or_else(|e| e.into_inner());
+        let mut tops = self.set.tops.lock().unwrap_or_else(|e| e.into_inner());
         tops.entry(key)
             .or_insert_with(|| {
                 alloc::sync::Arc::new(crate::engine::TopTables::new(

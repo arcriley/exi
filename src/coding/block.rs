@@ -71,7 +71,7 @@ pub(crate) const SMALL: usize = 100;
 /// A value whose writing waits for the end of its block.
 struct Deferred {
     name: NameId,
-    value: Prepared,
+    value: Prepared<'static>,
     prefixes: bool,
 }
 
@@ -165,7 +165,11 @@ impl<S: Sink> BlockEncoder<S> {
         value: Prepared,
         prefixes: bool,
     ) -> bool {
-        self.values.push(Deferred { name, value, prefixes });
+        self.values.push(Deferred {
+            name,
+            value: value.into_owned(),
+            prefixes,
+        });
         self.values.len() as u64 >= self.block_size as u64
     }
     /// Writes the block: its values in channel order, updating `t` in

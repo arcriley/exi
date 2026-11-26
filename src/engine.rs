@@ -36,6 +36,10 @@
 //! changing anything.
 
 use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use core::cell::OnceCell;
+#[cfg(feature = "std")]
+use std::sync::OnceLock as OnceCell;
 
 use hashbrown::HashMap;
 use rustc_hash::FxBuildHasher;
@@ -217,12 +221,63 @@ pub(crate) enum Slot {
     NilText,
 }
 
+/// Code and part widths from the same grammar lookup. A pending SE
+/// keeps both until its attributes arrive.
+#[derive(Clone, Copy)]
+pub(crate) struct WriteCode {
+    pub code: EventCode,
+    pub widths: [u8; 3],
+}
+
+impl WriteCode {
+    fn new(code: EventCode, count: impl Fn(&[u32]) -> u32) -> Self {
+        let parts = code.parts();
+        let mut widths = [0; 3];
+        for (i, w) in widths[..parts.len()].iter_mut().enumerate() {
+            *w = crate::coding::width(count(&parts[..i]));
+        }
+        Self { code, widths }
+    }
+}
+
+/// Wide informed states index their first production for each terminal.
+/// Additional productions can offer the same terminal with a longer
+/// code.
+pub(crate) struct CachedTable {
+    table: CodeTable,
+    first: OnceCell<Map<Terminal, WriteCode>>,
+}
+
+impl CachedTable {
+    fn new(table: CodeTable) -> Self {
+        Self { table, first: OnceCell::new() }
+    }
+
+    fn matched(&self, term: Terminal) -> Option<WriteCode> {
+        if self.table.entries().len() < 32 {
+            return self.table.code(term)
+                .map(|code| WriteCode::new(code, |p| self.table.count(p)));
+        }
+        // Readers only need the forward table.
+        let first = self.first.get_or_init(|| {
+            let mut first = Map::with_hasher(FxBuildHasher);
+            for &(term, code) in self.table.entries() {
+                first.entry(term).or_insert_with(|| {
+                    WriteCode::new(code, |p| self.table.count(p))
+                });
+            }
+            first
+        });
+        first.get(&term).copied()
+    }
+}
+
 /// The event codes of the current state. Ordinary strict states use
 /// production indexes directly as their one-part codes.
 pub(crate) enum Table<'a> {
     Flat(&'a [IProd]),
     Borrowed(&'a CodeTable),
-    Ref(core::cell::Ref<'a, CodeTable>),
+    Ref(core::cell::Ref<'a, CachedTable>),
 }
 
 impl Table<'_> {
@@ -230,29 +285,35 @@ impl Table<'_> {
         match self {
             Table::Flat(_) => None,
             Table::Borrowed(t) => Some(t),
-            Table::Ref(t) => Some(t),
+            Table::Ref(t) => Some(&t.table),
         }
     }
 
-    pub fn code(&self, term: Terminal) -> Option<EventCode> {
-        match self {
-            Table::Flat(prods) => prods
-                .iter()
-                .position(|p| p.term == term)
+    pub fn matched(&self, term: Terminal) -> Option<WriteCode> {
+        let code = match self {
+            Table::Flat(prods) => prods.iter().position(|p| p.term == term)
                 .map(|i| EventCode::new(&[i as u32])),
             Table::Borrowed(t) => t.code(term),
-            Table::Ref(t) => t.code(term),
-        }
+            Table::Ref(t) => return t.matched(term),
+        }?;
+        Some(WriteCode::new(code, |p| self.count(p)))
     }
 
-    pub fn code_with_len(&self, term: Terminal, len: u8) -> Option<EventCode> {
+    #[cfg(all(test, feature = "std"))]
+    fn code(&self, term: Terminal) -> Option<EventCode> {
+        self.matched(term).map(|m| m.code)
+    }
+
+    pub fn matched_with_len(
+        &self,
+        term: Terminal,
+        len: u8,
+    ) -> Option<WriteCode> {
         match self.explicit() {
-            Some(t) => t
-                .entries()
-                .iter()
+            Some(t) => t.entries().iter()
                 .find(|(t, c)| *t == term && c.len() == len)
-                .map(|(_, c)| *c),
-            None if len == 1 => self.code(term),
+                .map(|(_, c)| WriteCode::new(*c, |p| t.count(p))),
+            None if len == 1 => self.matched(term),
             None => None,
         }
     }
@@ -262,7 +323,7 @@ impl Table<'_> {
             Table::Flat(prods) if prefix.is_empty() => prods.len() as u32,
             Table::Flat(_) => 0,
             Table::Borrowed(t) => t.count(prefix),
-            Table::Ref(t) => t.count(prefix),
+            Table::Ref(t) => t.table.count(prefix),
         }
     }
 
@@ -273,7 +334,7 @@ impl Table<'_> {
                 _ => None,
             },
             Table::Borrowed(t) => t.lookup(parts),
-            Table::Ref(t) => t.lookup(parts),
+            Table::Ref(t) => t.table.lookup(parts),
         }
     }
 }
@@ -282,8 +343,8 @@ impl Table<'_> {
 /// and the document-end event codes.
 type InformedTop = (CodeTable, Vec<Option<ElementId>>, CodeTable);
 
-/// Immutable document or fragment tables shared within a grammar
-/// attachment. A built-in fragment becomes private when it learns.
+/// Immutable document or fragment tables shared by a grammar set. A
+/// built-in fragment becomes private when it learns.
 pub(crate) struct TopTables {
     builtin: TopLevel,
     informed: Option<InformedTop>,
@@ -299,6 +360,7 @@ pub(crate) struct State<'g> {
     tables: core::cell::RefCell<crate::grammar::TableCache>,
     pub opts: Options,
     pub keep: Keep,
+    table_flags: u16,
     pub limits: Limits,
     pub budget: u64,
     #[cfg(feature = "std")]
@@ -404,6 +466,7 @@ impl<'g> State<'g> {
             grammars: g,
             tables: Default::default(),
             keep,
+            table_flags: Self::keep_bits(opts.strict(), keep) << 4,
             budget: limits.get_max_learned_productions(),
             limits,
             #[cfg(feature = "std")]
@@ -537,7 +600,7 @@ impl<'g> State<'g> {
                         | (fresh as u16) << 1
                         | (empty as u16) << 2
                         | (nillable as u16) << 3
-                        | self.keep_bits() << 4,
+                        | self.table_flags,
                 };
                 if !self.opts.strict() {
                     return Ok(self.cached(key, || {
@@ -545,24 +608,11 @@ impl<'g> State<'g> {
                     }));
                 }
                 if empty {
-                    let mut terms: Vec<Terminal> = Vec::new();
-                    if tag {
-                        terms.extend(
-                            td.states[state as usize]
-                                .iter()
-                                .map(|p| p.term)
-                                .filter(|t| {
-                                    matches!(
-                                        t,
-                                        Terminal::AT(_)
-                                            | Terminal::AtUri(_)
-                                            | Terminal::AtAny
-                                    )
-                                }),
-                        );
-                    }
-                    terms.push(Terminal::EE);
-                    return Ok(self.cached(key, || CodeTable::flat(terms)));
+                    return Ok(self.cached(key, || {
+                        let attrs = td.states[state as usize].iter().map(|p| p.term)
+                            .filter(|t| tag && matches!(t, Terminal::AT(_) | Terminal::AtUri(_) | Terminal::AtAny));
+                        CodeTable::flat(attrs.chain(core::iter::once(Terminal::EE)))
+                    }));
                 }
                 let prods = &td.states[state as usize];
                 if state == 0 && fresh && (td.castable || nillable) {
@@ -588,9 +638,8 @@ impl<'g> State<'g> {
 
     /// The options bits of a [`TableKey`](crate::grammar::TableKey): strictness and what
     /// is kept.
-    fn keep_bits(&self) -> u16 {
-        let k = self.keep;
-        (self.opts.strict() as u16)
+    fn keep_bits(strict: bool, k: Keep) -> u16 {
+        (strict as u16)
             | (k.ns as u16) << 1
             | (k.sc as u16) << 2
             | (k.dtd as u16) << 3
@@ -615,11 +664,11 @@ impl<'g> State<'g> {
             let cache = self.grammars.table_cache();
             let mut map = cache.lock().unwrap_or_else(|e| e.into_inner());
             map.entry(key)
-                .or_insert_with(|| alloc::sync::Arc::new(make()))
+                .or_insert_with(|| alloc::sync::Arc::new(CachedTable::new(make())))
                 .clone()
         };
         #[cfg(not(feature = "std"))]
-        let t = alloc::sync::Arc::new(make());
+        let t = alloc::boxed::Box::new(CachedTable::new(make()));
         self.tables.borrow_mut().insert(key, t);
         Table::Ref(core::cell::Ref::map(self.tables.borrow(), |m| &*m[&key]))
     }
@@ -729,13 +778,21 @@ impl<'g> State<'g> {
 
     /// The schema production of the current informed state with
     /// terminal `t`.
-    pub fn iprod(&self, t: Terminal) -> Option<&'g IProd> {
+    fn iprod(&self, t: Terminal, code: EventCode) -> Option<&'g IProd> {
         let f = self.stack.last()?;
         let FrameKind::Informed { ty, state, .. } = f.kind else {
             return None;
         };
         let td = self.schema?.ty(ty);
-        td.states.get(state as usize)?.iter().find(|p| p.term == t)
+        let prods = td.states.get(state as usize)?;
+        if let [i] = code.parts() {
+            if let Some(prod) = prods.get(*i as usize) {
+                if prod.term == t {
+                    return Some(prod);
+                }
+            }
+        }
+        prods.iter().find(|p| p.term == t)
     }
 
     /// True when the current state is an informed state 0 offering
@@ -778,7 +835,7 @@ impl<'g> State<'g> {
                 _ => Slot::Str,
             };
         }
-        if let Some(p) = self.iprod(t) {
+        if let Some(p) = self.iprod(t, code) {
             if let Some(ty) = p.ty {
                 return if self.lexical() {
                     Slot::Lexical(ty)
@@ -804,7 +861,7 @@ impl<'g> State<'g> {
         if self.deviates(code) {
             return Slot::Str;
         }
-        match self.iprod(Terminal::CH).and_then(|p| p.ty) {
+        match self.iprod(Terminal::CH, code).and_then(|p| p.ty) {
             Some(ty) if self.lexical() => Slot::Lexical(ty),
             Some(ty) => Slot::Typed(ty),
             None => Slot::Str,
@@ -812,10 +869,10 @@ impl<'g> State<'g> {
     }
 
     /// Whether a declared CH leads to a state with an EE production.
-    pub fn can_end_after_characters(&self) -> bool {
+    pub fn can_end_after_characters(&self, code: EventCode) -> bool {
         let (Some(schema), Some(prod), Some(FrameKind::Informed { ty, .. })) = (
             self.schema,
-            self.iprod(Terminal::CH),
+            self.iprod(Terminal::CH, code),
             self.stack.last().map(|f| f.kind),
         ) else {
             return false;
@@ -847,7 +904,7 @@ impl<'g> State<'g> {
                 elems[i].or_else(|| schema.global_named(id))
             }
             Some(Frame { kind: FrameKind::Informed { .. }, .. }) => {
-                match self.iprod(t) {
+                match self.iprod(t, code) {
                     Some(IProd { elem: Some(e), .. }) => Some(*e),
                     _ => schema.global_named(id),
                 }
@@ -931,7 +988,8 @@ impl<'g> State<'g> {
                 "max_learned_productions reached",
             ));
         }
-        let next = self.iprod(t).map(|p| p.next);
+        let next =
+            if dev { None } else { self.iprod(t, code).map(|p| p.next) };
         let content = match self.stack.last().map(|f| f.kind) {
             Some(FrameKind::Informed { ty, .. }) => self.content_of(ty)?,
             _ => 0,
@@ -1022,7 +1080,12 @@ impl<'g> State<'g> {
         id: NameId,
     ) -> Result<()> {
         let dev = self.deviates(code);
-        let next = self.iprod(t).map(|p| p.next);
+        // An untyped value of a declared attribute follows its declared
+        // production. Other added attributes leave the state alone.
+        if dev && !(code.len() == 3 && matches!(t, Terminal::AT(_))) {
+            return Ok(());
+        }
+        let next = self.iprod(t, code).map(|p| p.next);
         let f = self
             .stack
             .last_mut()
@@ -1046,12 +1109,6 @@ impl<'g> State<'g> {
                 Err(internal("AT in element content"))
             }
             FrameKind::Informed { state, tag, fresh, .. } => {
-                // An untyped value of a declared attribute (three
-                // parts, AT(qname)) moves as the declared production
-                // does; AT(*), declared or not, stays.
-                if dev && !(code.len() == 3 && matches!(t, Terminal::AT(_))) {
-                    return Ok(());
-                }
                 Self::follow(
                     state,
                     tag,
@@ -1124,7 +1181,11 @@ impl<'g> State<'g> {
     /// CH with code `code`.
     pub fn on_ch(&mut self, code: EventCode) -> Result<()> {
         let dev = self.deviates(code);
-        let next = self.iprod(Terminal::CH).map(|p| p.next);
+        let next = if dev {
+            None
+        } else {
+            self.iprod(Terminal::CH, code).map(|p| p.next)
+        };
         let content = match self.stack.last().map(|f| f.kind) {
             Some(FrameKind::Informed { ty, .. }) => self.content_of(ty)?,
             _ => 0,

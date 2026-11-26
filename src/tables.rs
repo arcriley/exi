@@ -326,6 +326,35 @@ impl InitialEntries {
             .map_or_else(Vec::new, |u| u.locals.iter().map(|l| &**l).collect())
     }
 
+    /// Index wire names without making another copy of their strings.
+    #[cfg(feature = "std")]
+    pub(crate) fn name_index(&self) -> hashbrown::HashTable<NameId> {
+        use core::hash::BuildHasher;
+        let mut index = hashbrown::HashTable::new();
+        for (uri, entry) in self.uris.iter().enumerate() {
+            for (local, name) in entry.locals.iter().enumerate() {
+                let hash = FxBuildHasher.hash_one((&*entry.uri, &**name));
+                index.insert_unique(
+                    hash,
+                    NameId { uri: uri as u32, local: local as u32 },
+                    |&id| FxBuildHasher.hash_one(self.name_strings(id)),
+                );
+            }
+        }
+        index
+    }
+
+    #[cfg(feature = "std")]
+    pub(crate) fn name_strings(&self, id: NameId) -> (&str, &str) {
+        let entry = &self.uris[id.uri as usize];
+        (&entry.uri, &entry.locals[id.local as usize])
+    }
+
+    pub(crate) fn name_id(&self, uri: &str, local: &str) -> Option<NameId> {
+        let u = self.uris.iter().position(|e| &*e.uri == uri)?;
+        let l = self.uris[u].locals.iter().position(|s| &**s == local)?;
+        Some(NameId { uri: u as u32, local: l as u32 })
+    }
     /// Interns every entry into `g` and builds the id arrays sessions
     /// share. The returned [`Initial`] holds one reference to each
     /// string until it is dropped.
@@ -350,10 +379,10 @@ impl InitialEntries {
             let id = g.uris().intern_id(&u.uri)?;
             init.uris.push(id);
             init.uri_rev.insert(id, n as u32);
-            init.prefixes.push(Vec::new());
-            init.prefix_rev.push(map());
-            init.locals.push(Vec::new());
-            init.local_rev.push(map());
+            init.prefixes.push(Vec::with_capacity(u.prefixes.len()));
+            init.prefix_rev.push(Map::with_capacity_and_hasher(u.prefixes.len(), FxBuildHasher));
+            init.locals.push(Vec::with_capacity(u.locals.len()));
+            init.local_rev.push(Map::with_capacity_and_hasher(u.locals.len(), FxBuildHasher));
             for (i, p) in u.prefixes.iter().enumerate() {
                 let id = g.prefixes().intern_id(p)?;
                 init.prefixes[n].push(id);

@@ -88,10 +88,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::coding::body::BodyEncoder;
-use crate::coding::datatypes::{write_event_code, write_string};
+use crate::coding::datatypes::write_string;
 use crate::coding::{Encoder, Sink, names};
 use crate::engine::{
-    self, Prepared, Slot, State, Top, check_options, err,
+    self, Prepared, Slot, State, Top, WriteCode, check_options, err,
 };
 use crate::error::Position;
 use crate::event::{Event, NsDecl};
@@ -778,6 +778,7 @@ pub struct Writer<'g, S: Sink> {
     /// A start tag not yet written: its SE was checked, its NS and AT
     /// events wait.
     pending: Option<Pending>,
+    spare_attrs: Vec<(OwnedName, OwnedValue)>,
     /// The innermost open element has had no content yet: attributes
     /// may still come.
     in_start: bool,
@@ -838,9 +839,11 @@ impl<S: Sink> FrameSink<S> {
 }
 
 struct Pending {
-    name: OwnedName,
+    // A declared SE already carries its name when prefixes and SC are
+    // off.
+    name: Option<OwnedName>,
     term: Terminal,
-    code: EventCode,
+    code: WriteCode,
     /// The declaration the element enters, when schema-informed.
     decl: Option<ElementId>,
     ns: Vec<(String, String)>,
@@ -935,6 +938,7 @@ impl<'g, S: Sink> Writer<'g, S> {
             started: false,
             poisoned: false,
             pending: None,
+            spare_attrs: Vec::new(),
             in_start: false,
             bindings: Vec::new(),
             events: 0,
@@ -1260,18 +1264,16 @@ impl<'g, S: Sink> Writer<'g, S> {
         }
     }
 
-    fn write_code(&mut self, code: EventCode) -> Result<()> {
-        let mut parts = [(0, 0); 3];
-        let values = code.parts();
-        let table = self.st.table()?;
-        for (i, &value) in values.iter().enumerate() {
-            parts[i] = (value, table.count(&values[..i]));
+    fn write_code(&mut self, matched: WriteCode) -> Result<()> {
+        for (&part, width) in matched.code.parts().iter().zip(matched.widths) {
+            self.enc.nbit(crate::coding::Channel::Structure, part, width)?;
         }
-        write_event_code(&mut self.enc, &parts[..values.len()])
+        Ok(())
     }
 
-    fn find(&self, t: Terminal) -> Result<Option<EventCode>> {
-        Ok(self.st.table()?.code(t))
+    fn find(&self, t: Terminal) -> Result<Option<WriteCode>> {
+        let table = self.st.table()?;
+        Ok(table.matched(t))
     }
 
     /// The production for a name: SE or AT with the name, then its URI,
@@ -1281,22 +1283,29 @@ impl<'g, S: Sink> Writer<'g, S> {
         uri: &str,
         local: &str,
         se: bool,
-    ) -> Result<Option<(Terminal, EventCode)>> {
+    ) -> Result<Option<(Terminal, WriteCode)>> {
         let table = self.st.table()?;
-        if let Some(id) = self.tables.find_name(uri, local) {
+        #[cfg(feature = "std")]
+        let id = self
+            .st
+            .schema
+            .and_then(|_| self.cfg.grammars.set().name_id(uri, local));
+        #[cfg(not(feature = "std"))]
+        let id = None;
+        if let Some(id) = id.or_else(|| self.tables.find_name(uri, local)) {
             let t = if se { Terminal::SE(id) } else { Terminal::AT(id) };
-            if let Some(c) = table.code(t) {
+            if let Some(c) = table.matched(t) {
                 return Ok(Some((t, c)));
             }
         }
         if let Some(u) = self.tables.find_uri_str(uri) {
             let t = if se { Terminal::SeUri(u) } else { Terminal::AtUri(u) };
-            if let Some(c) = table.code(t) {
+            if let Some(c) = table.matched(t) {
                 return Ok(Some((t, c)));
             }
         }
         let t = if se { Terminal::SeAny } else { Terminal::AtAny };
-        Ok(table.code(t).map(|c| (t, c)))
+        Ok(table.matched(t).map(|c| (t, c)))
     }
 
     /// Writes the name part of an SE or AT event; returns its numbers.
@@ -1355,8 +1364,9 @@ impl<'g, S: Sink> Writer<'g, S> {
 
     /// The added production with terminal `t` and a code of `len`
     /// parts, in the current state (non-strict informed states).
-    fn find_added(&self, t: Terminal, len: u8) -> Result<Option<EventCode>> {
-        Ok(self.st.table()?.code_with_len(t, len))
+    fn find_added(&self, t: Terminal, len: u8) -> Result<Option<WriteCode>> {
+        let table = self.st.table()?;
+        Ok(table.matched_with_len(t, len))
     }
 
     /// The open element's name in Clark notation.
@@ -1537,31 +1547,62 @@ impl<'g, S: Sink> Writer<'g, S> {
         }
     }
 
+    fn start_production(
+        &mut self,
+        n: Name<'_>,
+    ) -> Result<(Terminal, WriteCode)> {
+        self.commit()?;
+        if self.st.stack.is_empty() && self.st.top == Top::End {
+            return Err(state("a second document element"));
+        }
+        let (term, code) =
+            self.match_name(n.uri(), n.local_name(), true)?.ok_or_else(
+                || unencodable("no production for this element here"),
+            )?;
+        self.st.check_depth()?;
+        Ok((term, code))
+    }
+
+    /// The HTML parser has the whole tag and supplies its attributes
+    /// in wire order. It can lend their values until they are written.
+    #[cfg(all(feature = "html5ever", feature = "xhtml5"))]
+    pub(crate) fn parsed_tag<'a>(
+        &mut self,
+        name: Name<'_>,
+        attrs: impl Iterator<Item = (&'a str, alloc::borrow::Cow<'a, str>)>,
+    ) -> Result<()> {
+        let (term, code) = self.start_production(name)?;
+        self.open_element(term, code, Some(name))?;
+        self.events += 1;
+        for (local, value) in attrs {
+            self.write_attr(Name::local(local), &Value::Str(&value))?;
+            self.events += 1;
+        }
+        Ok(())
+    }
+
     fn body(&mut self, ev: &Event<'_>) -> Result<()> {
         match *ev {
             Event::StartElement(n) => {
-                self.commit()?;
-                if self.st.stack.is_empty() && self.st.top == Top::End {
-                    return Err(state("a second document element"));
-                }
-                let (term, code) = self
-                    .match_name(n.uri(), n.local_name(), true)?
-                    .ok_or_else(|| {
-                        unencodable("no production for this element here")
-                    })?;
-                self.st.check_depth()?;
-                let id = self
-                    .tables
-                    .find_name(n.uri(), n.local_name())
-                    .unwrap_or(NameId { uri: u32::MAX, local: u32::MAX });
-                let decl = self.st.child_for(term, code, id);
+                let (term, code) = self.start_production(n)?;
+                let decl = if self.cfg.options.strict() {
+                    let id = match term {
+                        Terminal::SE(id) => id,
+                        _ => self.tables.find_name(n.uri(), n.local_name())
+                            .unwrap_or(NameId { uri: u32::MAX, local: u32::MAX }),
+                    };
+                    self.st.child_for(term, code.code, id)
+                } else {
+                    None
+                };
                 self.pending = Some(Pending {
-                    name: n.to_owned(),
+                    name: (!matches!(term, Terminal::SE(_)) || self.st.prefixes()
+                        || self.cfg.options.self_contained()).then(|| n.to_owned()),
                     term,
                     code,
                     decl,
                     ns: Vec::new(),
-                    attrs: Vec::new(),
+                    attrs: core::mem::take(&mut self.spare_attrs),
                 });
                 Ok(())
             }
@@ -1632,7 +1673,7 @@ impl<'g, S: Sink> Writer<'g, S> {
                         ));
                     }
                 };
-                let slot = self.st.ch_slot(code);
+                let slot = self.st.ch_slot(code.code);
                 let (code, prepared) =
                     match engine::prepare(self.st.schema, slot, &v) {
                         Ok(p) => (code, p),
@@ -1649,10 +1690,10 @@ impl<'g, S: Sink> Writer<'g, S> {
                         Err(e) => return Err(e),
                     };
                 let name = self.st.stack.last().expect("checked above").name;
-                self.deviated(DeviationKind::Text, code, None);
+                self.deviated(DeviationKind::Text, code.code, None);
                 self.write_code(code)?;
                 self.value(name, prepared, false)?;
-                self.st.on_ch(code)?;
+                self.st.on_ch(code.code)?;
                 self.in_start = false;
                 Ok(())
             }
@@ -1678,27 +1719,27 @@ impl<'g, S: Sink> Writer<'g, S> {
                     if let Some(code) = self.find(Terminal::CH)? {
                         // Rule 9: supply an empty value if CH leads to
                         // EE.
-                        let slot = self.st.ch_slot(code);
+                        let slot = self.st.ch_slot(code.code);
                         let prepared = engine::prepare(
                             self.st.schema,
                             slot,
                             &Value::Str(""),
                         )?;
-                        if !self.st.can_end_after_characters() {
+                        if !self.st.can_end_after_characters(code.code) {
                             return Err(unencodable(
                                 "the element cannot end here",
                             ));
                         }
                         self.write_code(code)?;
                         self.value(f.name, prepared, false)?;
-                        self.st.on_ch(code)?;
+                        self.st.on_ch(code.code)?;
                         end = self.find(Terminal::EE)?;
                     }
                 }
                 let code = end.ok_or_else(|| {
                     unencodable("the element cannot end here")
                 })?;
-                self.deviated(DeviationKind::EarlyEnd, code, None);
+                self.deviated(DeviationKind::EarlyEnd, code.code, None);
                 self.write_code(code)?;
                 self.st.on_ee()?;
                 if self.st.stack.is_empty() && self.st.in_sc() {
@@ -1748,7 +1789,7 @@ impl<'g, S: Sink> Writer<'g, S> {
                         "SelfContained must come before namespaces and attributes",
                     ));
                 }
-                let name = p.name.clone();
+                let name = p.name.clone().expect("SC keeps the element name");
                 self.commit()?;
                 let code = self.find(Terminal::SC)?.ok_or_else(|| {
                     err(ErrorKind::Internal, "no SC production")
@@ -1785,7 +1826,7 @@ impl<'g, S: Sink> Writer<'g, S> {
         for s in texts {
             write_string(&mut self.enc, crate::coding::Channel::Structure, s)?;
         }
-        self.st.on_misc(t, code)?;
+        self.st.on_misc(t, code.code)?;
         if t != Terminal::NS && !self.st.stack.is_empty() {
             self.in_start = false;
         }

@@ -16,6 +16,7 @@ use std::vec::Vec;
 use html5ever::tendril::TendrilSink;
 use html5ever::{ParseOpts, parse_document};
 use markup5ever::serialize::Serializer;
+use markup5ever::{Attribute, QualName};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
 use super::{HtmlOptions, HtmlSerializer};
@@ -44,10 +45,73 @@ pub fn encode_html<S: EventSink>(
     sink: &mut S,
     opts: &HtmlOptions,
 ) -> Result<()> {
+    parse_into(html, sink, opts, start_tag, |ser, n| ser.end_elem(n.clone()))
+}
+
+fn start_tag<S: EventSink>(
+    ser: &mut HtmlSerializer<'_, S>,
+    name: &QualName,
+    attrs: &mut [Attribute],
+) -> std::io::Result<()> {
+    ser.start_elem(name.clone(), attrs.iter().map(|a| (&a.name, &a.value[..])))
+}
+
+// The profile writer can consume a parsed start tag's attributes while
+// the DOM still owns them. Its writer options are fixed by the version.
+#[cfg(feature = "xhtml5")]
+pub(super) fn encode_profile<S: crate::coding::Sink>(
+    html: &str,
+    writer: &mut crate::Writer<'_, S>,
+) -> Result<()> {
+    parse_into(
+        html,
+        writer,
+        &HtmlOptions::new().keep_comments(false),
+        |ser, name, attrs| {
+            // With unqualified NCNames the parser has already removed
+            // duplicates. Rewriting and namespace declarations use the
+            // ordinary serializer, which handles collisions after
+            // coercion.
+            if attrs.iter().any(|a| {
+                !a.name.ns.is_empty()
+                    || a.name.prefix.is_some()
+                    || &*a.name.local == "xmlns"
+                    || !super::is_ncname(&a.name.local)
+            }) {
+                return start_tag(ser, name, attrs);
+            }
+            ser.emit(|ser| {
+                let local = ser.local(&name.local)?;
+                attrs.sort_unstable_by(|a, b| {
+                    a.name.local[..].cmp(&b.name.local)
+                });
+                ser.sink.parsed_tag(
+                    super::event_name(name, &local),
+                    attrs
+                        .iter()
+                        .map(|a| (&*a.name.local, super::xml_text(&a.value))),
+                )
+            })
+        },
+        |ser, _| ser.emit(|ser| ser.sink.end_element()),
+    )
+}
+
+fn parse_into<S: EventSink>(
+    html: &str,
+    sink: &mut S,
+    opts: &HtmlOptions,
+    start: impl Fn(
+        &mut HtmlSerializer<'_, S>,
+        &QualName,
+        &mut [Attribute],
+    ) -> std::io::Result<()>,
+    end: impl Fn(&mut HtmlSerializer<'_, S>, &QualName) -> std::io::Result<()>,
+) -> Result<()> {
     let dom = parse_document(RcDom::default(), ParseOpts::default()).one(html);
     let mut ser = HtmlSerializer::new(sink, opts.clone());
     for child in dom.document.children.borrow().iter() {
-        walk(child, &mut ser)?;
+        walk(child, &mut ser, &start, &end)?;
     }
     ser.finish()
 }
@@ -56,24 +120,25 @@ pub fn encode_html<S: EventSink>(
 fn walk<S: EventSink>(
     node: &Handle,
     ser: &mut HtmlSerializer<'_, S>,
+    start: &impl Fn(
+        &mut HtmlSerializer<'_, S>,
+        &QualName,
+        &mut [Attribute],
+    ) -> std::io::Result<()>,
+    end: &impl Fn(&mut HtmlSerializer<'_, S>, &QualName) -> std::io::Result<()>,
 ) -> Result<()> {
     let r = match &node.data {
         NodeData::Element { name, attrs, template_contents, .. } => {
-            let attrs = attrs.borrow();
-            ser.start_elem(
-                name.clone(),
-                attrs.iter().map(|a| (&a.name, &a.value[..])),
-            )
-            .map_err(|_| err(ser))?;
+            start(ser, name, &mut attrs.borrow_mut()).map_err(|_| err(ser))?;
             for c in node.children.borrow().iter() {
-                walk(c, ser)?;
+                walk(c, ser, start, end)?;
             }
             if let Some(t) = template_contents.borrow().as_ref() {
                 for c in t.children.borrow().iter() {
-                    walk(c, ser)?;
+                    walk(c, ser, start, end)?;
                 }
             }
-            ser.end_elem(name.clone())
+            end(ser, name)
         }
         NodeData::Text { contents } => ser.write_text(&contents.borrow()),
         NodeData::Comment { contents } => ser.write_comment(contents),

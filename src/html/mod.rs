@@ -238,7 +238,13 @@ pub fn uncoerce_name(name: &str) -> Cow<'_, str> {
 /// Text with form feeds as spaces and characters XML does not allow as
 /// U+FFFD.
 pub(crate) fn xml_text(s: &str) -> Cow<'_, str> {
-    if s.chars().all(|c| c != '\u{c}' && is_char(c)) {
+    // A UTF-8 byte below 0x20 can only be an ASCII control. The
+    // only excluded non-ASCII scalars in a Rust str are U+FFFE and
+    // U+FFFF.
+    if s.bytes().all(|b| {
+        (b >= 0x20 && b != 0xef) || matches!(b, b'\t' | b'\n' | b'\r')
+    }) || s.chars().all(is_char)
+    {
         return Cow::Borrowed(s);
     }
     Cow::Owned(
@@ -370,7 +376,8 @@ impl<S: EventSink> Serializer for HtmlSerializer<'_, S> {
             let local = s.local(&name.local)?;
             s.sink.event(&Event::StartElement(event_name(&name, &local)))?;
             let mut seen: Vec<(&str, Cow<'_, str>)> = Vec::new();
-            for (q, v) in attrs {
+            let mut attrs = attrs.peekable();
+            while let Some((q, v)) = attrs.next() {
                 if &*q.ns == XMLNS
                     || (q.ns.is_empty()
                         && (&*q.local == "xmlns"
@@ -403,7 +410,9 @@ impl<S: EventSink> Serializer for HtmlSerializer<'_, S> {
                     event_name(q, &local),
                     Value::Str(&value),
                 ))?;
-                seen.push((&q.ns, local));
+                if attrs.peek().is_some() {
+                    seen.push((&q.ns, local));
+                }
             }
             Ok(())
         })

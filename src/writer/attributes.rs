@@ -10,7 +10,9 @@
 //
 //! Pending start tags, namespace bindings, and attribute value coding.
 
-use super::{DeviationKind, Pending, Writer, XSI_NS, state, unencodable};
+use super::{
+    DeviationKind, Pending, WriteCode, Writer, XSI_NS, state, unencodable,
+};
 use crate::coding::{Sink, names};
 use crate::engine::{self, Prepared, Slot, err};
 use crate::event::NsDecl;
@@ -65,27 +67,30 @@ impl<S: Sink> Writer<'_, S> {
 
     /// The slot and prepared value of an attribute against the current
     /// state; refuses (`Unencodable`) before anything is written.
-    fn prepare_attr(
+    fn prepare_attr<'a>(
         &self,
         t: Terminal,
         code: EventCode,
         n: Name<'_>,
-        v: &Value<'_>,
-    ) -> Result<(Slot, Prepared, Option<TypeId>)> {
-        let id = self
-            .tables
-            .find_name(n.uri(), n.local_name())
-            .unwrap_or(NameId { uri: u32::MAX, local: u32::MAX });
-        let slot = self.st.at_slot(t, code, id);
-        let owned;
-        let v = match slot {
-            Slot::QName | Slot::TypeName => {
-                owned = self.qname_value(v)?;
-                owned.as_value()
+        v: &Value<'a>,
+    ) -> Result<(Slot, Prepared<'a>, Option<TypeId>)> {
+        let id = match t {
+            Terminal::AT(id) => Some(id),
+            _ if n.uri() == XSI_NS => {
+                self.tables.find_name(n.uri(), n.local_name())
             }
-            _ => *v,
+            _ => None,
+        }
+        .unwrap_or(NameId { uri: u32::MAX, local: u32::MAX });
+        let slot = self.st.at_slot(t, code, id);
+        let prepared = match slot {
+            Slot::QName | Slot::TypeName => {
+                let owned = self.qname_value(v)?;
+                engine::prepare(self.st.schema, slot, &owned.as_value())?
+                    .into_owned()
+            }
+            _ => engine::prepare(self.st.schema, slot, v)?,
         };
-        let prepared = engine::prepare(self.st.schema, slot, &v)?;
         let ty = if slot == Slot::TypeName {
             let Prepared::QName(uri, local, _) = &prepared else {
                 return Err(err(ErrorKind::Internal, "QName expected"));
@@ -143,7 +148,7 @@ impl<S: Sink> Writer<'_, S> {
                 || unencodable("no production for this attribute here"),
             )?;
         let (t, code, slot, prepared, ty) =
-            match self.prepare_attr(t, code, n, v) {
+            match self.prepare_attr(t, code.code, n, v) {
                 Ok((slot, prepared, ty)) => (t, code, slot, prepared, ty),
                 // Not strict: a value its type cannot hold goes
                 // untyped, through the declared attribute's AT [untyped
@@ -172,18 +177,18 @@ impl<S: Sink> Writer<'_, S> {
     fn write_attr_as(
         &mut self,
         t: Terminal,
-        code: EventCode,
+        code: WriteCode,
         slot: Slot,
         prepared: Prepared,
         ty: Option<TypeId>,
         n: Name<'_>,
     ) -> Result<()> {
-        match (t, code.len()) {
+        match (t, code.code.len()) {
             (Terminal::AT(_), 3) => {
-                self.deviated(DeviationKind::UntypedValue, code, Some(n))
+                self.deviated(DeviationKind::UntypedValue, code.code, Some(n))
             }
             (Terminal::AtAny | Terminal::AtUri(_), _) if n.uri() != XSI_NS => {
-                self.deviated(DeviationKind::Attribute, code, Some(n))
+                self.deviated(DeviationKind::Attribute, code.code, Some(n))
             }
             _ => {}
         }
@@ -236,7 +241,7 @@ impl<S: Sink> Writer<'_, S> {
             }
             Slot::QName
                 if t == Terminal::AT(engine::XSI_TYPE)
-                    && self.st.deviates(code) =>
+                    && self.st.deviates(code.code) =>
             {
                 engine::emit_value(
                     &mut self.enc,
@@ -263,11 +268,11 @@ impl<S: Sink> Writer<'_, S> {
                     &prepared,
                     prefixes,
                 )?;
-                self.st.on_at(t, code, id)
+                self.st.on_at(t, code.code, id)
             }
             _ => {
                 self.value(id, prepared, prefixes)?;
-                self.st.on_at(t, code, id)
+                self.st.on_at(t, code.code, id)
             }
         }
     }
@@ -288,7 +293,7 @@ impl<S: Sink> Writer<'_, S> {
             &mut self.tables,
             NsDecl { prefix, uri, local_element_ns },
         )?;
-        self.st.on_misc(Terminal::NS, code)
+        self.st.on_misc(Terminal::NS, code.code)
     }
 
     /// Checks an attribute of a pending start tag against the
@@ -363,21 +368,41 @@ impl<S: Sink> Writer<'_, S> {
         Err(unencodable("attribute not declared for this element"))
     }
 
+    pub(super) fn open_element(
+        &mut self,
+        term: Terminal,
+        code: WriteCode,
+        name: Option<Name<'_>>,
+    ) -> Result<()> {
+        self.write_code(code)?;
+        let (id, prefix) = match (term, name) {
+            (Terminal::SE(id), None) => (id, None),
+            (_, Some(name)) => {
+                if matches!(term, Terminal::SeAny | Terminal::SeUri(_)) {
+                    self.deviated(
+                        DeviationKind::Element,
+                        code.code,
+                        Some(name),
+                    );
+                }
+                self.write_name(term, name)?
+            }
+            _ => unreachable!("a wildcard SE keeps its name"),
+        };
+        self.st.on_se(term, code.code, id, prefix)?;
+        self.in_start = true;
+        Ok(())
+    }
+
     /// Writes a buffered start tag: SE, NS events, then attributes in
     /// EXI's order.
     pub(super) fn commit(&mut self) -> Result<()> {
         let Some(mut p) = self.pending.take() else { return Ok(()) };
-        if matches!(p.term, Terminal::SeAny | Terminal::SeUri(_)) {
-            self.deviated(
-                DeviationKind::Element,
-                p.code,
-                Some(p.name.as_name()),
-            );
-        }
-        self.write_code(p.code)?;
-        let (id, prefix) = self.write_name(p.term, p.name.as_name())?;
-        self.st.on_se(p.term, p.code, id, prefix)?;
-        self.in_start = true;
+        self.open_element(
+            p.term,
+            p.code,
+            p.name.as_ref().map(OwnedName::as_name),
+        )?;
         let depth = self.st.depth();
         for (pre, uri) in &p.ns {
             self.bindings.push((pre.clone(), uri.clone(), depth));
@@ -386,10 +411,11 @@ impl<S: Sink> Writer<'_, S> {
             p.ns.sort_by(|a, b| a.0.cmp(&b.0));
         }
         if self.st.prefixes() {
-            let el_prefix = p.name.prefix.as_deref().unwrap_or("");
+            let name = p.name.as_ref().expect("prefixes keep the element name");
+            let el_prefix = name.prefix.as_deref().unwrap_or("");
             let mut marked = false;
             for (pre, uri) in core::mem::take(&mut p.ns) {
-                let local = !marked && pre == el_prefix && *uri == *p.name.uri;
+                let local = !marked && pre == el_prefix && *uri == *name.uri;
                 marked |= local;
                 self.write_ns(&pre, &uri, local)?;
             }
@@ -398,19 +424,22 @@ impl<S: Sink> Writer<'_, S> {
         // too (EXIficient does; any order is valid in built-in
         // grammars).
         if self.st.schema.is_some() || self.cfg.canonical {
-            let key = |n: &OwnedName| {
-                let first = match (&*n.uri, &*n.local) {
+            let priority = |n: &OwnedName| {
+                match (&*n.uri, &*n.local) {
                     (XSI_NS, "type") => 0,
                     (XSI_NS, "nil") => 1,
                     _ => 2,
-                };
-                (first, n.local.clone(), n.uri.clone())
+                }
             };
-            p.attrs.sort_by_key(|(n, _)| key(n));
+            p.attrs.sort_by(|(a, _), (b, _)| {
+                (priority(a), &a.local, &a.uri).cmp(&(priority(b), &b.local, &b.uri))
+            });
         }
         for (n, v) in &p.attrs {
             self.write_attr(n.as_name(), &v.as_value())?;
         }
+        p.attrs.clear();
+        self.spare_attrs = p.attrs;
         Ok(())
     }
 }

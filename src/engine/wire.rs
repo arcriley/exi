@@ -11,6 +11,7 @@
 //! Coding of events and values after the grammar supplies their event
 //! codes and types.
 
+use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -535,8 +536,8 @@ pub(crate) fn value_str<'s>(
 /// A value checked against its slot and ready to write: nothing about
 /// it can be refused any more.
 #[derive(Clone, Debug)]
-pub(crate) enum Prepared {
-    Str(String, Option<Box<[char]>>),
+pub(crate) enum Prepared<'a> {
+    Str(Cow<'a, str>, Option<Box<[char]>>),
     /// A name: URI, local name, prefix.
     QName(String, String, Option<String>),
     Bool(bool),
@@ -549,8 +550,36 @@ pub(crate) enum Prepared {
     Float(crate::Float),
     Binary(Vec<u8>),
     DateTime(crate::DateTime),
-    List(Vec<Prepared>),
+    List(Vec<Prepared<'static>>),
     Enum(u32, u32),
+}
+
+impl Prepared<'_> {
+    pub(crate) fn into_owned(self) -> Prepared<'static> {
+        match self {
+            Self::Str(s, cs) => Prepared::Str(Cow::Owned(s.into_owned()), cs),
+            Self::QName(u, l, p) => Prepared::QName(u, l, p),
+            Self::Bool(b) => Prepared::Bool(b),
+            Self::BoolPattern(b, d) => Prepared::BoolPattern(b, d),
+            Self::Int(i) => Prepared::Int(i),
+            Self::UInt(i) => Prepared::UInt(i),
+            Self::BigUInt(s) => Prepared::BigUInt(s),
+            Self::Bounded(i, lo, hi) => Prepared::Bounded(i, lo, hi),
+            Self::Decimal(d) => Prepared::Decimal(d),
+            Self::Float(f) => Prepared::Float(f),
+            Self::Binary(b) => Prepared::Binary(b),
+            Self::DateTime(d) => Prepared::DateTime(d),
+            Self::List(v) => Prepared::List(v),
+            Self::Enum(i, n) => Prepared::Enum(i, n),
+        }
+    }
+}
+
+fn lexical_text<'a>(v: &Value<'a>) -> Result<Cow<'a, str>> {
+    match v.as_str() {
+        Some(s) => Ok(Cow::Borrowed(s)),
+        None => lexical_string(v).map(Cow::Owned),
+    }
 }
 
 fn unencodable(detail: &'static str) -> Error {
@@ -581,13 +610,13 @@ pub(crate) fn lexical_string(v: &Value<'_>) -> Result<String> {
 }
 
 /// Checks `v` against `slot` and converts it (writer rule 6).
-pub(crate) fn prepare(
+pub(crate) fn prepare<'a>(
     schema: Option<&Schema>,
     slot: Slot,
-    v: &Value<'_>,
-) -> Result<Prepared> {
+    v: &Value<'a>,
+) -> Result<Prepared<'a>> {
     match slot {
-        Slot::Str => Ok(Prepared::Str(lexical_string(v)?, None)),
+        Slot::Str => Ok(Prepared::Str(lexical_text(v)?, None)),
         Slot::QName | Slot::TypeName => match v {
             Value::QName(n) => Ok(Prepared::QName(
                 n.uri().into(),
@@ -598,7 +627,7 @@ pub(crate) fn prepare(
         },
         Slot::Nil => match v {
             Value::Bool(b) | Value::BoolDigit(b) => Ok(Prepared::Bool(*b)),
-            _ => lexical::parse_bool(&lexical_string(v)?)
+            _ => lexical::parse_bool(&lexical_text(v)?)
                 .map(|(b, _)| Prepared::Bool(b))
                 .ok_or_else(|| unencodable("xsi:nil needs a Boolean")),
         },
@@ -610,10 +639,10 @@ pub(crate) fn prepare(
         Slot::Lexical(ty) => {
             let schema = schema
                 .ok_or_else(|| internal("typed slot without a schema"))?;
-            Ok(Prepared::Str(lexical_string(v)?, lexical_charset(schema, ty)))
+            Ok(Prepared::Str(lexical_text(v)?, lexical_charset(schema, ty)))
         }
         Slot::NilText => {
-            let s = lexical_string(v)?;
+            let s = lexical_text(v)?;
             lexical::parse_bool(&s)
                 .ok_or_else(|| unencodable("xsi:nil needs a Boolean"))?;
             Ok(Prepared::Str(s, Some(boolean_charset())))
@@ -621,13 +650,13 @@ pub(crate) fn prepare(
     }
 }
 
-fn prepare_typed(
+fn prepare_typed<'a>(
     schema: &Schema,
     ty: SimpleTypeId,
-    v: &Value<'_>,
-) -> Result<Prepared> {
+    v: &Value<'a>,
+) -> Result<Prepared<'a>> {
     let bad = |d| Err(unencodable(d));
-    let text = || lexical_string(v);
+    let text = || lexical_text(v);
     match schema.rep(ty) {
         Representation::String { charset } => {
             Ok(Prepared::Str(text()?, charset.clone()))
@@ -718,7 +747,7 @@ fn prepare_typed(
             match v {
                 Value::List(items) => {
                     for x in items.iter() {
-                        out.push(prepare_typed(schema, *item, &x)?);
+                        out.push(prepare_typed(schema, *item, &x)?.into_owned());
                     }
                 }
                 _ => {
@@ -728,7 +757,7 @@ fn prepare_typed(
                             schema,
                             *item,
                             &Value::Str(x),
-                        )?);
+                        )?.into_owned());
                     }
                 }
             }

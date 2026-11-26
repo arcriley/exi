@@ -214,7 +214,7 @@ pub fn encode_with(
         Vec::new(),
         WriterConfig::new(options(version)?, &g).header(header),
     )?;
-    super::encode_html(html, &mut w, &super::HtmlOptions::new())?;
+    super::parse::encode_profile(html, &mut w)?;
     Ok(w.into_sink())
 }
 
@@ -296,6 +296,6 @@ pub fn report(html: &str, version: u32) -> Result<crate::Deviations> {
         .header(crate::Header::Bare { cookie: false })
         .count_deviations(true);
     let mut w = Writer::new(crate::coding::IoSink(std::io::sink()), cfg)?;
-    super::encode_html(html, &mut w, &super::HtmlOptions::new())?;
+    super::parse::encode_profile(html, &mut w)?;
     Ok(w.deviations().cloned().unwrap_or_default())
 }

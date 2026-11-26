@@ -139,3 +139,30 @@ fn sorted_attrs(html: &str) -> String {
     html5ever::serialize::serialize(&mut out, &h, Default::default()).unwrap();
     String::from_utf8(out).unwrap()
 }
+
+#[test]
+fn parsed_tags_match_the_event_writer_byte_for_byte() {
+    use exi::html::{HtmlOptions, encode_html};
+    use exi::strings::{GlobalConfig, GlobalStrings};
+    use exi::{Header, Writer, WriterConfig};
+
+    let strings = GlobalStrings::new(GlobalConfig::new()).unwrap();
+    let g = profile::grammars(1).unwrap().attach(&strings).unwrap();
+    for html in [
+        include_str!("../fixtures/input/html/page.html"),
+        include_str!("../fixtures/input/html/fragmentary.html"),
+        "<p z='hi' id=a class=b id=c @click=go U000040click=ignored>",
+        "<svg><use xlink:href='#p'/><foreignObject><p lang=en>X</p></foreignObject></svg>",
+        "<template><table>outside<tr><td a='a\u{c}b'>中\u{ffff}</table></template>",
+        "<my-widget z=1 a=2>text<!--gone-->then<my-widget z=3 a=4></my-widget>",
+    ] {
+        let config = WriterConfig::new(profile::options(1).unwrap(), &g)
+            .header(Header::Bare { cookie: false })
+            .count_deviations(true);
+        let mut writer = Writer::new(Vec::new(), config).unwrap();
+        encode_html(html, &mut writer, &HtmlOptions::new()).unwrap();
+        let report = profile::report(html, 1).unwrap();
+        assert!(report.iter().eq(writer.deviations().unwrap().iter()));
+        assert_eq!(profile::encode(html, 1).unwrap(), writer.into_sink());
+    }
+}

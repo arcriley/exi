@@ -836,6 +836,11 @@ pub fn read_datetime<D: Decoder>(
 /// # Ok::<(), exi::Error>(())
 /// ```
 pub fn write_chars<E: Encoder>(e: &mut E, ch: Channel, s: &str) -> Result<()> {
+    // An aligned ASCII run is already in wire form. An unaligned bit
+    // encoder would need a shifted copy of the whole run.
+    if !s.is_empty() && e.bit_position() % 8 == 0 && s.is_ascii() {
+        return e.octets(ch, s.as_bytes());
+    }
     for c in s.chars() {
         write_uint(e, ch, c as u64)?;
     }

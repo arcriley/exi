@@ -50,7 +50,7 @@ use crate::{DateTime, DateTimeKind, Decimal, Float};
 
 /// A value in its canonical form; `utc` converts date-times with a time
 /// zone to UTC.
-pub(crate) fn value(p: Prepared, utc: bool) -> Prepared {
+pub(crate) fn value(p: Prepared<'_>, utc: bool) -> Prepared<'_> {
     match p {
         Prepared::Float(f) => Prepared::Float(float(f)),
         Prepared::Decimal(d) => Prepared::Decimal(decimal(d)),

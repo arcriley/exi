@@ -1199,7 +1199,8 @@ impl<'g> Document<'g> {
         // SAFETY: live nodes.
         unsafe {
             let ok = match ((*parent).r#type, (*child).r#type) {
-                (_, EXI_DOCUMENT_NODE | EXI_ATTRIBUTE_NODE) => false,
+                (_, EXI_DOCUMENT_NODE | EXI_ATTRIBUTE_NODE)
+                | (EXI_ELEMENT_NODE, EXI_DTD_NODE) => false,
                 (EXI_DOCUMENT_NODE, EXI_ELEMENT_NODE) => {
                     let root = self.root().map(|r| self.p(r));
                     root.is_none() || root == Some(child)
@@ -1207,12 +1208,12 @@ impl<'g> Document<'g> {
                 (
                     EXI_DOCUMENT_NODE,
                     EXI_COMMENT_NODE | EXI_PI_NODE | EXI_DTD_NODE,
+                )
+                | (EXI_ELEMENT_NODE, _)
+                | (
+                    EXI_ATTRIBUTE_NODE,
+                    EXI_TEXT_NODE | EXI_ENTITY_REF_NODE,
                 ) => true,
-                (EXI_ELEMENT_NODE, EXI_DTD_NODE) => false,
-                (EXI_ELEMENT_NODE, _) => true,
-                (EXI_ATTRIBUTE_NODE, EXI_TEXT_NODE | EXI_ENTITY_REF_NODE) => {
-                    true
-                }
                 _ => false,
             };
             if !ok {
@@ -1512,7 +1513,7 @@ impl<'g> Document<'g> {
     }
 
     /// Unlinks and frees `n` and everything inside it (`xmlUnlinkNode`
-    /// + `xmlFreeNode`). Its id and the ids inside it are no longer
+    /// and `xmlFreeNode`). Its id and the ids inside it are no longer
     /// valid.
     pub fn remove(&mut self, n: NodeId) {
         if n.index == 0 {

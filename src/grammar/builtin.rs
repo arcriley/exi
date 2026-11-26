@@ -347,13 +347,12 @@ impl ElementGrammar {
     ) -> Result<()> {
         let t = match l {
             Learn::SE(q) => Terminal::SE(q),
-            Learn::AT(q) => Terminal::AT(q),
             Learn::XsiType(q)
                 if self.start_tag.has_one_part(Terminal::AT(q)) =>
             {
                 return Ok(());
             }
-            Learn::XsiType(q) => Terminal::AT(q),
+            Learn::AT(q) | Learn::XsiType(q) => Terminal::AT(q),
             Learn::CH if self.start_tag.has_one_part(Terminal::CH) => {
                 return Ok(());
             }

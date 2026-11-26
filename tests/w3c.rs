@@ -253,11 +253,11 @@ impl<S: EventSink> EventSink for Shape<'_, S> {
         }
         let wrapper = self.fragment
             && match ev {
-                Event::StartElement(_) => self.depth == 1,
-                Event::EndElement(_) => self.depth == 0,
-                Event::Namespace(_)
+                Event::StartElement(_)
+                | Event::Namespace(_)
                 | Event::Attribute(..)
                 | Event::Characters(_) => self.depth == 1,
+                Event::EndElement(_) => self.depth == 0,
                 _ => false,
             };
         if wrapper {

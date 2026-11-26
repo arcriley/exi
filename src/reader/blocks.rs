@@ -284,7 +284,7 @@ impl<'g, const N: usize> Reader<'g, N> {
         self.dec.text = text;
         self.advance_input(used, inflated);
         match self.queue.get_mut(qi) {
-            Some((Out::AT(_, _, v), _)) | Some((Out::CH(v), _)) => *v = value,
+            Some((Out::AT(_, _, v) | Out::CH(v), _)) => *v = value,
             _ => {
                 return Err(err(
                     ErrorKind::Internal,

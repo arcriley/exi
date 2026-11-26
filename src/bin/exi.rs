@@ -556,9 +556,8 @@ fn decode_grammars(
             }
             set
         }
-        (Some(_), true) => GrammarSet::schemaless(),
+        (_, true) => GrammarSet::schemaless(),
         (Some(o), false) => return Err(format!("the stream is schema-less (schemaId {o:?}), but a schema was given").into()),
-        (None, true) => GrammarSet::schemaless(),
         (None, false) => load_schema(&a.schemas)?,
     },
     )

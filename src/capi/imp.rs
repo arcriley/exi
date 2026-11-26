@@ -935,12 +935,15 @@ impl WriterObj {
             Ok(()) => EXI_OK,
             Err(e) => {
                 self.last_msg = CString::new(e.detail()).unwrap_or_default();
-                let mut s = status_of(e.kind());
                 // A failed callback stops the writer with the
                 // callback's own status.
-                if let CSink::Callback(_, _, Some(cs)) = self.writer.sink() {
-                    s = *cs;
-                }
+                let s = if let CSink::Callback(_, _, Some(cs)) =
+                    self.writer.sink()
+                {
+                    *cs
+                } else {
+                    status_of(e.kind())
+                };
                 if e.is_fatal() {
                     self.poisoned = true;
                 }

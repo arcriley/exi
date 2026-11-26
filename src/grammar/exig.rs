@@ -1150,13 +1150,14 @@ impl Doc {
             strings: self.strings.clone(),
             ..Model::default()
         };
-        let mut base: Vec<Option<u32>> = Vec::new();
-        if self.builtin_types {
+        let mut base = if self.builtin_types {
             let bi = builtins()?;
             m.simple = bi.simple;
             m.types = bi.types;
-            base = bi.base;
-        }
+            bi.base
+        } else {
+            Vec::new()
+        };
         m.simple.extend(self.simple.iter().cloned());
         let shared = self.shared.as_deref().unwrap_or(&[]);
         let mut total = 0usize;
@@ -2200,10 +2201,10 @@ pub(crate) fn render_tables(m: &Model) -> String {
         let _ = writeln!(
             o,
             "                name: {},",
-            t.name.as_ref().map_or("None".to_string(), |x| format!(
-                "Some({})",
-                render_name(x)
-            ))
+            t.name.as_ref().map_or_else(
+                || "None".to_string(),
+                |x| format!("Some({})", render_name(x)),
+            )
         );
         let _ = writeln!(o, "                castable: {},", t.castable);
         let _ = writeln!(o, "                casts: vec!{:?},", t.casts);

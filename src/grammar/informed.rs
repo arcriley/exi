@@ -802,8 +802,8 @@ fn next_of(p: &Prod) -> Option<u32> {
     match p {
         Prod::At { next, .. }
         | Prod::AtUri { next, .. }
-        | Prod::AtAny { next } => Some(*next),
-        Prod::Se { next, .. }
+        | Prod::AtAny { next }
+        | Prod::Se { next, .. }
         | Prod::SeUri { next, .. }
         | Prod::SeAny { next }
         | Prod::Ch { next, .. } => Some(*next),
@@ -892,8 +892,8 @@ fn check_state(
                 (&*a.local, &*a.uri) < (&*b.local, &*b.uri)
             }
             (Prod::AtUri { uri: a, .. }, Prod::AtUri { uri: b, .. }) => a < b,
-            (Prod::Se { .. }, Prod::Se { .. }) => true, /* schema order; duplicates below */
-            (Prod::SeUri { .. }, Prod::SeUri { .. }) => true,
+            (Prod::Se { .. }, Prod::Se { .. })
+            | (Prod::SeUri { .. }, Prod::SeUri { .. }) => true, /* schema order; duplicates below */
             _ => false, // a second AT(*), SE(*), EE or CH
         };
         if !ordered {

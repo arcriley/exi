@@ -1101,13 +1101,13 @@ impl<'s> Compiler<'s> {
             v.and_then(|s| s.parse::<i128>().ok()).map(|x| x + adj)
         };
         if info.prim == Prim::Integer {
-            if let Some(v) =
-                int(facet("minInclusive"), 0).or(int(facet("minExclusive"), 1))
+            if let Some(v) = int(facet("minInclusive"), 0)
+                .or_else(|| int(facet("minExclusive"), 1))
             {
                 info.min = Some(info.min.map_or(v, |m| m.max(v)));
             }
             if let Some(v) = int(facet("maxInclusive"), 0)
-                .or(int(facet("maxExclusive"), -1))
+                .or_else(|| int(facet("maxExclusive"), -1))
             {
                 info.max = Some(info.max.map_or(v, |m| m.min(v)));
             }

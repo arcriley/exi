@@ -566,34 +566,35 @@ fn write_options_doc<E: Encoder>(e: &mut E, o: &Options) -> Result<()> {
     if common {
         code(e, 1 - h, 4 - h)?;
         h = 2;
-        let mut c = 0; // Common0..3: compression, fragment, schemaId, EE
-        if compression {
+        let mut c = if compression {
             code(e, 0, 4)?;
-            c = 1;
-        }
+            1
+        } else {
+            0
+        };
         if o.fragment() {
             code(e, 1 - c, 4 - c)?;
             c = 2;
         }
-        if o.schema_id() != &SchemaId::Absent {
+        if !matches!(o.schema_id(), SchemaId::Absent) {
             code(e, 2 - c, 4 - c)?;
             c = 3;
-            match o.schema_id() {
-                SchemaId::Nil => {
-                    code(e, 0, 2)?; // Sid0: AT(xsi:nil)
-                    e.nbit(S, 1, 1)?; // true; then EE (0 bits)
-                }
-                SchemaId::BuiltinTypes => {
-                    code(e, 1, 2)?; // Sid0: CH
-                    write_uint(e, S, 2)?; // literal of 0 characters
-                }
-                SchemaId::Id(s) => {
-                    code(e, 1, 2)?;
-                    write_uint(e, S, s.chars().count() as u64 + 2)?;
-                    write_chars(e, S, s)?;
-                }
-                SchemaId::Absent => unreachable!(),
+        }
+        match o.schema_id() {
+            SchemaId::Nil => {
+                code(e, 0, 2)?; // Sid0: AT(xsi:nil)
+                e.nbit(S, 1, 1)?; // true; then EE (0 bits)
             }
+            SchemaId::BuiltinTypes => {
+                code(e, 1, 2)?; // Sid0: CH
+                write_uint(e, S, 2)?; // literal of 0 characters
+            }
+            SchemaId::Id(s) => {
+                code(e, 1, 2)?;
+                write_uint(e, S, s.chars().count() as u64 + 2)?;
+                write_chars(e, S, s)?;
+            }
+            SchemaId::Absent => {}
         }
         code(e, 3 - c, 4 - c)?;
     }

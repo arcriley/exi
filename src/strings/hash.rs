@@ -135,7 +135,10 @@ pub fn crc32c(bytes: &[u8]) -> u32 {
         }
         return !crc;
     }
-    #[allow(unreachable_code)]
+    #[cfg(not(any(
+        all(target_arch = "x86_64", target_feature = "sse4.2"),
+        all(target_arch = "aarch64", target_feature = "crc")
+    )))]
     {
         let mut crc: u32 = 0xFFFF_FFFF;
         for &b in bytes {

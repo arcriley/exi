@@ -168,7 +168,9 @@ impl<'g> DocumentBuilder<'g> {
     }
 
     fn parent(&self) -> Result<*mut RawCommon> {
-        Ok(self.open_element()?.unwrap_or(self.doc.doc_ptr().cast())
+        Ok(self
+            .open_element()?
+            .unwrap_or_else(|| self.doc.doc_ptr().cast())
             as *mut RawCommon)
     }
 

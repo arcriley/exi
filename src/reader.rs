@@ -1260,14 +1260,11 @@ impl<'g, const N: usize> Reader<'g, N> {
             self.spill_if_full();
             return Ok(None);
         };
-        let opts = match h.options.or_else(|| self.cfg.options.clone()) {
-            Some(o) => o,
-            None => {
-                return Err(err(
-                    ErrorKind::Header,
-                    "no options in the header and none given",
-                ));
-            }
+        let Some(opts) = h.options.or_else(|| self.cfg.options.clone()) else {
+            return Err(err(
+                ErrorKind::Header,
+                "no options in the header and none given",
+            ));
         };
         self.cfg.sequence.check_options(&opts)?;
         check_options(&opts, self.cfg.grammars)?;

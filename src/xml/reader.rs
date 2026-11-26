@@ -1220,18 +1220,15 @@ impl<'g, const N: usize> XmlReader<'g, N> {
     fn reference(&mut self) -> Result<P> {
         let pos = self.pos_now();
         let (s, _) = self.peek();
-        let end = match s.find(';') {
-            Some(e) => e,
-            None => {
-                let (_, fin) = self.peek();
-                if fin
-                    || s.len() > 1024
-                    || s[1..].contains(|c: char| !is_name_char(c) && c != '#')
-                {
-                    return Err(xml_err("an unterminated reference").at(pos));
-                }
-                return Ok(P::Need);
+        let Some(end) = s.find(';') else {
+            let (_, fin) = self.peek();
+            if fin
+                || s.len() > 1024
+                || s[1..].contains(|c: char| !is_name_char(c) && c != '#')
+            {
+                return Err(xml_err("an unterminated reference").at(pos));
             }
+            return Ok(P::Need);
         };
         let body: String = s[1..end].into();
         self.brackets = 0;

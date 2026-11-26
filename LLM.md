@@ -6,6 +6,7 @@ works, how the code is laid out, how to build and test it, the decisions already
 ## The project
 
 - `exi` is a W3C EXI 1.0 implementation in Rust with a C ABI.
+- Hosted publicly at https://github.com/arcriley/exi
 - The crate is `exi`; the shared library built from it is `libexi.so`.
 - Rust users depend on `exi`.
 - License `MIT OR Apache-2.0`.

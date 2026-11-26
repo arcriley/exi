@@ -34,6 +34,13 @@ works, how the code is laid out, how to build and test it, the decisions already
 - Arc edits the doc comments and doctests himself before committing.
 - Keep changes to comments small and in the existing style unless asked.
 - Spec rules and their reasons belong in doc comments, next to the code they explain.
+- Less is more in docs, but the reasons must not get lost. When removing doc text, check
+  that any rationale it held survives somewhere: in the module docs, this file or
+  `EXIG.md`. No test catches deleted prose.
+- Several agents (Codex, Antigravity, Gemini, Claude) work in this repo at once. Before
+  editing, read `git status`, `git log` and `target/LLM.Notes.md`. Leave alone files
+  another agent has uncommitted changes in, and write handoff notes in
+  `target/LLM.Notes.md`.
 
 ## How code is written here
 
@@ -92,11 +99,15 @@ Defaults: `std`, `xml`, `bit-packed`, `compression`, `exig`.
 ## Build and test
 
 ```sh
-cargo test                      # default features: 167 tests
-cargo test --all-features       # everything: 240 tests
+cargo test                      # default features
+cargo test --all-features       # everything
 cargo build --lib --no-default-features   # the no_std + alloc engine
-cargo doc --all-features --no-deps
+cargo doc --all-features --no-deps        # must pass: broken and private doc links are errors
 ```
+
+Feature-gated items can't be doc links from code that is always built (write
+`GrammarSet::from_xsd`, not a link). Check `cargo doc` with a feature off when you add
+one.
 
 For devices with pre-agreed options, build with `--no-default-features --features
 bare-header-only` and explicitly select byte alignment and a bare header. The
@@ -112,7 +123,7 @@ cargo +nightly build --release --lib --no-default-features --features bare-heade
 
 - The C tests (`tests/c_dom.rs`) need `cc`. They build `libexi.so` with
   `cargo rustc --crate-type cdylib` into `target/c-api`, and run under valgrind when it
-  is installed. They link a Layer 1 round trip against the generated header and
+  is installed. They link a Layer 1 round trip against the hand-written header and
   compare libexi's libxml2-compatible DOM with real libxml2 where it is installed.
 - `tests/html.rs` and `tests/xhtml5.rs` also read saved web pages from the directory
   in `EXI_HTML_CORPUS` when it is set.
@@ -228,6 +239,9 @@ Findings so far (synthetic XMPP data):
   `thumbv7em-none-eabihf` and `riscv32imac-unknown-none-elf`, `wasm32-unknown-unknown`,
   the shared library, and header checks.
 - No fuzzing harness yet. The goal is 24 hours without a failure on every target.
+- `exiNewNs(el, href, NULL)` refuses a default namespace on an element in no namespace,
+  because it would move the element into that namespace. libxml2 allows it. Document it
+  under "Where libexi differs" in `src/capi/dom.rs` and `include/exi_dom.h`.
 - The W3C EXI test suite: `tests/w3c.rs` runs 3,172 interoperability encodings. 385 of
   them fail, and `tests/w3c-known.tsv` lists each with its reason; 284 of those are
   marked `investigate`.

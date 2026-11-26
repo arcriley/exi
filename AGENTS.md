@@ -1,6 +1,6 @@
-# LLM.md
+# AGENTS.md
 
-This file is for LLM sessions working on this repository. It covers how Arc
+This file is for LLM agents working on this repository. It covers how Arc
 works, how the code is laid out, how to build and test it, the decisions already made, and what is unfinished. This was added by Claude Code with advice for itself and other LLMs for efficiency.
 
 ## The project

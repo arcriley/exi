@@ -32,8 +32,7 @@
 //! 4. **`xmlns` attributes** given as attributes become NS events with
 //!    `Preserve.prefixes`, and are dropped without it. Namespace
 //!    declarations are never written as attributes.
-//! 5. **Names** use the session's string tables
-//!    ([`crate::coding::names`]), and learned productions are always
+//! 5. **Names** use the session's string tables and learned productions are always
 //!    used when they exist.
 //! 6. **Typed values** (schema-informed): a value given as text for a
 //!    typed slot is parsed into the slot's datatype; a typed value is
@@ -206,7 +205,7 @@ impl<'g> WriterConfig<'g> {
             utc_time: false,
         }
     }
-    /// Canonical EXI ([`crate::canonical`]): the same events, options
+    /// Canonical EXI: the same events, options
     /// and grammars always give the same octets, in this writer and in
     /// other implementations of EXI C14N. Refuses a header with the
     /// cookie and `Coding::Compression` (use pre-compression).
@@ -977,13 +976,15 @@ impl<'g, S: Sink> Writer<'g, S> {
     /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
     /// # let set = GrammarSet::schemaless();
     /// # let grammars = set.attach(&strings)?;
-    /// let bits = Options::builder().build()?;                  // bit-packed
+    /// # #[cfg(feature = "bit-packed")] {
+    /// let bits = Options::builder().coding(Coding::BitPacked).build()?;
     /// let mut w = Writer::new(Vec::new(), WriterConfig::new(bits, &grammars).header(Header::Bare { cookie: false }))?;
     /// w.start_element("a")?;
     /// w.end_element()?;
     /// w.end_document()?;
     /// assert_eq!(w.position().bit, 0);                         // padded to an octet
     /// assert_eq!(w.end_document().unwrap_err().kind(), ErrorKind::State);  // once only
+    /// # }
     /// # Ok::<(), exi::Error>(())
     /// ```
     pub fn end_document(&mut self) -> Result<()> {
@@ -1070,7 +1071,8 @@ impl<'g, S: Sink> Writer<'g, S> {
     /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
     /// # let set = GrammarSet::schemaless();
     /// # let grammars = set.attach(&strings)?;
-    /// let bits = Options::builder().build()?;                  // bit-packed
+    /// # #[cfg(feature = "bit-packed")] {
+    /// let bits = Options::builder().coding(Coding::BitPacked).build()?;
     /// let mut w = Writer::new(Vec::new(), WriterConfig::new(bits, &grammars).header(Header::Bare { cookie: false }))?;
     /// assert_eq!(w.position().event, 0);
     /// w.start_element("a")?;
@@ -1078,6 +1080,7 @@ impl<'g, S: Sink> Writer<'g, S> {
     /// let p = w.position();
     /// assert_eq!(p.event, 1);                                  // events given; SD is implied
     /// assert!(p.bit != 0);                                     // mid-octet
+    /// # }
     /// # Ok::<(), exi::Error>(())
     /// ```
     pub fn position(&self) -> Position {
@@ -1436,7 +1439,6 @@ impl<'g, S: Sink> Writer<'g, S> {
                 });
                 return Ok(());
             }
-            Event::StartTag(_) => return self.handle_event(ev),
             // A comment or PI the options leave out is not there: text
             // around it is one.
             Event::Comment(_)
@@ -1505,7 +1507,7 @@ impl<'g, S: Sink> Writer<'g, S> {
         let element = self.canonical_elements.last();
         if blank && !element.is_some_and(|e| e.preserve_space) {
             let element_content =
-                matches!(next, Event::StartElement(_) | Event::StartTag(_))
+                matches!(next, Event::StartElement(_))
                     || element.is_some_and(|e| e.has_child);
             if element_content {
                 return Ok(());
@@ -1523,16 +1525,6 @@ impl<'g, S: Sink> Writer<'g, S> {
                 self.start()
             }
             Event::EndDocument => self.end_doc(),
-            Event::StartTag(tag) => {
-                self.handle(&Event::StartElement(tag.name))?;
-                for ns in tag.ns {
-                    self.handle(&Event::Namespace(*ns))?;
-                }
-                for (n, v) in tag.attrs {
-                    self.handle(&Event::Attribute(*n, *v))?;
-                }
-                Ok(())
-            }
             _ => {
                 self.start()?;
                 if self.st.top == Top::Done {
@@ -1769,7 +1761,7 @@ impl<'g, S: Sink> Writer<'g, S> {
                 self.st.begin_sc();
                 self.body(&Event::StartElement(name.as_name()))
             }
-            Event::StartDocument | Event::EndDocument | Event::StartTag(_) => {
+            Event::StartDocument | Event::EndDocument => {
                 Err(err(ErrorKind::Internal, "handled before body"))
             }
         }

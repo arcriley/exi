@@ -1146,15 +1146,6 @@ impl EventSink for SchemaInference {
                 }
             }
             Event::EndElement(_) => self.end()?,
-            Event::StartTag(t) => {
-                self.event(&Event::StartElement(t.name))?;
-                for ns in t.ns {
-                    self.event(&Event::Namespace(*ns))?;
-                }
-                for (n, v) in t.attrs {
-                    self.event(&Event::Attribute(*n, *v))?;
-                }
-            }
             _ => {}
         }
         Ok(())

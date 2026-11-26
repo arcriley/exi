@@ -13,14 +13,38 @@
 //! text writer). Converting one format into another is one loop:
 //! [`transcode`].
 //!
-//! Pull is the core (D12). [`Handler`] is the push form, expat-style
-//! callbacks, and [`drive`] runs any source into a handler. A pull
-//! reader needs no stop-and-resume machinery: the caller owns the loop.
+//! Call [`EventSource::next`] directly to inspect event metadata or
+//! stop after a particular event.
+//!
+//! ```
+//! use exi::{Coding, Event, Options, Reader, ReaderConfig, Step};
+//! # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+//! # let strings = GlobalStrings::new(GlobalConfig::new())?;
+//! # let set = GrammarSet::schemaless();
+//! # let grammars = set.attach(&strings)?;
+//! let options = Options::builder().coding(Coding::ByteAligned).build()?;
+//! let mut reader: Reader = Reader::new(ReaderConfig::new(&grammars).options(options))?;
+//! let mut input = [&[0x80, 0x01, 0x02][..], &[b'a', 0x00][..]].into_iter();
+//! let mut root_depth = None;
+//! loop {
+//!     match reader.next()? {
+//!         Step::Event(Event::StartElement(_), meta) => root_depth = Some(meta.depth),
+//!         Step::Event(..) => {}
+//!         Step::NeedInput => match input.next() {
+//!             Some(chunk) => assert_eq!(reader.feed(chunk), chunk.len()),
+//!             None => reader.end_input(),
+//!         },
+//!         Step::End => break,
+//!     }
+//! }
+//! assert_eq!(root_depth, Some(1));
+//! # Ok::<(), exi::Error>(())
+//! ```
 
-use crate::event::{Doctype, Event, EventMeta, NsDecl, StartTag};
+use crate::event::{Event, EventMeta, NsDecl};
 use crate::name::{AsName, Name};
-use crate::value::{IntoValue, Value};
-use crate::{Error, Result};
+use crate::value::IntoValue;
+use crate::Result;
 
 /// What a source returns from `next`.
 #[derive(Debug)]
@@ -92,175 +116,6 @@ pub trait EventSink {
     }
     fn end_element(&mut self) -> Result<()> {
         self.event(&Event::EndElement(Name::local("")))
-    }
-}
-
-/// expat-style callbacks. Every method defaults to doing nothing.
-/// [`Handler::event`] dispatches to the others; override it to see
-/// every event in one place.
-#[allow(unused_variables)] // the defaults ignore their arguments
-pub trait Handler {
-    type Error;
-    fn event(
-        &mut self,
-        ev: &Event<'_>,
-        meta: &EventMeta,
-    ) -> core::result::Result<(), Self::Error> {
-        match *ev {
-            Event::StartDocument => self.start_document(),
-            Event::EndDocument => self.end_document(),
-            Event::StartElement(n) => self.start_element(n),
-            Event::EndElement(n) => self.end_element(n),
-            Event::Attribute(n, v) => self.attribute(n, v),
-            Event::Characters(v) => self.characters(v),
-            Event::Namespace(ns) => self.namespace(ns),
-            Event::Comment(s) => self.comment(s),
-            Event::ProcessingInstruction { target, data } => {
-                self.processing_instruction(target, data)
-            }
-            Event::Doctype(d) => self.doctype(d),
-            Event::EntityReference(s) => self.entity_reference(s),
-            Event::SelfContained => self.self_contained(),
-            Event::StartTag(t) => self.start_tag(t),
-        }
-    }
-    fn start_document(&mut self) -> core::result::Result<(), Self::Error> {
-        Ok(())
-    }
-    fn end_document(&mut self) -> core::result::Result<(), Self::Error> {
-        Ok(())
-    }
-    fn start_element(
-        &mut self,
-        name: Name<'_>,
-    ) -> core::result::Result<(), Self::Error> {
-        Ok(())
-    }
-    fn end_element(
-        &mut self,
-        name: Name<'_>,
-    ) -> core::result::Result<(), Self::Error> {
-        Ok(())
-    }
-    fn attribute(
-        &mut self,
-        name: Name<'_>,
-        v: Value<'_>,
-    ) -> core::result::Result<(), Self::Error> {
-        Ok(())
-    }
-    fn characters(
-        &mut self,
-        v: Value<'_>,
-    ) -> core::result::Result<(), Self::Error> {
-        Ok(())
-    }
-    fn namespace(
-        &mut self,
-        ns: NsDecl<'_>,
-    ) -> core::result::Result<(), Self::Error> {
-        Ok(())
-    }
-    fn comment(
-        &mut self,
-        text: &str,
-    ) -> core::result::Result<(), Self::Error> {
-        Ok(())
-    }
-    fn processing_instruction(
-        &mut self,
-        target: &str,
-        data: &str,
-    ) -> core::result::Result<(), Self::Error> {
-        Ok(())
-    }
-    fn doctype(
-        &mut self,
-        dt: Doctype<'_>,
-    ) -> core::result::Result<(), Self::Error> {
-        Ok(())
-    }
-    fn entity_reference(
-        &mut self,
-        name: &str,
-    ) -> core::result::Result<(), Self::Error> {
-        Ok(())
-    }
-    fn self_contained(&mut self) -> core::result::Result<(), Self::Error> {
-        Ok(())
-    }
-    fn start_tag(
-        &mut self,
-        tag: StartTag<'_>,
-    ) -> core::result::Result<(), Self::Error> {
-        Ok(())
-    }
-}
-
-/// An error from [`drive`]: from the source, or from the handler.
-#[derive(Debug)]
-pub enum DriveError<E> {
-    Exi(Error),
-    Handler(E),
-}
-
-/// Runs `src` into `h` until the source needs input or ends. A handler
-/// error stops the run at once and comes back as `DriveError::Handler`;
-/// the event that caused it is consumed.
-///
-/// ```
-/// # #[cfg(feature = "xml")] {
-/// use exi::{drive, DriveError, Handler, Name, Status};
-/// # use exi::strings::{GlobalStrings, GlobalConfig};
-/// # use exi::xml::{XmlReader, XmlConfig};
-/// # use exi::grammar::GrammarSet;
-/// #[derive(Default)]
-/// struct Log(Vec<String>);
-/// impl Handler for Log {
-///     type Error = core::convert::Infallible;
-///     fn start_element(&mut self, n: Name<'_>) -> Result<(), Self::Error> {
-///         self.0.push(format!("<{}", n.local_name()));
-///         Ok(())
-///     }
-///     fn end_element(&mut self, n: Name<'_>) -> Result<(), Self::Error> {
-///         self.0.push(format!("{}>", n.local_name()));
-///         Ok(())
-///     }
-/// }
-/// let strings = GlobalStrings::new(GlobalConfig::new())?;
-/// let set = GrammarSet::schemaless();
-/// let grammars = set.attach(&strings)?;
-/// let mut r: XmlReader = XmlReader::new(XmlConfig::new(), &grammars);
-/// r.feed(b"<a><b/></a>");
-/// r.end_input();
-/// let mut log = Log::default();
-/// assert!(matches!(drive(&mut r, &mut log), Ok(Status::End)));
-/// assert_eq!(log.0, ["<a", "<b", "b>", "a>"]);       // EE carries the name (D13)
-///
-/// struct Stop;
-/// impl Handler for Stop {
-///     type Error = &'static str;
-///     fn start_element(&mut self, _: Name<'_>) -> Result<(), &'static str> { Err("stop") }
-/// }
-/// let mut r: XmlReader = XmlReader::new(XmlConfig::new(), &grammars);
-/// r.feed(b"<a/>");
-/// r.end_input();
-/// assert!(matches!(drive(&mut r, &mut Stop), Err(DriveError::Handler("stop"))));
-/// # }
-/// # Ok::<(), exi::Error>(())
-/// ```
-pub fn drive<S: EventSource, H: Handler>(
-    src: &mut S,
-    h: &mut H,
-) -> core::result::Result<Status, DriveError<H::Error>> {
-    loop {
-        match src.next().map_err(DriveError::Exi)? {
-            Step::Event(ev, meta) => {
-                h.event(&ev, &meta).map_err(DriveError::Handler)?
-            }
-            Step::NeedInput => return Ok(Status::NeedInput),
-            Step::End => return Ok(Status::End),
-        }
     }
 }
 

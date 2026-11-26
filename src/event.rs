@@ -10,8 +10,7 @@
 //
 //! # The event set
 //!
-//! EXI's events, plus [`Event::StartTag`] (start-tag mode only). Every
-//! stream is:
+//! Every EXI stream is:
 //!
 //! ```text
 //! SD  (top-level content)  ED
@@ -48,11 +47,6 @@
 //!
 //! - `EndElement` carries the element's name (D13). EXI's EE has none;
 //!   the reader keeps an element stack anyway and fills it in.
-//! - `StartTag` replaces one SE, its NS events and its AT events in
-//!   start-tag mode (`ReaderConfig::start_tag(true)`), as expat and
-//!   libxml2 deliver a start tag. EXI marks the end of an attribute
-//!   list only with the next non-attribute event, so start-tag mode
-//!   delivers the tag one event later.
 //!
 //! # Attribute order
 //!
@@ -62,7 +56,6 @@
 //! order is not transmitted, so no reader can restore it.
 
 use alloc::boxed::Box;
-use alloc::vec::Vec;
 
 use crate::error::Position;
 use crate::name::{Name, OwnedName};
@@ -97,8 +90,6 @@ pub enum Event<'a> {
     EntityReference(&'a str),
     /// The element just started is self-contained.
     SelfContained,
-    /// Start-tag mode only.
-    StartTag(StartTag<'a>),
 }
 
 impl Event<'_> {
@@ -116,7 +107,6 @@ impl Event<'_> {
             Event::Doctype(_) => EventKind::DT,
             Event::EntityReference(_) => EventKind::ER,
             Event::SelfContained => EventKind::SC,
-            Event::StartTag(_) => EventKind::StartTag,
         }
     }
     pub fn to_owned(&self) -> OwnedEvent {
@@ -149,21 +139,6 @@ impl Event<'_> {
             },
             Event::EntityReference(s) => OwnedEvent::EntityReference(s.into()),
             Event::SelfContained => OwnedEvent::SelfContained,
-            Event::StartTag(t) => OwnedEvent::StartTag {
-                name: t.name.to_owned(),
-                ns: t
-                    .ns
-                    .iter()
-                    .map(|n| {
-                        (n.prefix.into(), n.uri.into(), n.local_element_ns)
-                    })
-                    .collect(),
-                attrs: t
-                    .attrs
-                    .iter()
-                    .map(|(n, v)| (n.to_owned(), v.to_owned()))
-                    .collect(),
-            },
         }
     }
 }
@@ -188,30 +163,6 @@ pub struct Doctype<'a> {
     pub public_id: &'a str,
     pub system_id: &'a str,
     pub text: &'a str,
-}
-
-/// A whole start tag (start-tag mode).
-///
-/// ```
-/// use exi::{Name, NsDecl, StartTag, Value};
-/// let attrs = [(Name::local("id"), Value::Str("a1")), (Name::new("urn:x", "id"), Value::Int(2))];
-/// let tag = StartTag { name: Name::local("p"), ns: &[], attrs: &attrs };
-/// assert_eq!(tag.attr("", "id"), Some(Value::Str("a1")));
-/// assert_eq!(tag.attr("urn:x", "id"), Some(Value::Int(2)));
-/// assert_eq!(tag.attr("urn:y", "id"), None);
-/// ```
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub struct StartTag<'a> {
-    pub name: Name<'a>,
-    pub ns: &'a [NsDecl<'a>],
-    pub attrs: &'a [(Name<'a>, Value<'a>)],
-}
-
-impl<'a> StartTag<'a> {
-    /// The value of the attribute with this URI and local name.
-    pub fn attr(&self, uri: &str, local: &str) -> Option<Value<'a>> {
-        self.attrs.iter().find(|(n, _)| n.is(uri, local)).map(|(_, v)| *v)
-    }
 }
 
 /// Facts about an event that are not part of it: the element depth
@@ -239,7 +190,6 @@ pub enum EventKind {
     DT,
     ER,
     SC,
-    StartTag,
 }
 
 /// [`Event`] with owned data.
@@ -269,18 +219,10 @@ pub enum OwnedEvent {
     },
     EntityReference(Box<str>),
     SelfContained,
-    StartTag {
-        name: OwnedName,
-        ns: Vec<(Box<str>, Box<str>, bool)>,
-        attrs: Vec<(OwnedName, OwnedValue)>,
-    },
 }
 
 impl OwnedEvent {
-    /// Borrows the event. A `StartTag` needs storage for its borrowed
-    /// slices, so it is the one event this cannot return: it returns
-    /// `StartElement` with the tag's name, and [`OwnedEvent::expand`]
-    /// gives the full sequence.
+    /// Borrows the event.
     pub fn as_event(&self) -> Event<'_> {
         match self {
             OwnedEvent::StartDocument => Event::StartDocument,
@@ -307,31 +249,6 @@ impl OwnedEvent {
             }
             OwnedEvent::EntityReference(s) => Event::EntityReference(s),
             OwnedEvent::SelfContained => Event::SelfContained,
-            OwnedEvent::StartTag { name, .. } => {
-                Event::StartElement(name.as_name())
-            }
-        }
-    }
-    /// The events this one stands for: a `StartTag` becomes SE, its NS
-    /// events and its AT events; any other event is itself.
-    pub fn expand(&self) -> Vec<Event<'_>> {
-        match self {
-            OwnedEvent::StartTag { name, ns, attrs } => {
-                let mut v = Vec::with_capacity(1 + ns.len() + attrs.len());
-                v.push(Event::StartElement(name.as_name()));
-                for (prefix, uri, local_element_ns) in ns {
-                    v.push(Event::Namespace(NsDecl {
-                        prefix,
-                        uri,
-                        local_element_ns: *local_element_ns,
-                    }));
-                }
-                for (n, val) in attrs {
-                    v.push(Event::Attribute(n.as_name(), val.as_value()));
-                }
-                v
-            }
-            other => alloc::vec![other.as_event()],
         }
     }
 }

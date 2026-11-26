@@ -88,21 +88,6 @@ fn read_literal<D: Decoder>(
 }
 
 /// Writes a URI and returns its number, adding it on a miss.
-///
-/// ```
-/// use exi::coding::{byte_aligned::ByteEncoder, names::write_uri};
-/// # use exi::strings::{GlobalStrings, GlobalConfig};
-/// # use exi::tables::{InitialEntries, SessionTables, ValueRules};
-/// # let g = GlobalStrings::new(GlobalConfig::new())?;
-/// # let init = InitialEntries::schemaless().attach(&g)?;
-/// let mut t = SessionTables::new(&init, ValueRules::unbounded(), &exi::Limits::new());
-/// let mut e = ByteEncoder::new(Vec::new());
-/// assert_eq!(write_uri(&mut e, &mut t, "")?, 0);          // 3 URIs: width(4) = 2 bits, value 1
-/// assert_eq!(write_uri(&mut e, &mut t, "urn:x")?, 3);     // miss: 0, then the literal
-/// assert_eq!(write_uri(&mut e, &mut t, "urn:x")?, 3);     // 4 URIs: width(5) = 3 bits, value 4
-/// assert_eq!(e.into_sink(), [0x01, 0x00, 0x05, b'u', b'r', b'n', b':', b'x', 0x04]);
-/// # Ok::<(), exi::Error>(())
-/// ```
 pub fn write_uri<E: Encoder>(
     e: &mut E,
     t: &mut SessionTables<'_>,
@@ -128,20 +113,6 @@ pub fn write_uri<E: Encoder>(
 /// `ErrorKind::Grammar` for a number the partition does not have;
 /// `ErrorKind::Limit` for a literal beyond `max_value_chars` or a table
 /// limit.
-///
-/// ```
-/// use exi::coding::{byte_aligned::ByteDecoder, names::read_uri};
-/// # use exi::strings::{GlobalStrings, GlobalConfig};
-/// # use exi::tables::{InitialEntries, SessionTables, ValueRules};
-/// # let g = GlobalStrings::new(GlobalConfig::new())?;
-/// # let init = InitialEntries::schemaless().attach(&g)?;
-/// let mut t = SessionTables::new(&init, ValueRules::unbounded(), &exi::Limits::new());
-/// let lim = exi::Limits::new();
-/// assert_eq!(read_uri(&mut ByteDecoder::new(&[0x01], &[]), &mut t, &lim)?, 0);
-/// assert_eq!(read_uri(&mut ByteDecoder::new(&[0x00, 0x05, b'u', b'r', b'n', b':', b'x'], &[]), &mut t, &lim)?, 3);
-/// assert_eq!(read_uri(&mut ByteDecoder::new(&[0x05], &[]), &mut t, &lim).unwrap_err().kind(), exi::ErrorKind::Grammar);
-/// # Ok::<(), exi::Error>(())
-/// ```
 pub fn read_uri<D: Decoder, T: ReadTables + ?Sized>(
     d: &mut D,
     t: &mut T,
@@ -162,22 +133,6 @@ pub fn read_uri<D: Decoder, T: ReadTables + ?Sized>(
 
 /// Writes a local name in the partition of URI number `uri` and returns
 /// its number.
-///
-/// ```
-/// use exi::coding::{byte_aligned::ByteEncoder, names::write_local};
-/// # use exi::strings::{GlobalStrings, GlobalConfig};
-/// # use exi::tables::{InitialEntries, SessionTables, ValueRules};
-/// # let g = GlobalStrings::new(GlobalConfig::new())?;
-/// # let init = InitialEntries::schemaless().attach(&g)?;
-/// let mut t = SessionTables::new(&init, ValueRules::unbounded(), &exi::Limits::new());
-/// let mut e = ByteEncoder::new(Vec::new());
-/// write_local(&mut e, &mut t, 0, "a")?;     // miss: length + 1 = 2, then 'a'
-/// write_local(&mut e, &mut t, 0, "a")?;     // hit: 0, then width(1) = 0 bits
-/// write_local(&mut e, &mut t, 0, "b")?;     // miss
-/// write_local(&mut e, &mut t, 0, "a")?;     // hit: 0, then width(2) = 1 bit: number 0
-/// assert_eq!(e.into_sink(), [0x02, b'a', 0x00, 0x02, b'b', 0x00, 0x00]);
-/// # Ok::<(), exi::Error>(())
-/// ```
 pub fn write_local<E: Encoder>(
     e: &mut E,
     t: &mut SessionTables<'_>,
@@ -205,22 +160,6 @@ pub fn write_local<E: Encoder>(
 /// # Errors
 ///
 /// As [`read_uri`].
-///
-/// ```
-/// use exi::coding::{byte_aligned::ByteDecoder, names::read_local};
-/// # use exi::strings::{GlobalStrings, GlobalConfig};
-/// # use exi::tables::{InitialEntries, SessionTables, ValueRules};
-/// # let g = GlobalStrings::new(GlobalConfig::new())?;
-/// # let init = InitialEntries::schemaless().attach(&g)?;
-/// let mut t = SessionTables::new(&init, ValueRules::unbounded(), &exi::Limits::new());
-/// let lim = exi::Limits::new();
-/// assert_eq!(read_local(&mut ByteDecoder::new(&[0x02, b'a'], &[]), &mut t, 0, &lim)?, 0);
-/// assert_eq!(read_local(&mut ByteDecoder::new(&[0x00], &[]), &mut t, 0, &lim)?, 0);     // hit: 0 bits
-/// t.add_local(0, "b")?;
-/// t.add_local(0, "c")?;
-/// assert_eq!(read_local(&mut ByteDecoder::new(&[0x00, 0x03], &[]), &mut t, 0, &lim).unwrap_err().kind(), exi::ErrorKind::Grammar);
-/// # Ok::<(), exi::Error>(())
-/// ```
 pub fn read_local<D: Decoder, T: ReadTables + ?Sized>(
     d: &mut D,
     t: &mut T,
@@ -243,21 +182,6 @@ pub fn read_local<D: Decoder, T: ReadTables + ?Sized>(
 
 /// Writes a name (URI, local name, and the prefix when `prefixes` is
 /// true) and returns its numbers.
-///
-/// ```
-/// use exi::coding::{byte_aligned::ByteEncoder, names::write_name};
-/// use exi::{Name, NameId};
-/// # use exi::strings::{GlobalStrings, GlobalConfig};
-/// # use exi::tables::{InitialEntries, SessionTables, ValueRules};
-/// # let g = GlobalStrings::new(GlobalConfig::new())?;
-/// # let init = InitialEntries::schemaless().attach(&g)?;
-/// let mut t = SessionTables::new(&init, ValueRules::unbounded(), &exi::Limits::new());
-/// let mut e = ByteEncoder::new(Vec::new());
-/// let xml_lang = Name::new("http://www.w3.org/XML/1998/namespace", "lang");
-/// assert_eq!(write_name(&mut e, &mut t, xml_lang, false)?, NameId { uri: 1, local: 2 });
-/// assert_eq!(e.into_sink(), [0x02, 0x00, 0x02]);   // URI 1 → 2; hit; number 2 of 4 (2 bits)
-/// # Ok::<(), exi::Error>(())
-/// ```
 pub fn write_name<E: Encoder>(
     e: &mut E,
     t: &mut SessionTables<'_>,
@@ -275,19 +199,6 @@ pub fn write_name<E: Encoder>(
 /// Reads a name. Returns its numbers and the prefix number when
 /// prefixes are written and the URI has prefixes (module
 /// documentation).
-///
-/// ```
-/// use exi::coding::{byte_aligned::ByteDecoder, names::read_name};
-/// use exi::NameId;
-/// # use exi::strings::{GlobalStrings, GlobalConfig};
-/// # use exi::tables::{InitialEntries, SessionTables, ValueRules};
-/// # let g = GlobalStrings::new(GlobalConfig::new())?;
-/// # let init = InitialEntries::schemaless().attach(&g)?;
-/// let mut t = SessionTables::new(&init, ValueRules::unbounded(), &exi::Limits::new());
-/// let (id, prefix) = read_name(&mut ByteDecoder::new(&[0x02, 0x00, 0x02], &[]), &mut t, true, &exi::Limits::new())?;
-/// assert_eq!((id, prefix), (NameId { uri: 1, local: 2 }, Some(0)));   // xml:lang
-/// # Ok::<(), exi::Error>(())
-/// ```
 pub fn read_name<D: Decoder, T: ReadTables + ?Sized>(
     d: &mut D,
     t: &mut T,
@@ -338,23 +249,6 @@ pub(crate) fn read_prefix<D: Decoder, T: ReadTables + ?Sized>(
 }
 
 /// Writes an NS event's content: URI, prefix, `local_element_ns`.
-///
-/// ```
-/// use exi::coding::{byte_aligned::ByteEncoder, names::write_ns};
-/// use exi::NsDecl;
-/// # use exi::strings::{GlobalStrings, GlobalConfig};
-/// # use exi::tables::{InitialEntries, SessionTables, ValueRules};
-/// # let g = GlobalStrings::new(GlobalConfig::new())?;
-/// # let init = InitialEntries::schemaless().attach(&g)?;
-/// let mut t = SessionTables::new(&init, ValueRules::unbounded(), &exi::Limits::new());
-/// let mut e = ByteEncoder::new(Vec::new());
-/// write_ns(&mut e, &mut t, NsDecl { prefix: "p", uri: "urn:x", local_element_ns: true })?;
-/// // URI miss and literal; the new URI has no prefixes: width(0 + 1) = 0 bits for the miss,
-/// // then the prefix literal; then the Boolean.
-/// assert_eq!(e.into_sink(), [0x00, 0x05, b'u', b'r', b'n', b':', b'x', 0x01, b'p', 0x01]);
-/// assert_eq!(t.prefix_str(3, 0), Some("p"));
-/// # Ok::<(), exi::Error>(())
-/// ```
 pub fn write_ns<E: Encoder>(
     e: &mut E,
     t: &mut SessionTables<'_>,
@@ -378,19 +272,6 @@ pub fn write_ns<E: Encoder>(
 
 /// Reads an NS event's content. Returns `(uri number, prefix number,
 /// local_element_ns)`.
-///
-/// ```
-/// use exi::coding::{byte_aligned::ByteDecoder, names::read_ns};
-/// # use exi::strings::{GlobalStrings, GlobalConfig};
-/// # use exi::tables::{InitialEntries, SessionTables, ValueRules};
-/// # let g = GlobalStrings::new(GlobalConfig::new())?;
-/// # let init = InitialEntries::schemaless().attach(&g)?;
-/// let mut t = SessionTables::new(&init, ValueRules::unbounded(), &exi::Limits::new());
-/// let bytes = [0x00, 0x05, b'u', b'r', b'n', b':', b'x', 0x01, b'p', 0x01];
-/// assert_eq!(read_ns(&mut ByteDecoder::new(&bytes, &[]), &mut t, &exi::Limits::new())?, (3, 0, true));
-/// assert_eq!(read_ns(&mut ByteDecoder::new(&[0x04, 0x02], &[]), &mut t, &exi::Limits::new()).unwrap_err().kind(), exi::ErrorKind::Grammar);
-/// # Ok::<(), exi::Error>(())
-/// ```
 pub fn read_ns<D: Decoder, T: ReadTables + ?Sized>(
     d: &mut D,
     t: &mut T,
@@ -414,25 +295,6 @@ pub fn read_ns<D: Decoder, T: ReadTables + ?Sized>(
 /// Writes a string value of `name` in [`Channel::Value`]`(name)`: a
 /// local hit, a global hit, or a literal, which is added when the value
 /// rules keep it.
-///
-/// ```
-/// use exi::coding::{byte_aligned::ByteEncoder, names::write_value};
-/// # use exi::strings::{GlobalStrings, GlobalConfig};
-/// # use exi::tables::{InitialEntries, SessionTables, ValueRules};
-/// # let g = GlobalStrings::new(GlobalConfig::new())?;
-/// # let init = InitialEntries::schemaless().attach(&g)?;
-/// let mut t = SessionTables::new(&init, ValueRules::unbounded(), &exi::Limits::new());
-/// let n = t.add_name("", "n")?;
-/// let m = t.add_name("", "m")?;
-/// let mut e = ByteEncoder::new(Vec::new());
-/// write_value(&mut e, &mut t, n, "hi")?;    // literal: 2 + 2 = 4
-/// write_value(&mut e, &mut t, n, "hi")?;    // local hit: 0, width(1) = 0 bits
-/// write_value(&mut e, &mut t, m, "hi")?;    // global hit: 1, width(1) = 0 bits
-/// write_value(&mut e, &mut t, m, "")?;      // literal of length 0: 2; never added
-/// assert_eq!(e.into_sink(), [0x04, b'h', b'i', 0x00, 0x01, 0x02]);
-/// assert_eq!(t.global_value_count(), 1);
-/// # Ok::<(), exi::Error>(())
-/// ```
 pub fn write_value<E: Encoder>(
     e: &mut E,
     t: &mut SessionTables<'_>,
@@ -474,27 +336,6 @@ pub enum ValueRead {
 /// `ErrorKind::Grammar` for a local or global number the partition does
 /// not have (with local partitions off, any local hit);
 /// `ErrorKind::Limit` for a literal beyond `max_value_chars`.
-///
-/// ```
-/// use exi::coding::{byte_aligned::ByteDecoder, names::{read_value, ValueRead}};
-/// # use exi::strings::{GlobalStrings, GlobalConfig};
-/// # use exi::tables::{InitialEntries, SessionTables, ValueRules};
-/// # let g = GlobalStrings::new(GlobalConfig::new())?;
-/// # let init = InitialEntries::schemaless().attach(&g)?;
-/// let mut t = SessionTables::new(&init, ValueRules::unbounded(), &exi::Limits::new());
-/// let n = t.add_name("", "n")?;
-/// let m = t.add_name("", "m")?;
-/// let lim = exi::Limits::new();
-/// let mut d = ByteDecoder::new(&[0x04, b'h', b'i', 0x00, 0x01], &[]);
-/// let mut out = String::new();
-/// assert!(matches!(read_value(&mut d, &mut t, n, &lim, &mut out)?, ValueRead::Literal(Some(_))));
-/// assert_eq!(out, "hi");
-/// assert!(matches!(read_value(&mut d, &mut t, n, &lim, &mut String::new())?, ValueRead::Hit(_)));
-/// assert!(matches!(read_value(&mut d, &mut t, m, &lim, &mut String::new())?, ValueRead::Hit(_)));
-/// let mut no_local = SessionTables::new(&init, ValueRules::unbounded().local_partitions(false), &lim);
-/// assert_eq!(read_value(&mut ByteDecoder::new(&[0x00], &[]), &mut no_local, n, &lim, &mut String::new()).unwrap_err().kind(), exi::ErrorKind::Grammar);
-/// # Ok::<(), exi::Error>(())
-/// ```
 pub fn read_value<D: Decoder, T: ReadTables + ?Sized>(
     d: &mut D,
     t: &mut T,
@@ -529,18 +370,6 @@ pub fn read_value<D: Decoder, T: ReadTables + ?Sized>(
             Ok(ValueRead::Literal(kept))
         }
     }
-}
-
-/// The channel for values of `name`.
-///
-/// ```
-/// use exi::coding::{Channel, names::value_channel};
-/// use exi::NameId;
-/// let id = NameId { uri: 0, local: 1 };
-/// assert_eq!(value_channel(id), Channel::Value(id));
-/// ```
-pub const fn value_channel(name: NameId) -> Channel {
-    Channel::Value(name)
 }
 
 /// What the read functions need from session tables. Implemented by

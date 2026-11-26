@@ -329,7 +329,7 @@ fn main() {
     run("Attach grammar to fresh pool", || {
         let global = GlobalStrings::new(GlobalConfig::device()).unwrap();
         let g = set.attach(&global).unwrap();
-        black_box(g.initial());
+        black_box(&g);
         record_live_heap();
     });
     let global = GlobalStrings::new(GlobalConfig::device()).unwrap();

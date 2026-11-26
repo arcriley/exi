@@ -42,14 +42,6 @@
 /// h ^= t;  h ^= h << 13;  h ^= h >> 17;  h ^= h << 5           (always done, even for t = 0)
 /// return h ^ (bytes.len() as u32)
 /// ```
-///
-/// ```
-/// use exi::strings::hash::xorshift32;
-/// assert_eq!(xorshift32(b""), 0x510c_4619);
-/// assert_eq!(xorshift32(b"a"), 0x5084_6a9f);
-/// assert_eq!(xorshift32(b"abcd"), 0x86d9_b824);              // one complete group, empty tail
-/// assert_eq!(xorshift32(b"juliet@example.com"), 0xfae0_1b6c);
-/// ```
 pub const fn xorshift32(bytes: &[u8]) -> u32 {
     const fn mix(mut h: u32) -> u32 {
         h ^= h << 13;
@@ -84,14 +76,6 @@ pub const fn xorshift32(bytes: &[u8]) -> u32 {
 /// value `0xFFFF_FFFF`, final XOR `0xFFFF_FFFF`) of `bytes`. With the
 /// hardware feature it uses the CRC32 instruction; without it, a
 /// table-free bitwise loop, used only by tests on other targets.
-///
-/// ```
-/// use exi::strings::hash::crc32c;
-/// assert_eq!(crc32c(b""), 0);
-/// assert_eq!(crc32c(b"a"), 0xc1d0_4330);
-/// assert_eq!(crc32c(b"123456789"), 0xe306_9283);             // the standard check value
-/// assert_eq!(crc32c(b"juliet@example.com"), 0xb99b_016b);
-/// ```
 pub fn crc32c(bytes: &[u8]) -> u32 {
     #[cfg(all(target_arch = "x86_64", target_feature = "sse4.2"))]
     {
@@ -153,13 +137,6 @@ pub fn crc32c(bytes: &[u8]) -> u32 {
 
 /// The table hash: [`crc32c`] where the hardware has it, otherwise
 /// [`xorshift32`]. Always computed over the string's UTF-8 bytes.
-///
-/// ```
-/// use exi::strings::hash::{hash32, crc32c, xorshift32};
-/// let hw = cfg!(any(target_feature = "sse4.2", target_feature = "crc"));
-/// let s = b"urn:example:sensor:1";
-/// assert_eq!(hash32(s), if hw { crc32c(s) } else { xorshift32(s) });
-/// ```
 pub fn hash32(bytes: &[u8]) -> u32 {
     if cfg!(any(target_feature = "sse4.2", target_feature = "crc")) {
         crc32c(bytes)
@@ -170,14 +147,27 @@ pub fn hash32(bytes: &[u8]) -> u32 {
 
 /// The 16-bit index key of a hash: the two halves XORed, `(h ^ (h >>
 /// 16)) as u16`.
-///
-/// ```
-/// use exi::strings::hash::key16;
-/// assert_eq!(key16(0x510c_4619), 0x1715);
-/// assert_eq!(key16(0xfae0_1b6c), 0xe18c);
-/// assert_eq!(key16(0x0000_ffff), 0xffff);
-/// assert_eq!(key16(0xffff_ffff), 0x0000);
-/// ```
 pub const fn key16(h: u32) -> u16 {
     (h ^ (h >> 16)) as u16
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn crc32c_check_vector() {
+        use crate::strings::hash::crc32c;
+        assert_eq!(crc32c(b""), 0);
+        assert_eq!(crc32c(b"a"), 0xc1d0_4330);
+        assert_eq!(crc32c(b"123456789"), 0xe306_9283); // the standard check value
+        assert_eq!(crc32c(b"juliet@example.com"), 0xb99b_016b);
+    }
+
+    #[test]
+    fn xorshift32_check_vectors() {
+        use crate::strings::hash::xorshift32;
+        assert_eq!(xorshift32(b""), 0x510c_4619);
+        assert_eq!(xorshift32(b"a"), 0x5084_6a9f);
+        assert_eq!(xorshift32(b"abcd"), 0x86d9_b824); // one complete group, empty tail
+        assert_eq!(xorshift32(b"juliet@example.com"), 0xfae0_1b6c);
+    }
 }

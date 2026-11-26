@@ -711,8 +711,7 @@ pub(super) fn event_to(
     match *ev {
         Event::StartDocument => out.r#type = EXI_EV_SD,
         Event::EndDocument => out.r#type = EXI_EV_ED,
-        Event::StartElement(n)
-        | Event::StartTag(crate::StartTag { name: n, .. }) => {
+        Event::StartElement(n) => {
             out.r#type = EXI_EV_SE;
             out.name = sc.name(n);
         }
@@ -1027,6 +1026,7 @@ pub(super) unsafe fn writer_new(c: &exi_writer_config) -> Option<WriterObj> {
 pub(super) unsafe fn reader_new(c: &exi_reader_config) -> Option<ReaderObj> {
     if c.sequence > EXI_SEQ_FRAMES
         || c.format > EXI_FORMAT_XML
+        || (c.format == EXI_FORMAT_EXI && c.flags & EXI_RD_START_TAG != 0)
         || c.flags
             & !(EXI_RD_START_TAG
                 | EXI_RD_XML_DOCTYPE
@@ -1056,8 +1056,7 @@ pub(super) unsafe fn reader_new(c: &exi_reader_config) -> Option<ReaderObj> {
         [c.sequence as usize];
     let mut cfg = ReaderConfig::new(g)
         .sequence(seq)
-        .limits(limits)
-        .start_tag(c.flags & EXI_RD_START_TAG != 0);
+        .limits(limits);
     if let Some(o) = options {
         cfg = cfg.options(o);
     }

@@ -75,16 +75,6 @@
 //! `ErrorKind::Truncated`; events already returned remain valid. After
 //! any error the reader is poisoned: every later call to `next` returns
 //! `ErrorKind::State`.
-//!
-//! # Start-tag mode
-//!
-//! With [`ReaderConfig::start_tag`] on, an SE and its NS and AT events
-//! arrive as one [`Event::StartTag`]. The reader must see the first
-//! content event after the attributes before it can return the tag, so
-//! the tag arrives one event later than in normal mode.
-//!
-//! Not implemented yet: [`Reader::new`] returns
-//! `ErrorKind::Unsupported` when it is on.
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
@@ -185,7 +175,6 @@ pub struct ReaderConfig<'g> {
     grammars: &'g Grammars<'g>,
     options: Option<Options>,
     sequence: Sequence,
-    start_tag: bool,
     limits: Limits,
 }
 
@@ -220,7 +209,6 @@ impl<'g> ReaderConfig<'g> {
             grammars,
             options: None,
             sequence: Sequence::Single,
-            start_tag: false,
             limits: Limits::new(),
         }
     }
@@ -282,22 +270,6 @@ impl<'g> ReaderConfig<'g> {
     /// ```
     pub fn sequence(self, s: Sequence) -> Self {
         ReaderConfig { sequence: s, ..self }
-    }
-    /// Requests combined start-tag events. EXI readers currently
-    /// return `Unsupported` for this mode.
-    ///
-    /// ```
-    /// use exi::{ErrorKind, Reader, ReaderConfig};
-    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
-    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
-    /// # let set = GrammarSet::schemaless();
-    /// # let grammars = set.attach(&strings)?;
-    /// let cfg = ReaderConfig::new(&grammars).start_tag(true);
-    /// assert_eq!(Reader::<64>::new(cfg).err().unwrap().kind(), ErrorKind::Unsupported);
-    /// # Ok::<(), exi::Error>(())
-    /// ```
-    pub fn start_tag(self, on: bool) -> Self {
-        ReaderConfig { start_tag: on, ..self }
     }
     /// The [`Limits`] input is checked against.
     ///
@@ -696,12 +668,6 @@ impl<'g, const N: usize> Reader<'g, N> {
         if let Some(opts) = &cfg.options {
             cfg.sequence.check_options(opts)?;
         }
-        if cfg.start_tag {
-            return Err(err(
-                ErrorKind::Unsupported,
-                "start-tag mode is not implemented yet",
-            ));
-        }
         Ok(Reader {
             ring: InputRing::new(),
             cfg,
@@ -780,8 +746,8 @@ impl<'g, const N: usize> Reader<'g, N> {
         self.fed += n as u64;
         n
     }
-    /// Free ring space to read into directly (see
-    /// [`InputRing::buffer`]). Call [`Self::commit`] after filling it.
+    /// Contiguous free input space to read into directly. Call
+    /// [`Self::commit`] with the number of bytes read.
     ///
     /// ```
     /// use exi::{Coding, Event, Options, Reader, ReaderConfig, Step};
@@ -837,49 +803,6 @@ impl<'g, const N: usize> Reader<'g, N> {
             self.spill.extend(a);
             self.spill.extend(b);
             self.ring.clear();
-        }
-    }
-    /// Feeds from any reader until it is exhausted, decoding as space
-    /// is needed, and ends the input. The events are not returned: use
-    /// this with [`crate::drive`] or after counting, or use `feed` in a
-    /// loop.
-    ///
-    /// ```
-    /// use exi::{Coding, Event, Options, Reader, ReaderConfig, Step};
-    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
-    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
-    /// # let set = GrammarSet::schemaless();
-    /// # let grammars = set.attach(&strings)?;
-    /// let byte = Options::builder().coding(Coding::ByteAligned).build()?;
-    /// let file: &[u8] = &[0x80, 0x01, 0x02, b'a', 0x00];       // <a/>, from any io::Read
-    /// let mut r: Reader = Reader::new(ReaderConfig::new(&grammars).options(byte))?;
-    /// r.fill_from(&mut &file[..])?;
-    /// // It fit in the ring, so every event is still to come; the input has ended.
-    /// let mut n = 0;
-    /// while let Step::Event(..) = r.next()? { n += 1; }
-    /// assert_eq!(n, 4);
-    /// # Ok::<(), exi::Error>(())
-    /// ```
-    #[cfg(feature = "std")]
-    pub fn fill_from(&mut self, src: &mut impl std::io::Read) -> Result<()> {
-        loop {
-            let buf = self.buffer();
-            if buf.is_empty() {
-                // Full: decode to make room. The events are not
-                // returned.
-                match self.next()? {
-                    Step::End => return Ok(()),
-                    _ => continue,
-                }
-            }
-            let n = src
-                .read(buf)
-                .map_err(|_| err(ErrorKind::Io, "read failed"))?;
-            if n == 0 {
-                self.end_input();
-                return Ok(());
-            }
-            self.commit(n);
         }
     }
     /// `Sequence::Frames`: the octets fed since the last call complete
@@ -1574,9 +1497,6 @@ impl<'g, const N: usize> Reader<'g, N> {
                     Terminal::DT => Out::DT(next(), next(), next(), next()),
                     _ => Out::ER(next()),
                 }
-            }
-            Terminal::SD => {
-                return Err(err(ErrorKind::Internal, "unexpected terminal"));
             }
         };
         Ok(())

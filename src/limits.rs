@@ -126,11 +126,11 @@ impl Limits {
     pub const fn max_integer_octets(self, n: u32) -> Self {
         Limits { max_integer_octets: n, ..self }
     }
-    /// See [`SessionTables`](crate::tables::SessionTables).
+    /// The number of name-table entries added during a session.
     pub const fn max_names(self, n: u32) -> Self {
         Limits { max_names: n, ..self }
     }
-    /// See [`SessionTables`](crate::tables::SessionTables).
+    /// Bytes retained by the session for names and values it adds.
     pub const fn max_string_table_bytes(self, n: u64) -> Self {
         Limits { max_string_table_bytes: n, ..self }
     }

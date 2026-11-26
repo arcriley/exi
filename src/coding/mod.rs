@@ -15,7 +15,7 @@
 //! | Sink | [`Sink`] | where finished octets go: a `Vec<u8>`, a fixed slice, a socket |
 //! | Coder | [`Encoder`] / [`Decoder`] | how n-bit values and octets are laid out: bit-packed or byte-aligned |
 //! | Datatypes | [`datatypes`] | how each EXI datatype is written with a coder |
-//! | Names and strings | [`names`] | how names and string values are written, using the session's string tables |
+//! | Names and strings | Internal | how names and string values are written, using the session's string tables |
 //!
 //! The reader and writer use only the [`Encoder`] and [`Decoder`]
 //! traits, so a coding is replaced without changing them. The coders:
@@ -67,7 +67,7 @@ pub(crate) mod block;
 pub(crate) mod body;
 pub mod byte_aligned;
 pub mod datatypes;
-pub mod names;
+pub(crate) mod names;
 
 fn check_width(width: u8) -> Result<()> {
     if width > 32 {

@@ -415,16 +415,6 @@ impl EventSink for DocumentBuilder<'_> {
                 self.ended = true;
                 Ok(())
             }
-            Event::StartTag(t) => {
-                self.start_ev(t.name)?;
-                for d in t.ns {
-                    self.ns_ev(d)?;
-                }
-                for (n, v) in t.attrs {
-                    self.attribute_ev(*n, v)?;
-                }
-                Ok(())
-            }
         }
     }
 }

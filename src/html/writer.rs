@@ -425,13 +425,6 @@ impl<S: Sink> EventSink for HtmlWriter<S> {
                 self.close_tag()?;
                 self.flush()
             }
-            Event::StartTag(t) => {
-                self.event(&Event::StartElement(t.name))?;
-                for (n, v) in t.attrs {
-                    self.event(&Event::Attribute(*n, *v))?;
-                }
-                Ok(())
-            }
         }
     }
 }

@@ -62,9 +62,8 @@
 //! | [`stream`] | event sources, sinks, push handlers, `transcode` |
 //! | [`options`], [`header`] | options and the stream header |
 //! | [`coding`] | sinks, bit and byte coders, datatype and name coding |
-//! | [`strings`], [`tables`] | global string tables and per-stream string tables |
+//! | [`strings`] | shared string storage |
 //! | [`grammar`] | built-in and schema-informed grammars, `.exig` files |
-//! | [`input`] | the input ring |
 //! | [`reader`], [`writer`] | EXI in and out |
 //! | [`xml`] | XML text in and out (feature `xml`) |
 //! | `xsd` | XSD documents to grammars (feature `xsd`) |
@@ -112,7 +111,7 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
-pub mod canonical;
+pub(crate) mod canonical;
 #[cfg(feature = "capi")]
 pub mod capi;
 pub mod coding;
@@ -127,7 +126,7 @@ pub mod header;
 pub mod html;
 #[cfg(feature = "infer")]
 pub mod infer;
-pub mod input;
+pub(crate) mod input;
 mod lexical;
 pub mod limits;
 pub mod name;
@@ -135,7 +134,7 @@ pub mod options;
 pub mod reader;
 pub mod stream;
 pub mod strings;
-pub mod tables;
+pub(crate) mod tables;
 pub mod value;
 pub mod writer;
 #[cfg(feature = "xml")]
@@ -145,7 +144,7 @@ pub mod xsd;
 
 pub use error::{Error, ErrorKind, Position, Result};
 pub use event::{
-    Doctype, Event, EventKind, EventMeta, NsDecl, OwnedEvent, StartTag,
+    Doctype, Event, EventKind, EventMeta, NsDecl, OwnedEvent,
 };
 pub use header::Header;
 pub use limits::Limits;
@@ -153,7 +152,7 @@ pub use name::{AsName, GlobalName, Name, NameId, OwnedName};
 pub use options::{Coding, Options, OptionsBuilder, Preserve, SchemaId};
 pub use reader::{Reader, ReaderConfig, Sequence};
 pub use stream::{
-    DriveError, EventSink, EventSource, Handler, Status, Step, drive,
+    EventSink, EventSource, Status, Step,
     transcode,
 };
 pub use value::{

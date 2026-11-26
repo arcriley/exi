@@ -312,7 +312,7 @@ pub(crate) fn decode<D: Decoder, T: ReadTables + ?Sized>(
                 out.texts.push(read_string(d, &limits)?);
             }
         }
-        Terminal::SC | Terminal::EE | Terminal::ED | Terminal::SD => {}
+        Terminal::SC | Terminal::EE | Terminal::ED => {}
     }
     Ok(())
 }

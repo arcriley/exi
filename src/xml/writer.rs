@@ -274,16 +274,6 @@ impl<S: Sink> EventSink for XmlWriter<S> {
         match *ev {
             Event::StartDocument | Event::SelfContained => Ok(()),
             Event::EndDocument => self.end_doc(),
-            Event::StartTag(t) => {
-                self.event(&Event::StartElement(t.name))?;
-                for ns in t.ns {
-                    self.event(&Event::Namespace(*ns))?;
-                }
-                for (n, v) in t.attrs {
-                    self.event(&Event::Attribute(*n, *v))?;
-                }
-                Ok(())
-            }
             Event::StartElement(n) => {
                 check_qname(n)?;
                 self.close_tag(false)?;

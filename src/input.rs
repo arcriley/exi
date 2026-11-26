@@ -32,48 +32,7 @@
 //!   destination (the global tables or a scratch buffer) as octets
 //!   arrive, so the ring size limits nothing about value sizes.
 
-/// A ring buffer of `N` octets.
-///
-/// ```
-/// use exi::input::InputRing;
-/// let mut r = InputRing::<64>::new();
-/// assert_eq!((r.len(), r.free()), (0, 64));
-/// assert_eq!(r.feed(&[1; 100]), 64);           // takes what fits
-/// assert_eq!((r.len(), r.free()), (64, 0));
-/// assert_eq!(r.feed(&[2]), 0);                 // full
-/// r.consume(60);
-/// assert_eq!(r.feed(&[3; 10]), 10);            // wraps around
-/// let (a, b) = r.filled();
-/// assert_eq!((a.len(), b.len()), (4, 10));     // the tail, then the wrapped part
-/// assert_eq!(b, [3; 10]);
-/// ```
-///
-/// Reading in place:
-///
-/// ```
-/// use exi::input::InputRing;
-/// let mut r = InputRing::<64>::new();
-/// let free = r.buffer();
-/// assert_eq!(free.len(), 64);
-/// free[..3].copy_from_slice(b"abc");
-/// r.commit(3);
-/// assert_eq!(r.filled().0, b"abc");
-/// r.consume(3);
-/// assert_eq!(r.buffer().len(), 64);            // empty: the cursors moved back to 0
-/// r.commit(10);
-/// r.consume(5);
-/// assert_eq!(r.buffer().len(), 54);            // from the write cursor to the end
-/// ```
-///
-/// Sizes that are not a power of two, or below 64, do not compile:
-///
-/// ```compile_fail
-/// let _ = exi::input::InputRing::<48>::new();
-/// ```
-///
-/// ```compile_fail
-/// let _ = exi::input::InputRing::<32>::new();
-/// ```
+/// A ring buffer of `N` octets. `N` must be a power of two and at least 64.
 pub struct InputRing<const N: usize> {
     buf: [u8; N],
     // Counters that only grow (wrapping); the index into `buf` is the
@@ -90,57 +49,22 @@ impl<const N: usize> InputRing<N> {
         "ring size: a power of two, at least 64"
     );
 
-    ///
-    /// ```
-    /// use exi::input::InputRing;
-    /// assert_eq!(InputRing::<64>::new().free(), 64);
-    /// ```
     pub const fn new() -> Self {
         let () = Self::VALID;
         InputRing { buf: [0; N], read: 0, write: 0 }
     }
     /// Octets filled.
-    ///
-    /// ```
-    /// use exi::input::InputRing;
-    /// let mut ring = InputRing::<64>::new();
-    /// ring.feed(b"abc");
-    /// ring.consume(1);
-    /// assert_eq!(ring.len(), 2);
-    /// ```
     pub const fn len(&self) -> usize {
         self.write.wrapping_sub(self.read)
     }
-    ///
-    /// ```
-    /// use exi::input::InputRing;
-    /// let mut ring = InputRing::<64>::new();
-    /// assert!(ring.is_empty());
-    /// ring.feed(b"x");
-    /// assert!(!ring.is_empty());
-    /// ```
     pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
     /// Octets free.
-    ///
-    /// ```
-    /// use exi::input::InputRing;
-    /// let mut ring = InputRing::<64>::new();
-    /// ring.feed(b"abc");
-    /// assert_eq!(ring.free(), 61);
-    /// ```
     pub const fn free(&self) -> usize {
         N - self.len()
     }
     /// Copies as much of `data` as fits and returns how much.
-    ///
-    /// ```
-    /// use exi::input::InputRing;
-    /// let mut ring = InputRing::<64>::new();
-    /// assert_eq!(ring.feed(&[0; 65]), 64);
-    /// assert_eq!(ring.feed(b"x"), 0);
-    /// ```
     pub fn feed(&mut self, data: &[u8]) -> usize {
         let mut done = 0;
         while done < data.len() {
@@ -159,15 +83,6 @@ impl<const N: usize> InputRing<N> {
     /// buffer or the read cursor, whichever comes first. When the ring
     /// is empty both cursors first move to 0, so the whole buffer is
     /// offered.
-    ///
-    /// ```
-    /// use exi::input::InputRing;
-    /// let mut ring = InputRing::<64>::new();
-    /// assert_eq!(ring.buffer().len(), 64);
-    /// ring.feed(&[0; 63]);
-    /// ring.consume(62);
-    /// assert_eq!(ring.buffer().len(), 1);
-    /// ```
     pub fn buffer(&mut self) -> &mut [u8] {
         if self.is_empty() {
             self.read = 0;
@@ -188,14 +103,6 @@ impl<const N: usize> InputRing<N> {
     ///
     /// When `n` exceeds the length `buffer` returned: a bug in the
     /// caller.
-    ///
-    /// ```
-    /// use exi::input::InputRing;
-    /// let mut ring = InputRing::<64>::new();
-    /// ring.buffer()[..2].copy_from_slice(b"ab");
-    /// ring.commit(2);
-    /// assert_eq!(ring.filled().0, b"ab");
-    /// ```
     pub fn commit(&mut self, n: usize) {
         let w = self.write & (N - 1);
         let r = self.read & (N - 1);
@@ -211,17 +118,6 @@ impl<const N: usize> InputRing<N> {
     }
     /// The filled region, as the part up to the end of the buffer and
     /// the wrapped part.
-    ///
-    /// ```
-    /// use exi::input::InputRing;
-    /// let mut ring = InputRing::<64>::new();
-    /// ring.feed(&[0; 63]);
-    /// ring.consume(62);
-    /// ring.feed(b"ab");
-    /// let (first, second) = ring.filled();
-    /// assert_eq!(first, &[0, b'a']);
-    /// assert_eq!(second, b"b");
-    /// ```
     pub fn filled(&self) -> (&[u8], &[u8]) {
         let len = self.len();
         let r = self.read & (N - 1);
@@ -236,28 +132,11 @@ impl<const N: usize> InputRing<N> {
     /// # Panics
     ///
     /// When `n` exceeds `len()`.
-    ///
-    /// ```
-    /// use exi::input::InputRing;
-    /// let mut ring = InputRing::<64>::new();
-    /// ring.feed(b"abc");
-    /// ring.consume(1);
-    /// assert_eq!(ring.filled().0, b"bc");
-    /// ```
     pub fn consume(&mut self, n: usize) {
         assert!(n <= self.len(), "consume beyond the filled region");
         self.read = self.read.wrapping_add(n);
     }
     /// Empties the ring.
-    ///
-    /// ```
-    /// use exi::input::InputRing;
-    /// let mut ring = InputRing::<64>::new();
-    /// ring.feed(b"abc");
-    /// ring.clear();
-    /// assert!(ring.is_empty());
-    /// assert_eq!(ring.buffer().len(), 64);
-    /// ```
     pub fn clear(&mut self) {
         self.read = 0;
         self.write = 0;
@@ -267,5 +146,39 @@ impl<const N: usize> InputRing<N> {
 impl<const N: usize> Default for InputRing<N> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn wraparound() {
+        use crate::input::InputRing;
+        let mut r = InputRing::<64>::new();
+        assert_eq!((r.len(), r.free()), (0, 64));
+        assert_eq!(r.feed(&[1; 100]), 64); // takes what fits
+        assert_eq!((r.len(), r.free()), (64, 0));
+        assert_eq!(r.feed(&[2]), 0); // full
+        r.consume(60);
+        assert_eq!(r.feed(&[3; 10]), 10); // wraps around
+        let (a, b) = r.filled();
+        assert_eq!((a.len(), b.len()), (4, 10)); // the tail, then the wrapped part
+        assert_eq!(b, [3; 10]);
+    }
+
+    #[test]
+    fn write_in_place() {
+        use crate::input::InputRing;
+        let mut r = InputRing::<64>::new();
+        let free = r.buffer();
+        assert_eq!(free.len(), 64);
+        free[..3].copy_from_slice(b"abc");
+        r.commit(3);
+        assert_eq!(r.filled().0, b"abc");
+        r.consume(3);
+        assert_eq!(r.buffer().len(), 64); // empty: the cursors moved back to 0
+        r.commit(10);
+        r.consume(5);
+        assert_eq!(r.buffer().len(), 54); // from the write cursor to the end
     }
 }

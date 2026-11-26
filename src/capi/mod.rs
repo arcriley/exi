@@ -1199,6 +1199,13 @@ pub unsafe extern "C" fn exi_grammar_set_digest(
 ///     assert_eq!(types, [EXI_EV_SD, EXI_EV_SE, EXI_EV_EE, EXI_EV_ED]);
 ///     exi_reader_free(r);
 ///     exi_reader_free(core::ptr::null_mut());                 // no-op
+///     cfg.flags = EXI_RD_START_TAG;
+///     assert!(exi_reader_new(&cfg).is_null());
+///     cfg.format = EXI_FORMAT_XML;
+///     let xml = exi_reader_new(&cfg);
+///     assert!(!xml.is_null());
+///     exi_reader_free(xml);
+///     cfg.flags = 0;
 ///     cfg.input_buffer_size = 100;                            // not an allowed size
 ///     assert!(exi_reader_new(&cfg).is_null());
 /// }

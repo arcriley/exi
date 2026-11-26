@@ -11,8 +11,8 @@
 //! # What this module is for
 //!
 //! An EXI stream gives each string a small number so a repeated string
-//! is sent as that number. Each stream keeps its own numbering
-//! ([`crate::tables`]). A server may hold thousands of streams at once,
+//! is sent as that number. Each stream keeps its own numbering.
+//! A server may hold thousands of streams at once,
 //! and most of their strings are the same: the same namespaces, element
 //! names and addresses. This module stores each distinct string once
 //! for all of them, and gives it an integer id. Two sessions that hold
@@ -46,7 +46,7 @@
 //!   keeps a `Held`;
 //! - session tables, for every entry they hold (crate-internal
 //!   `retain`/`release`);
-//! - [`Initial`](crate::tables::Initial), for every initial entry.
+//! - The attached grammar, for every initial entry.
 //!
 //! An id obtained with [`GlobalTable::get`] carries no reference. It
 //! names the string only while something else holds one. Kept beyond
@@ -82,7 +82,7 @@
 //! |---|---|
 //! | Arena | A `Vec` of chunks, each a `Box<[u8]>` of `chunk_bytes`. Each string is stored contiguously, followed by one NUL byte that its length does not count, so C callers can use it directly. A string longer than `chunk_bytes − 1` bytes gets a chunk of its own, exactly `len + 1` bytes. A string that does not fit in the rest of the current chunk starts a new chunk; the unused tail is counted in [`TableStats::free_bytes`] |
 //! | Entry, per id | `{ chunk: u32, start: u32, len: u32, cap: u32, hash: u32, refs: u32 }`. `cap` is the slot size in bytes (at least `len + 1`). `refs == 0` marks a free entry |
-//! | Index | A Swiss table (`hashbrown::HashMap`, hasher `rustc_hash::FxBuildHasher`) from the key of a string's hash to every id with that key. The key is [`hash::key16`] of [`hash::hash32`] with `hash_bits(16)`, or the full `hash32` with `hash_bits(32)`. The value is one id inline (the usual case) or a short list when keys collide |
+//! | Index | A Swiss table (`hashbrown::HashMap`, hasher `rustc_hash::FxBuildHasher`) from the key of a string's hash to every id with that key. The key is `hash::key16` of `hash::hash32` with `hash_bits(16)`, or the full `hash32` with `hash_bits(32)`. The value is one id inline (the usual case) or a short list when keys collide |
 //! | Free lists | Freed entries by size class: class `k` holds slots with `cap` in `[2^k, 2^(k+1))`. A new string of `n + 1` bytes takes, in this order: a freed slot from the smallest non-empty class `k` with `2^k ≥ n + 1`, with its id; a freed id whose slot went with its chunk, with fresh bytes; a new id with fresh bytes |
 //! | Chunk release | Each chunk counts its live strings. When the count reaches 0, the chunk's slots leave the free lists and the chunk is returned to the allocator; if it is the chunk being appended to, its write position goes back to 0 instead. So memory follows the live strings without a compaction step, which could never run anyway: compacting needs `&mut`, and every holder of a reference borrows the tables |
 //!
@@ -116,7 +116,7 @@ use rustc_hash::FxBuildHasher;
 
 use crate::{Error, ErrorKind, Result};
 
-pub mod hash;
+pub(crate) mod hash;
 
 mod sealed {
     pub trait Sealed {}
@@ -497,26 +497,6 @@ impl<K: Kind> GlobalTable<K> {
     }
 
     /// Counts describing this table.
-    ///
-    /// Keys that collide are listed together and both strings are
-    /// found. The first pair of the strings "s0", "s1", … whose 16-bit
-    /// keys collide is found by search here, so the test holds for
-    /// either hash function (see [`hash`]).
-    ///
-    /// ```
-    /// # use exi::strings::{GlobalStrings, GlobalConfig, hash};
-    /// let mut seen = std::collections::HashMap::new();
-    /// let (x, y) = (0..)
-    ///     .map(|i| format!("s{i}"))
-    ///     .find_map(|s| seen.insert(hash::key16(hash::hash32(s.as_bytes())), s.clone()).map(|o| (o, s)))
-    ///     .unwrap();
-    /// let g = GlobalStrings::new(GlobalConfig::new())?;   // 16-bit keys
-    /// let (hx, hy) = (g.values().intern(&x)?, g.values().intern(&y)?);
-    /// assert_ne!(hx.id(), hy.id());
-    /// assert_eq!((g.values().get(&x), g.values().get(&y)), (Some(hx.id()), Some(hy.id())));
-    /// assert_eq!(g.values().stats().longest_list, 2);
-    /// # Ok::<(), exi::Error>(())
-    /// ```
     ///
     /// When the last string in a chunk is freed, the chunk is released:
     ///
@@ -1336,4 +1316,29 @@ fn give_back(inner: &mut Inner, chunk: u32, start: u32, cap: u32, kept: u32) {
         inner.write_pos = start + kept;
     }
     inner.chunk_dec(chunk);
+}
+
+#[cfg(test)]
+mod collision_tests {
+    #[test]
+    fn colliding_strings_stay_distinct() -> crate::Result<()> {
+        use crate::strings::{GlobalConfig, GlobalStrings, hash};
+        let mut seen = alloc::collections::BTreeMap::new();
+        let (x, y) = (0..)
+            .map(|i| alloc::format!("s{i}"))
+            .find_map(|s| {
+                seen.insert(hash::key16(hash::hash32(s.as_bytes())), s.clone())
+                    .map(|o| (o, s))
+            })
+            .unwrap();
+        let g = GlobalStrings::new(GlobalConfig::new())?; // 16-bit keys
+        let (hx, hy) = (g.values().intern(&x)?, g.values().intern(&y)?);
+        assert_ne!(hx.id(), hy.id());
+        assert_eq!(
+            (g.values().get(&x), g.values().get(&y)),
+            (Some(hx.id()), Some(hy.id()))
+        );
+        assert_eq!(g.values().stats().longest_list, 2);
+        Ok(())
+    }
 }

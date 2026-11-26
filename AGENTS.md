@@ -211,7 +211,6 @@ Findings so far (synthetic XMPP data):
 
 ### In the code
 
-- Start-tag reader mode (`ReaderConfig::start_tag`) returns `ErrorKind::Unsupported`.
 - These options or streams return `ErrorKind::Unsupported`:
   - `schemaId ""` (built-in types only);
   - element fragment grammars;

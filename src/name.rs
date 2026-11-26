@@ -41,7 +41,7 @@ use crate::{Error, ErrorKind, Result};
 
 /// A name as the numbers one session gives it: `uri` is its number in
 /// the session's URI partition, `local` its number in that URI's
-/// local-name partition. Both come from [`SessionTables`](crate::tables::SessionTables).
+/// local-name partition. Both come from the session string table.
 ///
 /// Meaningful only in the session that produced it: two sessions can
 /// give different numbers to the same name, and the same numbers to

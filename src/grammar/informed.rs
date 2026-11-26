@@ -191,10 +191,6 @@ pub enum Prod {
 /// b.global(reading);
 /// let g = b.build()?;
 /// assert!(g.is_schema_informed() && g.is_closed());
-/// let e = g.initial_entries();
-/// assert_eq!(e.uris()[4], NS);                          // after the four fixed URIs
-/// assert_eq!(e.locals(4), ["reading", "temp"]);         // sorted
-/// assert_eq!(e.locals(0), ["unit"]);
 /// assert_eq!(g.name_id(NS, "temp"), Some(exi::NameId { uri: 4, local: 1 }));
 /// assert_eq!(g.stats().element_declarations, 2);
 /// # Ok::<(), exi::Error>(())
@@ -462,7 +458,8 @@ impl GrammarBuilder {
     /// use exi::{OwnedName, grammar::GrammarSet};
     /// let mut b = GrammarSet::builder();
     /// b.uri("urn:demo");
-    /// assert!(b.build()?.initial_entries().uris().contains(&"urn:demo"));
+    /// b.name(OwnedName::new("urn:later", "entry"));
+    /// assert_eq!(b.build()?.name_id("urn:later", "entry").unwrap().uri, 5);
     /// # Ok::<(), exi::Error>(())
     /// ```
     pub fn uri(&mut self, uri: &str) {

@@ -210,8 +210,7 @@ use hashbrown::HashMap;
 use rustc_hash::FxBuildHasher;
 
 use crate::strings::{
-    GlobalStrings, GlobalTable, Held, Kind, LocalId, PrefixId, StrId, UriId,
-    Value, ValueId,
+    GlobalStrings, GlobalTable, Kind, LocalId, PrefixId, StrId, UriId, ValueId,
 };
 use crate::{Error, ErrorKind, Limits, NameId, Result};
 
@@ -275,20 +274,6 @@ const XSD_TYPES: [&str; 46] = [
 
 /// The entries a stream starts with (R2), as strings. Attach them to a
 /// [`GlobalStrings`] with [`attach`](InitialEntries::attach) to make sessions.
-///
-/// ```
-/// use exi::tables::InitialEntries;
-/// let e = InitialEntries::schemaless();
-/// assert_eq!(e.uris(), ["", "http://www.w3.org/XML/1998/namespace",
-///                       "http://www.w3.org/2001/XMLSchema-instance"]);
-/// assert_eq!(e.prefixes(0), [""]);
-/// assert_eq!(e.prefixes(1), ["xml"]);
-/// assert_eq!(e.prefixes(2), ["xsi"]);
-/// assert!(e.locals(0).is_empty());
-/// assert_eq!(e.locals(1), ["base", "id", "lang", "space"]);
-/// assert_eq!(e.locals(2), ["nil", "type"]);
-/// assert!(e.locals(3).is_empty());        // out of range: empty
-/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InitialEntries {
     // Per URI, in number order: the URI, its prefixes, its local names.
@@ -315,18 +300,6 @@ impl InitialEntries {
     }
 
     /// With the XML Schema built-in types only: URIs 0 to 3.
-    ///
-    /// ```
-    /// use exi::tables::InitialEntries;
-    /// let e = InitialEntries::builtin_types();
-    /// assert_eq!(e.uris()[3], "http://www.w3.org/2001/XMLSchema");
-    /// assert!(e.prefixes(3).is_empty());     // no prefix for the XML Schema namespace
-    /// let types = e.locals(3);
-    /// assert_eq!(types.len(), 46);
-    /// assert_eq!((types[0], types[9], types[10], types[45]),
-    ///            ("ENTITIES", "Name", "QName", "unsignedShort"));
-    /// assert!(types.windows(2).all(|w| w[0] < w[1]));   // sorted, no duplicates
-    /// ```
     pub fn builtin_types() -> InitialEntries {
         let mut e = Self::schemaless();
         e.uris.push(uri_entry(XSD_NS, &[], &XSD_TYPES));
@@ -346,12 +319,6 @@ impl InitialEntries {
     pub fn uris(&self) -> alloc::vec::Vec<&str> {
         self.uris.iter().map(|u| &*u.uri).collect()
     }
-    /// The prefixes of URI number `uri`; empty when out of range.
-    pub fn prefixes(&self, uri: u32) -> alloc::vec::Vec<&str> {
-        self.uris.get(uri as usize).map_or_else(Vec::new, |u| {
-            u.prefixes.iter().map(|p| &**p).collect()
-        })
-    }
     /// The local names of URI number `uri`; empty when out of range.
     pub fn locals(&self, uri: u32) -> alloc::vec::Vec<&str> {
         self.uris
@@ -367,18 +334,6 @@ impl InitialEntries {
     ///
     /// `ErrorKind::Limit` when `g` cannot take the strings. Nothing is
     /// kept.
-    ///
-    /// ```
-    /// # use exi::strings::{GlobalStrings, GlobalConfig};
-    /// # use exi::tables::InitialEntries;
-    /// let g = GlobalStrings::new(GlobalConfig::new())?;
-    /// let init = InitialEntries::schemaless().attach(&g)?;
-    /// assert_eq!(g.uris().stats().strings, 3);
-    /// assert_eq!(g.locals().stats().strings, 6);
-    /// drop(init);
-    /// assert_eq!(g.uris().stats().strings, 0);
-    /// # Ok::<(), exi::Error>(())
-    /// ```
     pub fn attach<'g>(&self, g: &'g GlobalStrings) -> Result<Initial<'g>> {
         let mut init = Initial {
             global: g,
@@ -416,27 +371,6 @@ impl InitialEntries {
 
 /// Builds the initial entries of a schema (R2). Names given more than
 /// once, or already present, are kept once.
-///
-/// ```
-/// use exi::tables::InitialEntries;
-/// const XML: &str = "http://www.w3.org/XML/1998/namespace";
-/// let e = InitialEntries::schema()
-///     .uri("urn:b")
-///     .local("urn:a", "zeta")       // adds urn:a too
-///     .local("urn:a", "Zeta")
-///     .local("urn:a", "été")
-///     .local("urn:a", "zeta")       // duplicate
-///     .local("", "note")            // no namespace: URI 0 already exists
-///     .local(XML, "aaa")            // joins the XML namespace's names, sorted
-///     .build()?;
-/// assert_eq!(&e.uris()[4..], ["urn:a", "urn:b"]);   // after URI 3, sorted
-/// assert_eq!(e.locals(4), ["Zeta", "zeta", "été"]); // code-point order
-/// assert!(e.locals(5).is_empty());
-/// assert_eq!(e.locals(0), ["note"]);
-/// assert_eq!(e.locals(1), ["aaa", "base", "id", "lang", "space"]); // numbers shift
-/// assert!(e.prefixes(4).is_empty());                 // a schema adds no prefixes
-/// # Ok::<(), exi::Error>(())
-/// ```
 #[derive(Clone, Debug)]
 pub struct InitialBuilder {
     base: InitialEntries,
@@ -555,12 +489,6 @@ impl Drop for Initial<'_> {
 /// [`unbounded`](ValueRules::unbounded) is EXI's default: no capacity, no maximum length,
 /// local partitions on. A later `from_options(&Options)` fills these
 /// from a stream's options, once `Options` exists.
-///
-/// ```
-/// use exi::tables::ValueRules;
-/// let r = ValueRules::unbounded();
-/// assert_eq!((r.get_capacity(), r.get_max_length(), r.get_local_partitions()), (None, None, true));
-/// ```
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ValueRules {
     capacity: Option<u32>,
@@ -580,35 +508,11 @@ impl ValueRules {
     pub const fn max_length(self, n: Option<u32>) -> Self {
         ValueRules { max_length: n, ..self }
     }
-    /// The Profile's `localValuePartitions`: `false` for 0.
-    pub const fn local_partitions(self, on: bool) -> Self {
-        ValueRules { local_partitions: on, ..self }
-    }
-    pub const fn get_capacity(&self) -> Option<u32> {
-        self.capacity
-    }
-    pub const fn get_max_length(&self) -> Option<u32> {
-        self.max_length
-    }
     pub const fn get_local_partitions(&self) -> bool {
         self.local_partitions
     }
 
     /// R4: is a literal of `chars` characters added to the tables?
-    ///
-    /// ```
-    /// use exi::tables::ValueRules;
-    /// let r = ValueRules::unbounded();
-    /// assert!(!r.keeps(0));                                // the empty value: never
-    /// assert!(r.keeps(1));
-    /// assert!(r.keeps(u32::MAX));
-    /// let r = ValueRules::unbounded().max_length(Some(8));
-    /// assert!(r.keeps(8));                                 // exactly the maximum
-    /// assert!(!r.keeps(9));
-    /// assert!(!ValueRules::unbounded().max_length(Some(0)).keeps(1));  // nothing kept
-    /// assert!(!ValueRules::unbounded().capacity(Some(0)).keeps(5));    // nothing kept
-    /// assert!(ValueRules::unbounded().capacity(Some(1)).keeps(5));
-    /// ```
     pub const fn keeps(&self, chars: u32) -> bool {
         let room = !matches!(self.capacity, Some(0));
         let short = match self.max_length {
@@ -635,40 +539,7 @@ pub enum ValueHit {
 ///
 /// Setup used by the examples:
 ///
-/// ```
-/// use exi::strings::{GlobalStrings, GlobalConfig};
-/// use exi::tables::{InitialEntries, SessionTables, ValueRules};
-/// let g = GlobalStrings::new(GlobalConfig::new())?;
-/// let init = InitialEntries::schemaless().attach(&g)?;
-/// let t = SessionTables::new(&init, ValueRules::unbounded(), &exi::Limits::new());
-/// assert_eq!(t.uri_count(), 3);
-/// assert_eq!(t.uri_str(0), Some(""));           // no namespace is URI 0
-/// assert_eq!(t.prefix_count(0), 1);
-/// assert_eq!(t.local_count(1), 4);
-/// assert_eq!((t.global_value_count(), t.names_added(), t.referenced_bytes()), (0, 0, 0));
-/// # Ok::<(), exi::Error>(())
-/// ```
-///
 /// Dropping a session releases its references.
-///
-/// ```
-/// # use exi::strings::{GlobalStrings, GlobalConfig};
-/// # use exi::tables::{InitialEntries, SessionTables, ValueRules};
-/// let g = GlobalStrings::new(GlobalConfig::new())?;
-/// let init = InitialEntries::schemaless().attach(&g)?;
-/// let mut a = SessionTables::new(&init, ValueRules::unbounded(), &exi::Limits::new());
-/// let mut b = SessionTables::new(&init, ValueRules::unbounded(), &exi::Limits::new());
-/// let (na, nb) = (a.add_name("", "n")?, b.add_name("", "n")?);
-/// let v = a.add_value(na, "shared")?.unwrap();
-/// b.add_value(nb, "shared")?;
-/// assert_eq!(g.values().refs(v), 2);                 // stored once, referenced twice
-/// drop(a);
-/// assert_eq!(g.values().refs(v), 1);
-/// drop(b);
-/// assert_eq!(g.values().get("shared"), None);
-/// assert_eq!(g.locals().get("n"), None);
-/// # Ok::<(), exi::Error>(())
-/// ```
 pub struct SessionTables<'a> {
     initial: &'a Initial<'a>,
     rules: ValueRules,
@@ -714,6 +585,7 @@ impl<'a> SessionTables<'a> {
     pub(crate) fn uri_at(&self, outer: bool, n: u32) -> Option<UriId> {
         lookup(&self.initial.uris, Some(&self.active(outer).uris), n)
     }
+    #[cfg(feature = "xml")]
     pub fn uri(&self, n: u32) -> Option<UriId> {
         self.uri_at(false, n)
     }
@@ -740,38 +612,8 @@ impl<'a> SessionTables<'a> {
     /// [`Limits::max_string_table_bytes`], a full partition or a full
     /// global table. Nothing is changed.
     ///
-    /// ```
-    /// # use exi::strings::{GlobalStrings, GlobalConfig};
-    /// # use exi::tables::{InitialEntries, SessionTables, ValueRules};
-    /// # let g = GlobalStrings::new(GlobalConfig::new())?;
-    /// # let init = InitialEntries::schemaless().attach(&g)?;
-    /// # let mut t = SessionTables::new(&init, ValueRules::unbounded(), &exi::Limits::new());
-    /// assert_eq!(t.add_uri("urn:example")?, 3);
-    /// assert_eq!(t.add_uri("urn:example")?, 4);          // a duplicate gets its own number
-    /// assert_eq!(t.find_uri_str("urn:example"), Some(4)); // the most recent
-    /// assert_eq!(t.uri_str(3), Some("urn:example"));
-    /// assert_eq!(t.add_uri("")?, 5);                     // even "" may be sent again
-    /// # Ok::<(), exi::Error>(())
-    /// ```
-    ///
     /// [`Limits::max_names`] counts the names this session added;
     /// initial entries are free.
-    ///
-    /// ```
-    /// # use exi::strings::{GlobalStrings, GlobalConfig};
-    /// # use exi::tables::{InitialEntries, SessionTables, ValueRules};
-    /// # use exi::ErrorKind;
-    /// # let g = GlobalStrings::new(GlobalConfig::new())?;
-    /// # let init = InitialEntries::schemaless().attach(&g)?;
-    /// let mut t = SessionTables::new(&init, ValueRules::unbounded(), &exi::Limits::new().max_names(2));
-    /// t.add_uri("urn:a")?;
-    /// t.add_local(3, "x")?;                                      // 2: exactly the limit
-    /// assert_eq!(t.add_prefix(3, "p").unwrap_err().kind(), ErrorKind::Limit);
-    /// assert_eq!((t.prefix_count(3), t.names_added()), (0, 2)); // nothing changed
-    /// let mut u = SessionTables::new(&init, ValueRules::unbounded(), &exi::Limits::new().max_names(0));
-    /// assert_eq!(u.add_uri("urn:a").unwrap_err().kind(), ErrorKind::Limit);
-    /// # Ok::<(), exi::Error>(())
-    /// ```
     pub fn add_uri(&mut self, s: &str) -> Result<u32> {
         self.check_name(s.len(), self.uri_count() as usize)?;
         let id = self.global().uris().intern_id(s)?;
@@ -803,7 +645,8 @@ impl<'a> SessionTables<'a> {
             n,
         )
     }
-    pub fn prefix(&self, uri: u32, n: u32) -> Option<PrefixId> {
+    #[cfg(test)]
+    fn prefix(&self, uri: u32, n: u32) -> Option<PrefixId> {
         self.prefix_at(false, uri, n)
     }
     pub(crate) fn prefix_str_at(
@@ -869,6 +712,7 @@ impl<'a> SessionTables<'a> {
             n,
         )
     }
+    #[cfg(any(feature = "xml", test))]
     pub fn local(&self, uri: u32, n: u32) -> Option<LocalId> {
         self.local_at(false, uri, n)
     }
@@ -897,19 +741,6 @@ impl<'a> SessionTables<'a> {
     ///
     /// `ErrorKind::Arg` when `uri` is not a number this session has;
     /// otherwise as `add_uri`.
-    ///
-    /// ```
-    /// # use exi::strings::{GlobalStrings, GlobalConfig};
-    /// # use exi::tables::{InitialEntries, SessionTables, ValueRules};
-    /// # use exi::ErrorKind;
-    /// # let g = GlobalStrings::new(GlobalConfig::new())?;
-    /// # let init = InitialEntries::schemaless().attach(&g)?;
-    /// # let mut t = SessionTables::new(&init, ValueRules::unbounded(), &exi::Limits::new());
-    /// assert_eq!(t.add_local(1, "extra")?, 4);              // after base, id, lang, space
-    /// assert_eq!(t.add_local(3, "x").unwrap_err().kind(), ErrorKind::Arg);  // no URI 3
-    /// assert_eq!(t.names_added(), 1);
-    /// # Ok::<(), exi::Error>(())
-    /// ```
     pub fn add_local(&mut self, uri: u32, s: &str) -> Result<u32> {
         self.check_uri_number(uri)?;
         self.check_name(s.len(), self.local_count(uri) as usize)?;
@@ -941,21 +772,7 @@ impl<'a> SessionTables<'a> {
     /// The numbers of a name, adding its URI and local name when
     /// absent: what a writer does. A reader adds with `add_uri` and
     /// `add_local`, as the stream says.
-    ///
-    /// ```
-    /// # use exi::strings::{GlobalStrings, GlobalConfig};
-    /// # use exi::tables::{InitialEntries, SessionTables, ValueRules};
-    /// # let g = GlobalStrings::new(GlobalConfig::new())?;
-    /// # let init = InitialEntries::schemaless().attach(&g)?;
-    /// # let mut t = SessionTables::new(&init, ValueRules::unbounded(), &exi::Limits::new());
-    /// let lang = t.add_name("http://www.w3.org/XML/1998/namespace", "lang")?;
-    /// assert_eq!(lang, exi::NameId { uri: 1, local: 2 });  // initial: nothing added
-    /// let to = t.add_name("", "to")?;
-    /// assert_eq!(to, exi::NameId { uri: 0, local: 0 });
-    /// assert_eq!(t.add_name("", "to")?, to);                // found, not added again
-    /// assert_eq!(t.names_added(), 1);
-    /// # Ok::<(), exi::Error>(())
-    /// ```
+    #[cfg(any(feature = "xml", test))]
     pub fn add_name(&mut self, uri: &str, local: &str) -> Result<NameId> {
         let u = match self.find_uri_str(uri) {
             Some(u) => u,
@@ -991,9 +808,6 @@ impl<'a> SessionTables<'a> {
     pub fn global_value(&self, n: u32) -> Option<ValueId> {
         self.cur.slots.get(n as usize).map(|s| s.id)
     }
-    pub fn global_value_str(&self, n: u32) -> Option<&str> {
-        self.global_value(n).map(|id| self.global().values().resolve(id))
-    }
     /// `None` for a number never assigned or permanently unassigned.
     pub fn local_value(&self, name: NameId, n: u32) -> Option<ValueId> {
         let lp = self.cur.local.get(&name)?;
@@ -1002,33 +816,8 @@ impl<'a> SessionTables<'a> {
         }
         lp.live.get((n - lp.base) as usize).copied()
     }
-    pub fn local_value_str(&self, name: NameId, n: u32) -> Option<&str> {
-        self.local_value(name, n).map(|id| self.global().values().resolve(id))
-    }
     /// The value's local number if it has one, else its global number
     /// (R10).
-    ///
-    /// A router looks a JID up once, keeps it, and finds its number on
-    /// each connection with one integer lookup:
-    ///
-    /// ```
-    /// # use exi::strings::{GlobalStrings, GlobalConfig};
-    /// # use exi::tables::{InitialEntries, SessionTables, ValueRules, ValueHit};
-    /// let g = GlobalStrings::new(GlobalConfig::new())?;
-    /// let init = InitialEntries::schemaless().attach(&g)?;
-    /// let mut c1 = SessionTables::new(&init, ValueRules::unbounded(), &exi::Limits::new());
-    /// let mut c2 = SessionTables::new(&init, ValueRules::unbounded(), &exi::Limits::new());
-    /// let to1 = c1.add_name("", "to")?;
-    /// let to2 = c2.add_name("", "to")?;
-    /// c1.add_value(to1, "juliet@example.com")?;            // connection 1 has seen it
-    ///
-    /// let jid = g.values().intern("juliet@example.com")?;  // the router keeps this handle
-    /// assert_eq!(c1.find_value(to1, jid.id()), ValueHit::Local(0));
-    /// assert_eq!(c2.find_value(to2, jid.id()), ValueHit::Miss); // connection 2: send a literal
-    /// drop(c1);
-    /// assert_eq!(jid.as_str(), "juliet@example.com");      // still valid: the router holds it
-    /// # Ok::<(), exi::Error>(())
-    /// ```
     pub fn find_value(&self, name: NameId, id: ValueId) -> ValueHit {
         if self.rules.local_partitions {
             if let Some(&n) =
@@ -1065,186 +854,16 @@ impl<'a> SessionTables<'a> {
     /// R4 and R5: the empty value is skipped; a kept value has both
     /// numbers.
     ///
-    /// ```
-    /// # use exi::strings::{GlobalStrings, GlobalConfig};
-    /// # use exi::tables::{InitialEntries, SessionTables, ValueRules, ValueHit};
-    /// # let g = GlobalStrings::new(GlobalConfig::new())?;
-    /// # let init = InitialEntries::schemaless().attach(&g)?;
-    /// # let mut t = SessionTables::new(&init, ValueRules::unbounded(), &exi::Limits::new());
-    /// let class = t.add_name("", "class")?;
-    /// let style = t.add_name("", "style")?;
-    /// assert_eq!(t.add_value(class, "")?, None);
-    /// assert_eq!(t.global_value_count(), 0);
-    /// let big = t.add_value(class, "big")?.unwrap();
-    /// assert_eq!(t.find_value(class, big), ValueHit::Local(0));   // local first
-    /// assert_eq!(t.find_value(style, big), ValueHit::Global(0));  // other names: global
-    /// assert_eq!(t.find_value_str(style, "small"), ValueHit::Miss);
-    /// assert_eq!(t.local_value_str(class, 0), Some("big"));
-    /// assert_eq!(t.local_value_count(style), 0);
-    /// # Ok::<(), exi::Error>(())
-    /// ```
-    ///
     /// `valueMaxLength` counts characters, not bytes.
-    ///
-    /// ```
-    /// # use exi::strings::{GlobalStrings, GlobalConfig};
-    /// # use exi::tables::{InitialEntries, SessionTables, ValueRules};
-    /// # let g = GlobalStrings::new(GlobalConfig::new())?;
-    /// # let init = InitialEntries::schemaless().attach(&g)?;
-    /// let rules = ValueRules::unbounded().max_length(Some(3));
-    /// let mut t = SessionTables::new(&init, rules, &exi::Limits::new());
-    /// let n = t.add_name("", "n")?;
-    /// assert!(t.add_value(n, "ééé")?.is_some());      // 3 characters, 6 bytes
-    /// assert!(t.add_value(n, "😀😀😀")?.is_some());   // 3 characters, 12 bytes
-    /// assert!(t.add_value(n, "abcd")?.is_none());     // 4 characters
-    /// # Ok::<(), exi::Error>(())
-    /// ```
-    ///
-    /// R6 at its smallest: with capacity 1, every value removes the one
-    /// before it.
-    ///
-    /// ```
-    /// # use exi::strings::{GlobalStrings, GlobalConfig};
-    /// # use exi::tables::{InitialEntries, SessionTables, ValueRules, ValueHit};
-    /// # let g = GlobalStrings::new(GlobalConfig::new())?;
-    /// # let init = InitialEntries::schemaless().attach(&g)?;
-    /// let mut t = SessionTables::new(&init, ValueRules::unbounded().capacity(Some(1)), &exi::Limits::new());
-    /// let n = t.add_name("", "n")?;
-    /// let a = t.add_value(n, "a")?.unwrap();
-    /// let b = t.add_value(n, "b")?.unwrap();
-    /// assert_eq!(t.global_value_count(), 1);
-    /// assert_eq!(t.global_value(0), Some(b));
-    /// assert_eq!(t.find_value(n, a), ValueHit::Miss);
-    /// assert_eq!(t.find_value(n, b), ValueHit::Local(1));  // number 0 is unassigned for good
-    /// assert_eq!(t.local_value(n, 0), None);
-    /// assert_eq!(t.local_value_count(n), 2);
-    /// assert_eq!(g.values().get("a"), None);               // no one references "a" now
-    /// # Ok::<(), exi::Error>(())
-    /// ```
-    ///
-    /// R6 wrapping many times: ten values through capacity 3. The slot
-    /// counter is at 10 mod 3 = 1, so the oldest value still present is
-    /// in slot 1.
-    ///
-    /// ```
-    /// # use exi::strings::{GlobalStrings, GlobalConfig};
-    /// # use exi::tables::{InitialEntries, SessionTables, ValueRules, ValueHit};
-    /// # let g = GlobalStrings::new(GlobalConfig::new())?;
-    /// # let init = InitialEntries::schemaless().attach(&g)?;
-    /// let mut t = SessionTables::new(&init, ValueRules::unbounded().capacity(Some(3)), &exi::Limits::new());
-    /// let n = t.add_name("", "n")?;
-    /// for i in 0..10 { t.add_value(n, &format!("v{i}"))?; }
-    /// assert_eq!(t.global_value_count(), 3);
-    /// let slots: Vec<_> = (0..3).map(|i| t.global_value_str(i).unwrap()).collect();
-    /// assert_eq!(slots, ["v9", "v7", "v8"]);
-    /// assert_eq!(t.local_value_count(n), 10);
-    /// assert_eq!(t.local_value_str(n, 6), None);           // removed
-    /// assert_eq!(t.local_value_str(n, 7), Some("v7"));
-    /// assert_eq!(t.local_value_str(n, 9), Some("v9"));
-    /// assert_eq!(t.local_value_str(n, 10), None);          // not yet assigned
-    /// assert_eq!(t.find_value_str(n, "v8"), ValueHit::Local(8));
-    /// # Ok::<(), exi::Error>(())
-    /// ```
-    ///
-    /// R6 removes a value from its own local partition only; other
-    /// names keep theirs.
-    ///
-    /// ```
-    /// # use exi::strings::{GlobalStrings, GlobalConfig};
-    /// # use exi::tables::{InitialEntries, SessionTables, ValueRules, ValueHit};
-    /// # let g = GlobalStrings::new(GlobalConfig::new())?;
-    /// # let init = InitialEntries::schemaless().attach(&g)?;
-    /// let mut t = SessionTables::new(&init, ValueRules::unbounded().capacity(Some(2)), &exi::Limits::new());
-    /// let (x, y) = (t.add_name("", "x")?, t.add_name("", "y")?);
-    /// t.add_value(x, "x0")?;
-    /// t.add_value(y, "y0")?;
-    /// t.add_value(y, "y1")?;                                // removes "x0", the oldest
-    /// assert_eq!((t.local_value_count(x), t.local_value_str(x, 0)), (1, None));
-    /// assert_eq!(t.local_value_str(y, 0), Some("y0"));
-    /// assert_eq!(t.find_value_str(y, "y1"), ValueHit::Local(1));
-    /// let x1 = t.add_value(x, "x1")?.unwrap();              // removes "y0"
-    /// assert_eq!(t.find_value(x, x1), ValueHit::Local(1));  // x's number 0 stays unassigned
-    /// assert_eq!(t.local_value_str(y, 0), None);
-    /// # Ok::<(), exi::Error>(())
-    /// ```
     ///
     /// Capacity 0 keeps nothing; without local partitions only global
     /// numbers exist (R11).
     ///
-    /// ```
-    /// # use exi::strings::{GlobalStrings, GlobalConfig};
-    /// # use exi::tables::{InitialEntries, SessionTables, ValueRules, ValueHit};
-    /// # let g = GlobalStrings::new(GlobalConfig::new())?;
-    /// # let init = InitialEntries::schemaless().attach(&g)?;
-    /// let mut t = SessionTables::new(&init, ValueRules::unbounded().capacity(Some(0)), &exi::Limits::new());
-    /// let n = t.add_name("", "n")?;
-    /// assert_eq!(t.add_value(n, "anything")?, None);
-    /// assert_eq!((t.global_value_count(), t.local_value_count(n)), (0, 0));
-    ///
-    /// let mut u = SessionTables::new(&init, ValueRules::unbounded().local_partitions(false), &exi::Limits::new());
-    /// let m = u.add_name("", "m")?;
-    /// let v = u.add_value(m, "v")?.unwrap();
-    /// assert_eq!(u.find_value(m, v), ValueHit::Global(0));
-    /// assert_eq!((u.local_value_count(m), u.local_value(m, 0)), (0, None));
-    /// # Ok::<(), exi::Error>(())
-    /// ```
-    ///
     /// Duplicates: lookups find the most recent; removing the older
     /// copy leaves the newer.
     ///
-    /// ```
-    /// # use exi::strings::{GlobalStrings, GlobalConfig};
-    /// # use exi::tables::{InitialEntries, SessionTables, ValueRules, ValueHit};
-    /// # let g = GlobalStrings::new(GlobalConfig::new())?;
-    /// # let init = InitialEntries::schemaless().attach(&g)?;
-    /// let mut t = SessionTables::new(&init, ValueRules::unbounded().capacity(Some(2)), &exi::Limits::new());
-    /// let n = t.add_name("", "n")?;
-    /// let x = t.add_value(n, "x")?.unwrap();
-    /// assert_eq!(t.add_value(n, "x")?, Some(x));            // same global string
-    /// assert_eq!(g.values().refs(x), 2);                    // one reference per addition
-    /// assert_eq!(t.find_value(n, x), ValueHit::Local(1));
-    /// t.add_value(n, "y")?;                                 // removes the first "x"
-    /// assert_eq!(t.find_value(n, x), ValueHit::Local(1));   // the second is still there
-    /// assert_eq!(t.find_value_str(n, "y"), ValueHit::Local(2));
-    /// # Ok::<(), exi::Error>(())
-    /// ```
-    ///
     /// The byte limit: names and values count, exactly the limit is
     /// allowed, and a removed value makes room (R6).
-    ///
-    /// ```
-    /// # use exi::strings::{GlobalStrings, GlobalConfig};
-    /// # use exi::tables::{InitialEntries, SessionTables, ValueRules};
-    /// # use exi::ErrorKind;
-    /// # let g = GlobalStrings::new(GlobalConfig::new())?;
-    /// # let init = InitialEntries::schemaless().attach(&g)?;
-    /// let limits = exi::Limits::new().max_string_table_bytes(10);
-    /// let mut t = SessionTables::new(&init, ValueRules::unbounded().capacity(Some(1)), &limits);
-    /// let n = t.add_name("", "n")?;                         // 1 byte
-    /// t.add_value(n, "abcdefghi")?;                         // 10 bytes: exactly the limit
-    /// t.add_value(n, "123456789")?;                         // removes 9, adds 9: still 10
-    /// assert_eq!(t.referenced_bytes(), 10);
-    /// assert_eq!(t.add_value(n, "0123456789").unwrap_err().kind(), ErrorKind::Limit);
-    /// assert_eq!(t.global_value_str(0), Some("123456789"));  // nothing changed
-    /// assert_eq!(t.add_uri("u").unwrap_err().kind(), ErrorKind::Limit);
-    /// # Ok::<(), exi::Error>(())
-    /// ```
-    ///
-    /// A name this session does not have is an argument error:
-    ///
-    /// ```
-    /// # use exi::strings::{GlobalStrings, GlobalConfig};
-    /// # use exi::tables::{InitialEntries, SessionTables, ValueRules};
-    /// # use exi::ErrorKind;
-    /// # let g = GlobalStrings::new(GlobalConfig::new())?;
-    /// # let init = InitialEntries::schemaless().attach(&g)?;
-    /// # let mut t = SessionTables::new(&init, ValueRules::unbounded(), &exi::Limits::new());
-    /// let bad = exi::NameId { uri: 0, local: 0 };            // URI 0 has no local names yet
-    /// assert_eq!(t.add_value(bad, "v").unwrap_err().kind(), ErrorKind::Arg);
-    /// let bad = exi::NameId { uri: 9, local: 0 };
-    /// assert_eq!(t.add_value(bad, "v").unwrap_err().kind(), ErrorKind::Arg);
-    /// # Ok::<(), exi::Error>(())
-    /// ```
     pub fn add_value(
         &mut self,
         name: NameId,
@@ -1261,58 +880,6 @@ impl<'a> SessionTables<'a> {
         Ok(Some(id))
     }
 
-    /// As [`add_value`](Self::add_value), for a literal the reader decoded straight into
-    /// the global value table ([`GlobalTable::begin`](crate::strings::GlobalTable::begin)).
-    /// The handle's reference passes to the session; when R4 does not
-    /// keep the value, the handle is dropped.
-    ///
-    /// # Errors
-    ///
-    /// As `add_value`, and `ErrorKind::Arg` when `v` belongs to another
-    /// `GlobalStrings`.
-    ///
-    /// ```
-    /// # use exi::strings::{GlobalStrings, GlobalConfig};
-    /// # use exi::tables::{InitialEntries, SessionTables, ValueRules, ValueHit};
-    /// # use exi::ErrorKind;
-    /// let other = GlobalStrings::new(GlobalConfig::new())?;
-    /// let g = GlobalStrings::new(GlobalConfig::new())?;
-    /// let init = InitialEntries::schemaless().attach(&g)?;
-    /// let mut t = SessionTables::new(&init, ValueRules::unbounded(), &exi::Limits::new());
-    /// let n = t.add_name("", "n")?;
-    /// let mut p = g.values().begin(20)?;
-    /// p.push_str("decoded in place")?;
-    /// let id = t.add_value_held(n, p.finish()?)?.unwrap();
-    /// assert_eq!(g.values().refs(id), 1);                   // the session's reference
-    /// assert_eq!(t.find_value(n, id), ValueHit::Local(0));
-    ///
-    /// let foreign = other.values().intern("x")?;
-    /// assert_eq!(t.add_value_held(n, foreign).unwrap_err().kind(), ErrorKind::Arg);
-    /// # Ok::<(), exi::Error>(())
-    /// ```
-    pub fn add_value_held(
-        &mut self,
-        name: NameId,
-        v: Held<'a, Value>,
-    ) -> Result<Option<ValueId>> {
-        if !core::ptr::eq(v.table(), self.global().values()) {
-            return Err(Error::new(
-                ErrorKind::Arg,
-                "value from another GlobalStrings",
-            ));
-        }
-        self.check_name_id(name)?;
-        let len = v.as_str().len();
-        let chars = v.as_str().chars().count().min(u32::MAX as usize) as u32;
-        if !self.rules.keeps(chars) {
-            return Ok(None);
-        }
-        self.check_value(len)?;
-        let id = v.id();
-        core::mem::forget(v); // the session now owns this reference
-        self.place_value(name, id, len as u32);
-        Ok(Some(id))
-    }
 
     // ----- Self-contained elements (R7) -----
 
@@ -1320,43 +887,6 @@ impl<'a> SessionTables<'a> {
     /// onto an internal stack and starts again from the initial
     /// entries, with empty value partitions and the slot counter at 0
     /// (R7). The limits keep counting what was moved aside.
-    ///
-    /// ```
-    /// # use exi::strings::{GlobalStrings, GlobalConfig};
-    /// # use exi::tables::{InitialEntries, SessionTables, ValueRules};
-    /// # let g = GlobalStrings::new(GlobalConfig::new())?;
-    /// # let init = InitialEntries::schemaless().attach(&g)?;
-    /// # let mut t = SessionTables::new(&init, ValueRules::unbounded(), &exi::Limits::new());
-    /// let n = t.add_name("urn:outer", "n")?;
-    /// t.add_value(n, "outer value")?;
-    /// t.begin_self_contained();
-    /// assert_eq!((t.depth(), t.uri_count(), t.global_value_count()), (1, 3, 0));
-    /// assert_eq!(t.local_count(1), 4);                       // initial names keep their numbers
-    /// t.add_uri("urn:inner")?;
-    /// t.begin_self_contained();                              // nested
-    /// assert_eq!((t.depth(), t.uri_count()), (2, 3));
-    /// t.end_self_contained()?;
-    /// assert_eq!(t.uri_str(3), Some("urn:inner"));
-    /// t.end_self_contained()?;
-    /// assert_eq!((t.depth(), t.uri_str(3), t.global_value_str(0)),
-    ///            (0, Some("urn:outer"), Some("outer value")));
-    /// # Ok::<(), exi::Error>(())
-    /// ```
-    ///
-    /// What was moved aside still counts toward the limits:
-    ///
-    /// ```
-    /// # use exi::strings::{GlobalStrings, GlobalConfig};
-    /// # use exi::tables::{InitialEntries, SessionTables, ValueRules};
-    /// # use exi::ErrorKind;
-    /// # let g = GlobalStrings::new(GlobalConfig::new())?;
-    /// # let init = InitialEntries::schemaless().attach(&g)?;
-    /// let mut t = SessionTables::new(&init, ValueRules::unbounded(), &exi::Limits::new().max_names(1));
-    /// t.add_uri("urn:a")?;
-    /// t.begin_self_contained();
-    /// assert_eq!(t.add_uri("urn:b").unwrap_err().kind(), ErrorKind::Limit);
-    /// # Ok::<(), exi::Error>(())
-    /// ```
     pub fn begin_self_contained(&mut self) {
         let fresh = Partitions::new();
         let saved = core::mem::replace(&mut self.cur, fresh);
@@ -1371,23 +901,6 @@ impl<'a> SessionTables<'a> {
     ///
     /// `ErrorKind::State` when no self-contained element is open.
     /// Nothing is changed.
-    ///
-    /// ```
-    /// # use exi::strings::{GlobalStrings, GlobalConfig};
-    /// # use exi::tables::{InitialEntries, SessionTables, ValueRules};
-    /// # use exi::ErrorKind;
-    /// # let g = GlobalStrings::new(GlobalConfig::new())?;
-    /// # let init = InitialEntries::schemaless().attach(&g)?;
-    /// # let mut t = SessionTables::new(&init, ValueRules::unbounded(), &exi::Limits::new());
-    /// assert_eq!(t.end_self_contained().unwrap_err().kind(), ErrorKind::State);
-    /// t.begin_self_contained();
-    /// let n = t.add_name("", "inner")?;
-    /// t.add_value(n, "inner value")?;
-    /// t.end_self_contained()?;
-    /// assert_eq!(g.values().get("inner value"), None);       // released
-    /// assert_eq!((t.names_added(), t.referenced_bytes()), (0, 0));
-    /// # Ok::<(), exi::Error>(())
-    /// ```
     pub fn end_self_contained(&mut self) -> Result<()> {
         let saved = self.stack.pop().ok_or_else(|| {
             Error::new(ErrorKind::State, "no self-contained element is open")
@@ -1407,12 +920,14 @@ impl<'a> SessionTables<'a> {
     // ----- Limits -----
 
     /// Names this session added, partitions moved aside included.
-    pub fn names_added(&self) -> u32 {
+    #[cfg(test)]
+    fn names_added(&self) -> u32 {
         self.names_total
     }
     /// Bytes this session references, as
     /// [`Limits::max_string_table_bytes`] counts them.
-    pub fn referenced_bytes(&self) -> u64 {
+    #[cfg(test)]
+    fn referenced_bytes(&self) -> u64 {
         self.bytes_total
     }
 }
@@ -1742,6 +1257,103 @@ mod tests {
         assert_eq!(tables.find_local(1, lang), Some(4));
         assert_eq!(tables.find_local(uri, lang), Some(0));
         assert_eq!(tables.find_prefix(1, xml), Some(1));
+        Ok(())
+    }
+
+    #[test]
+    fn max_length_counts_characters() -> Result<()> {
+        let g = GlobalStrings::new(GlobalConfig::new())?;
+        let init = InitialEntries::schemaless().attach(&g)?;
+        let rules = ValueRules::unbounded().max_length(Some(3));
+        let mut t = SessionTables::new(&init, rules, &Limits::new());
+        let n = t.add_name("", "n")?;
+        assert!(t.add_value(n, "ééé")?.is_some()); // 3 characters, 6 bytes
+        assert!(t.add_value(n, "😀😀😀")?.is_some()); // 3 characters, 12 bytes
+        assert!(t.add_value(n, "abcd")?.is_none()); // 4 characters
+        Ok(())
+    }
+
+    #[test]
+    fn value_admission_limits() {
+        let r = ValueRules::unbounded();
+        assert!(!r.keeps(0)); // the empty value: never
+        assert!(r.keeps(1));
+        assert!(r.keeps(u32::MAX));
+        let r = ValueRules::unbounded().max_length(Some(8));
+        assert!(r.keeps(8)); // exactly the maximum
+        assert!(!r.keeps(9));
+        assert!(!ValueRules::unbounded().max_length(Some(0)).keeps(1)); // nothing kept
+        assert!(!ValueRules::unbounded().capacity(Some(0)).keeps(5)); // nothing kept
+        assert!(ValueRules::unbounded().capacity(Some(1)).keeps(5));
+    }
+
+    #[test]
+    fn eviction_wraparound() -> Result<()> {
+        let g = GlobalStrings::new(GlobalConfig::new())?;
+        let init = InitialEntries::schemaless().attach(&g)?;
+        let mut t = SessionTables::new(
+            &init,
+            ValueRules::unbounded().capacity(Some(3)),
+            &Limits::new(),
+        );
+        let n = t.add_name("", "n")?;
+        for i in 0..10 {
+            t.add_value(n, &alloc::format!("v{i}"))?;
+        }
+        assert_eq!(t.global_value_count(), 3);
+        let slots: Vec<_> = (0..3)
+            .map(|i| g.values().resolve(t.global_value(i).unwrap()))
+            .collect();
+        assert_eq!(slots, ["v9", "v7", "v8"]);
+        assert_eq!(t.local_value_count(n), 10);
+        assert_eq!(t.local_value(n, 6).map(|id| g.values().resolve(id)), None); // removed
+        assert_eq!(
+            t.local_value(n, 7).map(|id| g.values().resolve(id)),
+            Some("v7")
+        );
+        assert_eq!(
+            t.local_value(n, 9).map(|id| g.values().resolve(id)),
+            Some("v9")
+        );
+        assert_eq!(
+            t.local_value(n, 10).map(|id| g.values().resolve(id)),
+            None
+        ); // not yet assigned
+        assert_eq!(t.find_value_str(n, "v8"), ValueHit::Local(8));
+        Ok(())
+    }
+
+    #[test]
+    fn saved_partitions_count_toward_limits() -> Result<()> {
+        let g = GlobalStrings::new(GlobalConfig::new())?;
+        let init = InitialEntries::schemaless().attach(&g)?;
+        let mut t = SessionTables::new(
+            &init,
+            ValueRules::unbounded(),
+            &Limits::new().max_names(1),
+        );
+        t.add_uri("urn:a")?;
+        t.begin_self_contained();
+        assert_eq!(t.add_uri("urn:b").unwrap_err().kind(), ErrorKind::Limit);
+        Ok(())
+    }
+
+    #[test]
+    fn self_contained_values_are_released() -> Result<()> {
+        let g = GlobalStrings::new(GlobalConfig::new())?;
+        let init = InitialEntries::schemaless().attach(&g)?;
+        let mut t =
+            SessionTables::new(&init, ValueRules::unbounded(), &Limits::new());
+        assert_eq!(
+            t.end_self_contained().unwrap_err().kind(),
+            ErrorKind::State
+        );
+        t.begin_self_contained();
+        let n = t.add_name("", "inner")?;
+        t.add_value(n, "inner value")?;
+        t.end_self_contained()?;
+        assert_eq!(g.values().get("inner value"), None); // released
+        assert_eq!((t.names_added(), t.referenced_bytes()), (0, 0));
         Ok(())
     }
 }

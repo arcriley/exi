@@ -127,19 +127,6 @@ fn internal(detail: &'static str) -> Error {
 
 /// Which pruned productions an options set keeps (module documentation
 /// of [`crate::grammar`]).
-///
-/// ```
-/// use exi::grammar::builtin::Keep;
-/// use exi::{Options, Preserve};
-/// let k = Keep::from_options(&Options::default());
-/// assert_eq!(k, Keep::default());
-/// assert!(!k.ns && !k.sc && !k.dtd && !k.comments && !k.pis);
-/// let all = Options::builder().preserve(Preserve::all()).self_contained(true)
-///     .coding(exi::Coding::ByteAligned).build()?;
-/// let k = Keep::from_options(&all);
-/// assert!(k.ns && k.sc && k.dtd && k.comments && k.pis);
-/// # Ok::<(), exi::Error>(())
-/// ```
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Keep {
     pub ns: bool,
@@ -150,15 +137,6 @@ pub struct Keep {
 }
 
 impl Keep {
-    ///
-    /// ```
-    /// use exi::{Coding, Options, Preserve, grammar::builtin::Keep};
-    /// let options = Options::builder().coding(Coding::ByteAligned).preserve(Preserve::COMMENTS).build()?;
-    /// let keep = Keep::from_options(&options);
-    /// assert!(keep.comments);
-    /// assert!(!keep.pis);
-    /// # Ok::<(), exi::Error>(())
-    /// ```
     pub fn from_options(o: &Options) -> Self {
         let p = o.preserve();
         Keep {
@@ -183,34 +161,15 @@ pub struct CodeTable {
 }
 
 impl CodeTable {
-    ///
-    /// ```
-    /// use exi::grammar::{EventCode, Terminal, builtin::{ElementGrammar, Keep}};
-    /// let grammar = ElementGrammar::new(Keep::default());
-    /// let entries = grammar.start_tag().entries();
-    /// assert_eq!(entries.first(), Some(&(Terminal::EE, EventCode::new(&[0, 0]))));
-    /// ```
     pub fn entries(&self) -> &[(Terminal, EventCode)] {
         &self.entries
     }
     /// The code of the first production matching `t`.
-    ///
-    /// ```
-    /// use exi::grammar::{EventCode, Terminal, builtin::{ElementGrammar, Keep}};
-    /// let grammar = ElementGrammar::new(Keep::default());
-    /// assert_eq!(grammar.start_tag().code(Terminal::CH), Some(EventCode::new(&[0, 3])));
-    /// ```
     pub fn code(&self, t: Terminal) -> Option<EventCode> {
         self.entries.iter().find(|(x, _)| *x == t).map(|(_, c)| *c)
     }
     /// The number of values the part after `prefix` takes (`prefix`
     /// empty: the first part).
-    ///
-    /// ```
-    /// use exi::grammar::{EventCode, Terminal, builtin::{ElementGrammar, Keep}};
-    /// let grammar = ElementGrammar::new(Keep::default());
-    /// assert_eq!(grammar.start_tag().count(&[0]), 4);
-    /// ```
     pub fn count(&self, prefix: &[u32]) -> u32 {
         let k = prefix.len();
         self.entries
@@ -220,28 +179,9 @@ impl CodeTable {
             .max()
             .unwrap_or(0)
     }
-    /// `(value, count)` for each part of `code`, ready for
-    /// `write_event_code`.
-    ///
-    /// ```
-    /// use exi::grammar::{EventCode, Terminal, builtin::{ElementGrammar, Keep}};
-    /// let grammar = ElementGrammar::new(Keep::default());
-    /// assert_eq!(grammar.start_tag().parts_with_counts(EventCode::new(&[0, 3])), [(0, 1), (3, 4)]);
-    /// ```
-    pub fn parts_with_counts(&self, code: EventCode) -> Vec<(u32, u32)> {
-        let p = code.parts();
-        (0..p.len()).map(|i| (p[i], self.count(&p[..i]))).collect()
-    }
     /// The production whose code is exactly `parts`, if any. When
     /// `parts` is the prefix of longer codes, returns `None`: read
     /// another part.
-    ///
-    /// ```
-    /// use exi::grammar::{EventCode, Terminal, builtin::{ElementGrammar, Keep}};
-    /// let grammar = ElementGrammar::new(Keep::default());
-    /// assert_eq!(grammar.start_tag().lookup(&[0]), None);
-    /// assert_eq!(grammar.start_tag().lookup(&[0, 3]), Some(Terminal::CH));
-    /// ```
     pub fn lookup(&self, parts: &[u32]) -> Option<Terminal> {
         self.entries.iter().find(|(_, c)| c.parts() == parts).map(|(t, _)| *t)
     }
@@ -249,76 +189,12 @@ impl CodeTable {
 
 /// One element name's built-in grammar.
 ///
-/// ```
-/// use exi::grammar::{builtin::{ElementGrammar, Keep}, EventCode, Terminal};
-/// let g = ElementGrammar::new(Keep::default());
-/// let st = g.start_tag();
-/// assert_eq!(st.code(Terminal::EE), Some(EventCode::new(&[0, 0])));
-/// assert_eq!(st.code(Terminal::AtAny), Some(EventCode::new(&[0, 1])));
-/// assert_eq!(st.code(Terminal::SeAny), Some(EventCode::new(&[0, 2])));
-/// assert_eq!(st.code(Terminal::CH), Some(EventCode::new(&[0, 3])));
-/// assert_eq!(st.code(Terminal::NS), None);                         // pruned
-/// assert_eq!((st.count(&[]), st.count(&[0])), (1, 4));             // 0 bits, then 2 bits
-/// let ec = g.content();
-/// assert_eq!(ec.code(Terminal::EE), Some(EventCode::new(&[0])));
-/// assert_eq!(ec.code(Terminal::CH), Some(EventCode::new(&[1, 1])));
-/// assert_eq!((ec.count(&[]), ec.count(&[1])), (2, 2));
-/// ```
-///
 /// Everything kept: nine StartTagContent productions, a third level for
 /// CM and PI.
 ///
-/// ```
-/// use exi::grammar::{builtin::{ElementGrammar, Keep}, EventCode, Terminal};
-/// let all = Keep { ns: true, sc: true, dtd: true, comments: true, pis: true };
-/// let st = ElementGrammar::new(all).start_tag().clone();
-/// assert_eq!(st.code(Terminal::SC), Some(EventCode::new(&[0, 3])));
-/// assert_eq!(st.code(Terminal::PI), Some(EventCode::new(&[0, 7, 1])));
-/// assert_eq!((st.count(&[0]), st.count(&[0, 7])), (8, 2));
-/// let only_pis = Keep { pis: true, ..Keep::default() };
-/// let st = ElementGrammar::new(only_pis).start_tag().clone();
-/// assert_eq!(st.code(Terminal::PI), Some(EventCode::new(&[0, 4, 0])));   // renumbered
-/// assert_eq!((st.count(&[0]), st.count(&[0, 4])), (5, 1));
-/// ```
-///
 /// Learning inserts at 0 and shifts the rest.
 ///
-/// ```
-/// use exi::grammar::{builtin::{ElementGrammar, Keep, Learn}, EventCode, Terminal};
-/// use exi::{Limits, NameId};
-/// let id = NameId { uri: 0, local: 0 };
-/// let mut g = ElementGrammar::new(Keep::default());
-/// let mut budget = Limits::new().get_max_learned_productions();
-/// g.learn_start_tag(Learn::AT(id), &mut budget)?;
-/// g.learn_start_tag(Learn::EE, &mut budget)?;
-/// let st = g.start_tag();
-/// assert_eq!(st.code(Terminal::EE), Some(EventCode::new(&[0])));       // the learned one
-/// assert_eq!(st.code(Terminal::AT(id)), Some(EventCode::new(&[1])));
-/// assert_eq!(st.code(Terminal::AtAny), Some(EventCode::new(&[2, 1])));
-/// assert_eq!(st.count(&[]), 3);
-/// g.learn_start_tag(Learn::EE, &mut budget)?;                          // already one-part
-/// assert_eq!(g.start_tag().count(&[]), 3);
-/// let x = NameId { uri: 0, local: 1 };
-/// g.learn_content(Learn::SE(x), &mut budget)?;
-/// assert_eq!(g.content().code(Terminal::SE(x)), Some(EventCode::new(&[0])));
-/// assert_eq!(g.content().code(Terminal::EE), Some(EventCode::new(&[1])));
-/// # Ok::<(), exi::Error>(())
-/// ```
-///
 /// The learning budget: at 0, learning fails and nothing changes.
-///
-/// ```
-/// use exi::grammar::{builtin::{ElementGrammar, Keep, Learn}, Terminal};
-/// use exi::{ErrorKind, NameId};
-/// let mut g = ElementGrammar::new(Keep::default());
-/// let mut budget = 1;
-/// g.learn_start_tag(Learn::CH, &mut budget)?;
-/// assert_eq!(budget, 0);
-/// let err = g.learn_start_tag(Learn::AT(NameId { uri: 0, local: 0 }), &mut budget).unwrap_err();
-/// assert_eq!(err.kind(), ErrorKind::Limit);
-/// assert_eq!(g.start_tag().count(&[]), 2);                             // CH and the 0.x group
-/// # Ok::<(), exi::Error>(())
-/// ```
 #[derive(Clone, Debug)]
 pub struct ElementGrammar {
     start_tag: CodeTable,
@@ -337,12 +213,6 @@ pub enum Learn {
 }
 
 impl ElementGrammar {
-    ///
-    /// ```
-    /// use exi::grammar::{Terminal, builtin::{ElementGrammar, Keep}};
-    /// let grammar = ElementGrammar::new(Keep { ns: true, ..Keep::default() });
-    /// assert!(grammar.start_tag().code(Terminal::NS).is_some());
-    /// ```
     pub fn new(keep: Keep) -> Self {
         use Terminal::*;
         let c = EventCode::new;
@@ -370,21 +240,9 @@ impl ElementGrammar {
             content: CodeTable::pruned(&content, keeps(keep)),
         }
     }
-    ///
-    /// ```
-    /// use exi::grammar::{EventCode, Terminal, builtin::{ElementGrammar, Keep}};
-    /// let grammar = ElementGrammar::new(Keep::default());
-    /// assert!(grammar.start_tag().code(Terminal::AtAny).is_some());
-    /// ```
     pub fn start_tag(&self) -> &CodeTable {
         &self.start_tag
     }
-    ///
-    /// ```
-    /// use exi::grammar::{EventCode, Terminal, builtin::{ElementGrammar, Keep}};
-    /// let grammar = ElementGrammar::new(Keep::default());
-    /// assert_eq!(grammar.content().code(Terminal::EE), Some(EventCode::new(&[0])));
-    /// ```
     pub fn content(&self) -> &CodeTable {
         &self.content
     }
@@ -399,16 +257,6 @@ impl ElementGrammar {
     /// `ErrorKind::Limit` when `budget` is 0; nothing changes.
     /// `ErrorKind::Internal` for `Learn::EE` in ElementContent (EE is
     /// always there).
-    ///
-    /// ```
-    /// use exi::grammar::{EventCode, Terminal, builtin::{ElementGrammar, Keep, Learn}};
-    /// let mut grammar = ElementGrammar::new(Keep::default());
-    /// let mut budget = 1;
-    /// grammar.learn_start_tag(Learn::CH, &mut budget)?;
-    /// assert_eq!(budget, 0);
-    /// assert_eq!(grammar.start_tag().lookup(&[0]), Some(Terminal::CH));
-    /// # Ok::<(), exi::Error>(())
-    /// ```
     pub fn learn_start_tag(
         &mut self,
         l: Learn,
@@ -436,17 +284,6 @@ impl ElementGrammar {
         Ok(())
     }
     /// Learns in ElementContent: `SE` and `CH` only.
-    ///
-    /// ```
-    /// use exi::grammar::{Terminal, builtin::{ElementGrammar, Keep, Learn}};
-    /// let mut grammar = ElementGrammar::new(Keep::default());
-    /// let mut budget = 1;
-    /// grammar.learn_content(Learn::CH, &mut budget)?;
-    /// grammar.learn_content(Learn::CH, &mut budget)?;
-    /// assert_eq!(budget, 0);
-    /// assert_eq!(grammar.content().lookup(&[0]), Some(Terminal::CH));
-    /// # Ok::<(), exi::Error>(())
-    /// ```
     pub fn learn_content(&mut self, l: Learn, budget: &mut u64) -> Result<()> {
         let t = match l {
             Learn::SE(q) => Terminal::SE(q),
@@ -465,18 +302,6 @@ impl ElementGrammar {
 }
 
 /// The document and fragment grammars' top-level states after pruning.
-///
-/// ```
-/// use exi::grammar::{builtin::{TopLevel, Keep}, EventCode, Terminal};
-/// let doc = TopLevel::document(Keep::default());
-/// assert_eq!(doc.content().count(&[]), 1);                  // SE(*) alone: 0 bits
-/// assert_eq!(doc.end().count(&[]), 1);                       // ED alone: 0 bits
-/// let dt = TopLevel::document(Keep { dtd: true, ..Keep::default() });
-/// assert_eq!(dt.content().code(Terminal::DT), Some(EventCode::new(&[1, 0])));
-/// let frag = TopLevel::fragment(Keep::default());
-/// assert_eq!(frag.content().code(Terminal::ED), Some(EventCode::new(&[1])));
-/// assert_eq!(frag.content().count(&[]), 2);
-/// ```
 #[derive(Clone, Debug)]
 pub struct TopLevel {
     content: CodeTable,
@@ -484,13 +309,6 @@ pub struct TopLevel {
 }
 
 impl TopLevel {
-    ///
-    /// ```
-    /// use exi::grammar::{Terminal, builtin::{Keep, TopLevel}};
-    /// let doc = TopLevel::document(Keep::default());
-    /// assert_eq!(doc.content().lookup(&[0]), Some(Terminal::SeAny));
-    /// assert_eq!(doc.end().lookup(&[0]), Some(Terminal::ED));
-    /// ```
     pub fn document(keep: Keep) -> Self {
         use Terminal::*;
         let c = EventCode::new;
@@ -506,12 +324,6 @@ impl TopLevel {
             end: Some(CodeTable::pruned(&end, keeps(keep))),
         }
     }
-    ///
-    /// ```
-    /// use exi::grammar::{Terminal, builtin::{Keep, TopLevel}};
-    /// let fragment = TopLevel::fragment(Keep::default());
-    /// assert_eq!(fragment.content().lookup(&[1]), Some(Terminal::ED));
-    /// ```
     pub fn fragment(keep: Keep) -> Self {
         use Terminal::*;
         let c = EventCode::new;
@@ -527,23 +339,11 @@ impl TopLevel {
         }
     }
     /// DocContent, or FragmentContent.
-    ///
-    /// ```
-    /// use exi::grammar::{Terminal, builtin::{Keep, TopLevel}};
-    /// let fragment = TopLevel::fragment(Keep::default());
-    /// assert_eq!(fragment.content().count(&[]), 2);
-    /// ```
     pub fn content(&self) -> &CodeTable {
         &self.content
     }
     /// DocEnd. A fragment has no separate end state: this returns its
     /// FragmentContent.
-    ///
-    /// ```
-    /// use exi::grammar::{Terminal, builtin::{Keep, TopLevel}};
-    /// let fragment = TopLevel::fragment(Keep::default());
-    /// assert_eq!(fragment.end(), fragment.content());
-    /// ```
     pub fn end(&self) -> &CodeTable {
         self.end.as_ref().unwrap_or(&self.content)
     }
@@ -553,15 +353,6 @@ impl TopLevel {
     ///
     /// `ErrorKind::Limit` when `budget` is 0; `ErrorKind::Internal` for
     /// a document.
-    ///
-    /// ```
-    /// use exi::grammar::{Terminal, builtin::{Keep, TopLevel}};
-    /// let mut fragment = TopLevel::fragment(Keep::default());
-    /// let name = exi::NameId { uri: 0, local: 0 };
-    /// fragment.learn_fragment_se(name, &mut 1)?;
-    /// assert_eq!(fragment.content().lookup(&[0]), Some(Terminal::SE(name)));
-    /// # Ok::<(), exi::Error>(())
-    /// ```
     pub fn learn_fragment_se(
         &mut self,
         name: crate::NameId,
@@ -665,5 +456,45 @@ pub(crate) fn keeps(keep: Keep) -> impl Fn(Terminal) -> bool {
         Terminal::CM => keep.comments,
         Terminal::PI => keep.pis,
         _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn fidelity_controls_event_codes() {
+        use crate::grammar::{
+            EventCode, Terminal,
+            builtin::{ElementGrammar, Keep},
+        };
+        let all =
+            Keep { ns: true, sc: true, dtd: true, comments: true, pis: true };
+        let st = ElementGrammar::new(all).start_tag().clone();
+        assert_eq!(st.code(Terminal::SC), Some(EventCode::new(&[0, 3])));
+        assert_eq!(st.code(Terminal::PI), Some(EventCode::new(&[0, 7, 1])));
+        assert_eq!((st.count(&[0]), st.count(&[0, 7])), (8, 2));
+        let only_pis = Keep { pis: true, ..Keep::default() };
+        let st = ElementGrammar::new(only_pis).start_tag().clone();
+        assert_eq!(st.code(Terminal::PI), Some(EventCode::new(&[0, 4, 0]))); // renumbered
+        assert_eq!((st.count(&[0]), st.count(&[0, 4])), (5, 1));
+    }
+
+    #[test]
+    fn learning_obeys_budget() -> crate::Result<()> {
+        use super::{ElementGrammar, Keep, Learn};
+        use crate::{ErrorKind, NameId};
+        let mut g = ElementGrammar::new(Keep::default());
+        let mut budget = 1;
+        g.learn_start_tag(Learn::CH, &mut budget)?;
+        assert_eq!(budget, 0);
+        let err = g
+            .learn_start_tag(
+                Learn::AT(NameId { uri: 0, local: 0 }),
+                &mut budget,
+            )
+            .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::Limit);
+        assert_eq!(g.start_tag().count(&[]), 2); // CH and the 0.x group
+        Ok(())
     }
 }

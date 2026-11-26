@@ -244,7 +244,7 @@ impl<'g, const N: usize> Reader<'g, N> {
         };
         let mut text = core::mem::take(&mut self.dec.text);
         text.clear();
-        let (value, used) = {
+        let Some((value, used)) = ('decode: {
             let Reader { ring, spill, spilling, sess, block, .. } = self;
             let z = block
                 .as_ref()
@@ -252,20 +252,20 @@ impl<'g, const N: usize> Reader<'g, N> {
                 .map(|b| &b.z.out[b.z.pos..]);
             let (a, b) = input_view(ring, spill.data(), *spilling, z, n);
             let sess = sess.as_mut().expect("a block has a session");
-            let mut d = BodyDecoder::new(Coding::ByteAligned, a, b, 0);
-            let mut probe = Probe::new(&sess.tables);
-            match engine::decode_value(
-                &sess.st, &mut d, &mut probe, slot, name, &mut text,
-            ) {
-                Ok(_) => {}
-                Err(e) if e.kind() == ErrorKind::Truncated && !final_input => {
-                    self.dec.text = text;
-                    self.spill_if_full();
-                    return Ok(false);
+            if !final_input {
+                let mut d = BodyDecoder::new(Coding::ByteAligned, a, b, 0);
+                let mut probe = Probe::new(&sess.tables);
+                match engine::decode_value(
+                    &sess.st, &mut d, &mut probe, slot, name, &mut text,
+                ) {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == ErrorKind::Truncated => {
+                        break 'decode None;
+                    }
+                    Err(e) => return Err(e),
                 }
-                Err(e) => return Err(e),
+                text.clear();
             }
-            text.clear();
             let mut d = BodyDecoder::new(Coding::ByteAligned, a, b, 0);
             let v = engine::decode_value(
                 &sess.st,
@@ -275,7 +275,11 @@ impl<'g, const N: usize> Reader<'g, N> {
                 name,
                 &mut text,
             )?;
-            (owned_value(&sess.tables, v, &text), d.bit_position())
+            Some((owned_value(&sess.tables, v, &text), d.bit_position()))
+        }) else {
+            self.dec.text = text;
+            self.spill_if_full();
+            return Ok(false);
         };
         self.dec.text = text;
         self.advance_input(used, inflated);

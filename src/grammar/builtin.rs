@@ -298,24 +298,25 @@ pub enum Learn {
 impl ElementGrammar {
     pub fn new(keep: Keep) -> Self {
         use Terminal::*;
-        let start: [(Terminal, &[u32]); 9] = [
-            (EE, &[0, 0]),
-            (AtAny, &[0, 1]),
-            (NS, &[0, 2]),
-            (SC, &[0, 3]),
-            (SeAny, &[0, 4]),
-            (CH, &[0, 5]),
-            (ER, &[0, 6]),
-            (CM, &[0, 7, 0]),
-            (PI, &[0, 7, 1]),
+        let c = EventCode::new;
+        let start = [
+            (EE, c(&[0, 0])),
+            (AtAny, c(&[0, 1])),
+            (NS, c(&[0, 2])),
+            (SC, c(&[0, 3])),
+            (SeAny, c(&[0, 4])),
+            (CH, c(&[0, 5])),
+            (ER, c(&[0, 6])),
+            (CM, c(&[0, 7, 0])),
+            (PI, c(&[0, 7, 1])),
         ];
-        let content: [(Terminal, &[u32]); 6] = [
-            (EE, &[0]),
-            (SeAny, &[1, 0]),
-            (CH, &[1, 1]),
-            (ER, &[1, 2]),
-            (CM, &[1, 3, 0]),
-            (PI, &[1, 3, 1]),
+        let content = [
+            (EE, c(&[0])),
+            (SeAny, c(&[1, 0])),
+            (CH, c(&[1, 1])),
+            (ER, c(&[1, 2])),
+            (CM, c(&[1, 3, 0])),
+            (PI, c(&[1, 3, 1])),
         ];
         ElementGrammar {
             start_tag: CodeTable::pruned(&start, keeps(keep)),
@@ -406,10 +407,14 @@ pub struct TopLevel {
 impl TopLevel {
     pub fn document(keep: Keep) -> Self {
         use Terminal::*;
-        let content: [(Terminal, &[u32]); 4] =
-            [(SeAny, &[0]), (DT, &[1, 0]), (CM, &[1, 1, 0]), (PI, &[1, 1, 1])];
-        let end: [(Terminal, &[u32]); 3] =
-            [(ED, &[0]), (CM, &[1, 0]), (PI, &[1, 1])];
+        let c = EventCode::new;
+        let content = [
+            (SeAny, c(&[0])),
+            (DT, c(&[1, 0])),
+            (CM, c(&[1, 1, 0])),
+            (PI, c(&[1, 1, 1])),
+        ];
+        let end = [(ED, c(&[0])), (CM, c(&[1, 0])), (PI, c(&[1, 1]))];
         TopLevel {
             content: CodeTable::pruned(&content, keeps(keep)),
             end: Some(CodeTable::pruned(&end, keeps(keep))),
@@ -417,8 +422,13 @@ impl TopLevel {
     }
     pub fn fragment(keep: Keep) -> Self {
         use Terminal::*;
-        let content: [(Terminal, &[u32]); 4] =
-            [(SeAny, &[0]), (ED, &[1]), (CM, &[2, 0]), (PI, &[2, 1])];
+        let c = EventCode::new;
+        let content = [
+            (SeAny, c(&[0])),
+            (ED, c(&[1])),
+            (CM, c(&[2, 0])),
+            (PI, c(&[2, 1])),
+        ];
         TopLevel {
             content: CodeTable::pruned(&content, keeps(keep)),
             end: None,
@@ -458,32 +468,36 @@ impl CodeTable {
     /// table in code order, and renumbers each level so its values stay
     /// contiguous.
     pub(crate) fn pruned(
-        full: &[(Terminal, &[u32])],
+        full: &[(Terminal, EventCode)],
         keep: impl Fn(Terminal) -> bool,
     ) -> CodeTable {
-        let kept: Vec<(Terminal, &[u32])> =
+        let kept: Vec<(Terminal, EventCode)> =
             full.iter().copied().filter(|(t, _)| keep(*t)).collect();
         let entries = kept
             .iter()
             .map(|(t, orig)| {
                 let mut parts = [0u32; 3];
-                for k in 0..orig.len() {
+                let orig_parts = orig.parts();
+                for k in 0..orig_parts.len() {
                     // The rank of this part among the distinct values
                     // taken at level k by the productions that share
                     // the earlier parts.
-                    let mut seen: Vec<u32> = kept
-                        .iter()
-                        .filter(|(_, o)| {
-                            o.len() > k
-                                && o[..k] == orig[..k]
-                                && o[k] < orig[k]
-                        })
-                        .map(|(_, o)| o[k])
-                        .collect();
-                    seen.dedup();
-                    parts[k] = seen.len() as u32;
+                    let mut count = 0u32;
+                    let mut prev = None;
+                    for (_, o) in &kept {
+                        let op = o.parts();
+                        if op.len() > k
+                            && op[..k] == orig_parts[..k]
+                            && op[k] < orig_parts[k]
+                            && prev != Some(op[k])
+                        {
+                            count += 1;
+                            prev = Some(op[k]);
+                        }
+                    }
+                    parts[k] = count;
                 }
-                (*t, EventCode::new(&parts[..orig.len()]))
+                (*t, EventCode::new(&parts[..orig_parts.len()]))
             })
             .collect();
         CodeTable { entries }

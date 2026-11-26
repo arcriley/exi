@@ -222,21 +222,26 @@ pub(crate) fn decode<D: Decoder, T: ReadTables + ?Sized>(
     defer: bool,
 ) -> Result<()> {
     let limits = st.limits;
-    let table = st.table()?;
     let mut parts = [0; 3];
     let mut len = 0;
-    let term = loop {
-        let c = table.count(&parts[..len]);
-        if c == 0 {
-            return Err(err(ErrorKind::Grammar, "no event may follow here"));
-        }
-        parts[len] = read_code_part(d, c)?;
-        len += 1;
-        if let Some(term) = table.lookup(&parts[..len]) {
-            break term;
-        }
-        if len == parts.len() {
-            return Err(internal("event code longer than three parts"));
+    let term = {
+        let table = st.table()?;
+        loop {
+            let c = table.count(&parts[..len]);
+            if c == 0 {
+                return Err(err(
+                    ErrorKind::Grammar,
+                    "no event may follow here",
+                ));
+            }
+            parts[len] = read_code_part(d, c)?;
+            len += 1;
+            if let Some(term) = table.lookup(&parts[..len]) {
+                break term;
+            }
+            if len == parts.len() {
+                return Err(internal("event code longer than three parts"));
+            }
         }
     };
     out.term = Some(term);

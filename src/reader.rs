@@ -1345,7 +1345,7 @@ impl<'g, const N: usize> Reader<'g, N> {
         let coding =
             self.options.as_ref().map_or(Coding::ByteAligned, |o| o.coding());
         let bit = self.bit;
-        let used = {
+        let Some(used) = ('decode: {
             let Reader {
                 ring,
                 spill,
@@ -1365,15 +1365,27 @@ impl<'g, const N: usize> Reader<'g, N> {
             let z = None;
             let (a, b) = input_view(ring, spill.data(), *spilling, z, n);
             let sess = sess.as_mut().expect("checked above");
-            // Probe with a counting view, then decode the complete
-            // event against the real tables.
+            if !final_input {
+                // Probe with a counting view before touching `sess.tables`,
+                // so a truncated event leaves the session intact for NeedInput.
+                let mut d = BodyDecoder::new(coding, a, b, bit);
+                let mut probe = Probe::new(&sess.tables);
+                dec.clear();
+                match engine::decode(&sess.st, &mut d, &mut probe, dec, defer) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == ErrorKind::Truncated => {
+                        break 'decode None;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
             let mut d = BodyDecoder::new(coding, a, b, bit);
-            let mut probe = Probe::new(&sess.tables);
+            dec.clear();
             match engine::decode(
                 &sess.st,
                 &mut d,
-                &mut probe,
-                &mut Decoded::default(),
+                &mut sess.tables,
+                dec,
                 defer,
             ) {
                 Ok(()) => {}
@@ -1385,16 +1397,12 @@ impl<'g, const N: usize> Reader<'g, N> {
                         "a frame ends inside an element",
                     ));
                 }
-                Err(e) if e.kind() == ErrorKind::Truncated && !final_input => {
-                    self.spill_if_full();
-                    return Ok(None);
-                }
                 Err(e) => return Err(e),
             }
-            let mut d = BodyDecoder::new(coding, a, b, bit);
-            dec.clear();
-            engine::decode(&sess.st, &mut d, &mut sess.tables, dec, defer)?;
-            d.bit_position()
+            Some(d.bit_position())
+        }) else {
+            self.spill_if_full();
+            return Ok(None);
         };
         self.advance_input(used, inflated);
         self.note_deferred();

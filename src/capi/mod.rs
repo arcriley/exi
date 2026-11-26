@@ -572,13 +572,7 @@ pub extern "C" fn exi_abi_version() -> u32 {
 ///
 /// ```
 /// use exi::capi::*;
-/// # use core::ptr::{null, null_mut};
-/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
-/// # /// A writer config: byte-aligned, options agreed out of band.
-/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
-/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
-/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
-/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
 /// unsafe {
 ///     let v = core::ffi::CStr::from_ptr(exi_version_string()).to_str().unwrap();
 ///     assert_eq!(v, env!("CARGO_PKG_VERSION"));
@@ -638,13 +632,7 @@ pub extern "C" fn exi_status_string(s: exi_status) -> *const c_char {
 ///
 /// ```
 /// use exi::capi::*;
-/// # use core::ptr::{null, null_mut};
-/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
-/// # /// A writer config: byte-aligned, options agreed out of band.
-/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
-/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
-/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
-/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
 /// unsafe {
 ///     let mut o = core::mem::zeroed::<exi_options>();
 ///     exi_options_init(&mut o);
@@ -716,13 +704,7 @@ pub unsafe extern "C" fn exi_options_validate(
 ///
 /// ```
 /// use exi::capi::*;
-/// # use core::ptr::{null, null_mut};
-/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
-/// # /// A writer config: byte-aligned, options agreed out of band.
-/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
-/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
-/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
-/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
 /// unsafe {
 ///     let mut l = core::mem::zeroed::<exi_limits>();
 ///     exi_limits_init(&mut l);
@@ -751,13 +733,7 @@ pub unsafe extern "C" fn exi_limits_init(l: *mut exi_limits) {
 ///
 /// ```
 /// use exi::capi::*;
-/// # use core::ptr::{null, null_mut};
-/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
-/// # /// A writer config: byte-aligned, options agreed out of band.
-/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
-/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
-/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
-/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
 /// unsafe {
 ///     let t = exi_strings_new(null());                             // defaults
 ///     assert!(!t.is_null());
@@ -815,13 +791,7 @@ pub unsafe extern "C" fn exi_strings_new(
 ///
 /// ```
 /// use exi::capi::*;
-/// # use core::ptr::{null, null_mut};
-/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
-/// # /// A writer config: byte-aligned, options agreed out of band.
-/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
-/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
-/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
-/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
 /// unsafe {
 ///     // Tables shared by two readers, freed after both.
 ///     let t = exi_strings_new(null());
@@ -856,13 +826,7 @@ pub unsafe extern "C" fn exi_strings_free(s: *mut exi_strings) {
 ///
 /// ```
 /// use exi::capi::*;
-/// # use core::ptr::{null, null_mut};
-/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
-/// # /// A writer config: byte-aligned, options agreed out of band.
-/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
-/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
-/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
-/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
 /// unsafe {
 ///     let g = exi_grammar_set_schemaless();
 ///     assert_eq!(g, exi_grammar_set_schemaless());                 // one static set
@@ -884,13 +848,7 @@ pub extern "C" fn exi_grammar_set_schemaless() -> *mut exi_grammar_set {
 ///
 /// ```
 /// use exi::capi::*;
-/// # use core::ptr::{null, null_mut};
-/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
-/// # /// A writer config: byte-aligned, options agreed out of band.
-/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
-/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
-/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
-/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
 /// unsafe {
 /// # #[cfg(feature = "exig")] {
 /// # let mut b = exi::grammar::GrammarSet::builder();
@@ -930,13 +888,7 @@ pub unsafe extern "C" fn exi_grammar_set_retain(
 ///
 /// ```
 /// use exi::capi::*;
-/// # use core::ptr::{null, null_mut};
-/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
-/// # /// A writer config: byte-aligned, options agreed out of band.
-/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
-/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
-/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
-/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
 /// unsafe {
 /// # #[cfg(feature = "exig")] {
 /// # let mut b = exi::grammar::GrammarSet::builder();
@@ -1111,13 +1063,7 @@ pub unsafe extern "C" fn exi_grammar_set_from_exig(
 ///
 /// ```
 /// use exi::capi::*;
-/// # use core::ptr::{null, null_mut};
-/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
-/// # /// A writer config: byte-aligned, options agreed out of band.
-/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
-/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
-/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
-/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
 /// unsafe {
 /// # #[cfg(feature = "exig")] {
 /// # let mut b = exi::grammar::GrammarSet::builder();
@@ -1165,13 +1111,7 @@ pub const EXI_DIGEST_LEN: usize = 72;
 ///
 /// ```
 /// use exi::capi::*;
-/// # use core::ptr::{null, null_mut};
-/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
-/// # /// A writer config: byte-aligned, options agreed out of band.
-/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
-/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
-/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
-/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
 /// unsafe {
 /// # #[cfg(feature = "exig")] {
 /// # let mut b = exi::grammar::GrammarSet::builder();
@@ -1286,13 +1226,7 @@ pub unsafe extern "C" fn exi_reader_new(
 ///
 /// ```
 /// use exi::capi::*;
-/// # use core::ptr::{null, null_mut};
-/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
-/// # /// A writer config: byte-aligned, options agreed out of band.
-/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
-/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
-/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
-/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
 /// unsafe {
 ///     let r = exi_reader_new(&reader_config(&byte));
 ///     exi_reader_free(r);
@@ -1321,13 +1255,7 @@ pub unsafe extern "C" fn exi_reader_free(r: *mut exi_reader) {
 ///
 /// ```
 /// use exi::capi::*;
-/// # use core::ptr::{null, null_mut};
-/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
-/// # /// A writer config: byte-aligned, options agreed out of band.
-/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
-/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
-/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
-/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
 /// unsafe {
 ///     let mut cfg = reader_config(&byte);
 ///     cfg.input_buffer_size = 64;
@@ -1388,13 +1316,7 @@ pub unsafe extern "C" fn exi_reader_feed(
 ///
 /// ```
 /// use exi::capi::*;
-/// # use core::ptr::{null, null_mut};
-/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
-/// # /// A writer config: byte-aligned, options agreed out of band.
-/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
-/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
-/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
-/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
 /// unsafe {
 ///     let r = exi_reader_new(&reader_config(&byte));
 ///     let mut room = 0;
@@ -1435,13 +1357,7 @@ pub unsafe extern "C" fn exi_reader_buffer(
 ///
 /// ```
 /// use exi::capi::*;
-/// # use core::ptr::{null, null_mut};
-/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
-/// # /// A writer config: byte-aligned, options agreed out of band.
-/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
-/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
-/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
-/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
 /// unsafe {
 ///     let r = exi_reader_new(&reader_config(&byte));
 ///     let mut room = 0;
@@ -1477,13 +1393,7 @@ pub unsafe extern "C" fn exi_reader_commit(
 ///
 /// ```
 /// use exi::capi::*;
-/// # use core::ptr::{null, null_mut};
-/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
-/// # /// A writer config: byte-aligned, options agreed out of band.
-/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
-/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
-/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
-/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
 /// unsafe {
 ///     let r = exi_reader_new(&reader_config(&byte));
 ///     let mut ev = core::mem::zeroed::<exi_event>();
@@ -1598,13 +1508,7 @@ pub unsafe extern "C" fn exi_reader_options(
 ///
 /// ```
 /// use exi::capi::*;
-/// # use core::ptr::{null, null_mut};
-/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
-/// # /// A writer config: byte-aligned, options agreed out of band.
-/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
-/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
-/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
-/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
 /// unsafe {
 ///     let r = exi_reader_new(&reader_config(&byte));
 ///     assert_eq!(exi_reader_error(r, null_mut(), null_mut(), null_mut()), EXI_OK);  // none yet
@@ -1775,13 +1679,7 @@ pub unsafe extern "C" fn exi_writer_new(
 ///
 /// ```
 /// use exi::capi::*;
-/// # use core::ptr::{null, null_mut};
-/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
-/// # /// A writer config: byte-aligned, options agreed out of band.
-/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
-/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
-/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
-/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
 /// unsafe {
 ///     let w = exi_writer_new(&writer_config(&byte));
 ///     exi_writer_free(w);
@@ -1807,9 +1705,9 @@ pub unsafe extern "C" fn exi_writer_free(w: *mut exi_writer) {
 ///
 /// ```
 /// use exi::capi::*;
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
 /// unsafe {
-///     let mut cfg = core::mem::zeroed::<exi_writer_config>();
-///     cfg.size = core::mem::size_of::<exi_writer_config>() as u32;
+///     let mut cfg = writer_config(&byte);
 ///     cfg.flags = 1 << 30;                                    // not a writer flag
 ///     assert!(exi_writer_new(&cfg).is_null());
 ///     cfg.flags = 0;
@@ -1855,13 +1753,7 @@ pub unsafe extern "C" fn exi_writer_event(
 ///
 /// ```
 /// use exi::capi::*;
-/// # use core::ptr::{null, null_mut};
-/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
-/// # /// A writer config: byte-aligned, options agreed out of band.
-/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
-/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
-/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
-/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
 /// unsafe {
 ///     let mut cfg = writer_config(&byte);
 ///     cfg.format = EXI_FORMAT_XML;
@@ -1898,13 +1790,7 @@ pub unsafe extern "C" fn exi_writer_start_element(
 ///
 /// ```
 /// use exi::capi::*;
-/// # use core::ptr::{null, null_mut};
-/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
-/// # /// A writer config: byte-aligned, options agreed out of band.
-/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
-/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
-/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
-/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
 /// unsafe {
 ///     let mut cfg = writer_config(&byte);
 ///     cfg.format = EXI_FORMAT_XML;
@@ -1949,13 +1835,7 @@ pub unsafe extern "C" fn exi_writer_attribute(
 ///
 /// ```
 /// use exi::capi::*;
-/// # use core::ptr::{null, null_mut};
-/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
-/// # /// A writer config: byte-aligned, options agreed out of band.
-/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
-/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
-/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
-/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
 /// unsafe {
 ///     let mut cfg = writer_config(&byte);
 ///     cfg.format = EXI_FORMAT_XML;
@@ -1987,13 +1867,7 @@ pub unsafe extern "C" fn exi_writer_text(
 ///
 /// ```
 /// use exi::capi::*;
-/// # use core::ptr::{null, null_mut};
-/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
-/// # /// A writer config: byte-aligned, options agreed out of band.
-/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
-/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
-/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
-/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
 /// unsafe {
 ///     let w = exi_writer_new(&writer_config(&byte));
 ///     assert_eq!(exi_writer_end_element(w), EXI_E_STATE);          // nothing open
@@ -2018,13 +1892,7 @@ pub unsafe extern "C" fn exi_writer_end_element(
 ///
 /// ```
 /// use exi::capi::*;
-/// # use core::ptr::{null, null_mut};
-/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
-/// # /// A writer config: byte-aligned, options agreed out of band.
-/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
-/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
-/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
-/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
 /// unsafe {
 ///     let w = exi_writer_new(&writer_config(&byte));
 ///     exi_writer_start_element(w, s(""), s("a"));
@@ -2056,26 +1924,23 @@ pub unsafe extern "C" fn exi_writer_end_document(
 ///
 /// ```
 /// use exi::capi::*;
-/// # use core::ptr::{null, null_mut};
-/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
-/// # /// A writer config: byte-aligned, options agreed out of band.
-/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
-/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
-/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
-/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
 /// unsafe {
-///     let mut bits = byte;
-///     bits.coding = EXI_CODING_BIT_PACKED;
-///     let w = exi_writer_new(&writer_config(&bits));
-///     exi_writer_start_element(w, s(""), s("a"));
 ///     let mut pending = 0;
-///     assert_eq!(exi_writer_flush(w, &mut pending), EXI_OK);
-///     assert!(pending > 0 && pending < 8);                         // mid-octet
+///     #[cfg(feature = "bit-packed")]
+///     {
+///         let mut bits = byte;
+///         bits.coding = EXI_CODING_BIT_PACKED;
+///         let w = exi_writer_new(&writer_config(&bits));
+///         exi_writer_start_element(w, s(""), s("a"));
+///         assert_eq!(exi_writer_flush(w, &mut pending), EXI_OK);
+///         assert!(pending > 0 && pending < 8); // mid-octet
+///         exi_writer_free(w);
+///     }
 ///     let b = exi_writer_new(&writer_config(&byte));
 ///     exi_writer_start_element(b, s(""), s("a"));
 ///     assert_eq!(exi_writer_flush(b, &mut pending), EXI_OK);
 ///     assert_eq!(pending, 0);                                      // byte-aligned
-///     exi_writer_free(w);
 ///     exi_writer_free(b);
 /// }
 /// ```
@@ -2107,13 +1972,7 @@ pub unsafe extern "C" fn exi_writer_flush(
 ///
 /// ```
 /// use exi::capi::*;
-/// # use core::ptr::{null, null_mut};
-/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
-/// # /// A writer config: byte-aligned, options agreed out of band.
-/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
-/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
-/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
-/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
 /// unsafe {
 ///     let mut frag = byte;
 ///     frag.flags = EXI_OPT_FRAGMENT;
@@ -2172,13 +2031,7 @@ pub unsafe extern "C" fn exi_writer_end_frame(
 ///
 /// ```
 /// use exi::capi::*;
-/// # use core::ptr::{null, null_mut};
-/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
-/// # /// A writer config: byte-aligned, options agreed out of band.
-/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
-/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
-/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
-/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
 /// unsafe {
 ///     extern "C" fn sink(_: *mut core::ffi::c_void, _: *const u8, _: usize) -> exi_status { EXI_OK }
 ///     let mut cfg = writer_config(&byte);
@@ -2232,13 +2085,7 @@ pub unsafe extern "C" fn exi_writer_take(
 ///
 /// ```
 /// use exi::capi::*;
-/// # use core::ptr::{null, null_mut};
-/// # let s = |t: &'static str| exi_str { ptr: t.as_ptr().cast(), len: t.len() };
-/// # /// A writer config: byte-aligned, options agreed out of band.
-/// # let byte = { let mut o = unsafe { core::mem::zeroed::<exi_options>() }; unsafe { exi_options_init(&mut o) }; o.coding = EXI_CODING_BYTE_ALIGNED; o };
-/// # let writer_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_writer_config>() }; c.size = core::mem::size_of::<exi_writer_config>() as u32; c.options = o; c.header = EXI_HDR_NO_OPTIONS; c };
-/// # let reader_config = |o: &exi_options| { let mut c = unsafe { core::mem::zeroed::<exi_reader_config>() }; c.size = core::mem::size_of::<exi_reader_config>() as u32; c.options = o; c };
-/// # let _ = (&s, &byte, &writer_config, &reader_config);
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
 /// unsafe {
 ///     let w = exi_writer_new(&writer_config(&byte));
 ///     assert_eq!(exi_writer_error(w, null_mut()), EXI_OK);         // none yet

@@ -68,10 +68,8 @@ type Map<K, V> = HashMap<K, V, FxBuildHasher>;
 
 /// A code table from full codes, keeping the productions the options
 /// keep.
-fn pruned(full: &[(Terminal, Vec<u32>)], keep: Keep) -> CodeTable {
-    let v: Vec<(Terminal, &[u32])> =
-        full.iter().map(|(t, p)| (*t, p.as_slice())).collect();
-    CodeTable::pruned(&v, crate::grammar::builtin::keeps(keep))
+fn pruned(full: &[(Terminal, EventCode)], keep: Keep) -> CodeTable {
+    CodeTable::pruned(full, crate::grammar::builtin::keeps(keep))
 }
 
 pub(crate) fn err(kind: ErrorKind, detail: &'static str) -> Error {
@@ -218,7 +216,7 @@ pub(crate) enum Slot {
 pub(crate) enum Table<'a> {
     Flat(&'a [IProd]),
     Borrowed(&'a CodeTable),
-    Shared(alloc::sync::Arc<CodeTable>),
+    Ref(core::cell::Ref<'a, CodeTable>),
 }
 
 impl Table<'_> {
@@ -226,7 +224,7 @@ impl Table<'_> {
         match self {
             Table::Flat(_) => None,
             Table::Borrowed(t) => Some(t),
-            Table::Shared(t) => Some(t),
+            Table::Ref(t) => Some(t),
         }
     }
 
@@ -237,7 +235,7 @@ impl Table<'_> {
                 .position(|p| p.term == term)
                 .map(|i| EventCode::new(&[i as u32])),
             Table::Borrowed(t) => t.code(term),
-            Table::Shared(t) => t.code(term),
+            Table::Ref(t) => t.code(term),
         }
     }
 
@@ -258,7 +256,7 @@ impl Table<'_> {
             Table::Flat(prods) if prefix.is_empty() => prods.len() as u32,
             Table::Flat(_) => 0,
             Table::Borrowed(t) => t.count(prefix),
-            Table::Shared(t) => t.count(prefix),
+            Table::Ref(t) => t.count(prefix),
         }
     }
 
@@ -269,7 +267,7 @@ impl Table<'_> {
                 _ => None,
             },
             Table::Borrowed(t) => t.lookup(parts),
-            Table::Shared(t) => t.lookup(parts),
+            Table::Ref(t) => t.lookup(parts),
         }
     }
 }
@@ -289,8 +287,9 @@ pub(crate) struct State<'g> {
     pub schema: Option<&'g Schema>,
     #[cfg(feature = "std")]
     grammars: &'g Grammars<'g>,
-    /// Without std the built tables are kept per stream.
-    #[cfg(not(feature = "std"))]
+    /// Per-stream cache of built code tables; populated from `grammars`
+    /// on first miss under `std`, so hot-path lookups avoid the mutex
+    /// and `Arc` refcount churn.
     tables: core::cell::RefCell<crate::grammar::TableCache>,
     pub opts: Options,
     pub keep: Keep,
@@ -358,22 +357,22 @@ impl TopTables {
             // the built-in document and fragment grammars, pruned by
             // the options.
             let n = terms.len() as u32;
-            let mut full: Vec<(Terminal, Vec<u32>)> = terms
+            let mut full: Vec<(Terminal, EventCode)> = terms
                 .into_iter()
                 .enumerate()
-                .map(|(i, t)| (t, alloc::vec![i as u32]))
+                .map(|(i, t)| (t, EventCode::new(&[i as u32])))
                 .collect();
-            let mut end: Vec<(Terminal, Vec<u32>)> =
-                alloc::vec![(Terminal::ED, alloc::vec![0])];
+            let mut end: Vec<(Terminal, EventCode)> =
+                alloc::vec![(Terminal::ED, EventCode::new(&[0]))];
             if opts.fragment() {
-                full.push((Terminal::CM, alloc::vec![n, 0]));
-                full.push((Terminal::PI, alloc::vec![n, 1]));
+                full.push((Terminal::CM, EventCode::new(&[n, 0])));
+                full.push((Terminal::PI, EventCode::new(&[n, 1])));
             } else {
-                full.push((Terminal::DT, alloc::vec![n, 0]));
-                full.push((Terminal::CM, alloc::vec![n, 1, 0]));
-                full.push((Terminal::PI, alloc::vec![n, 1, 1]));
-                end.push((Terminal::CM, alloc::vec![1, 0]));
-                end.push((Terminal::PI, alloc::vec![1, 1]));
+                full.push((Terminal::DT, EventCode::new(&[n, 0])));
+                full.push((Terminal::CM, EventCode::new(&[n, 1, 0])));
+                full.push((Terminal::PI, EventCode::new(&[n, 1, 1])));
+                end.push((Terminal::CM, EventCode::new(&[1, 0])));
+                end.push((Terminal::PI, EventCode::new(&[1, 1])));
             }
             (pruned(&full, keep), elems, pruned(&end, keep))
         });
@@ -397,7 +396,6 @@ impl<'g> State<'g> {
             schema,
             #[cfg(feature = "std")]
             grammars: g,
-            #[cfg(not(feature = "std"))]
             tables: Default::default(),
             keep,
             budget: limits.get_max_learned_productions(),
@@ -594,25 +592,30 @@ impl<'g> State<'g> {
             | (k.pis as u16) << 5
     }
 
-    /// The table for `key`, built by `make` once per grammars (with
-    /// std) or per stream.
+    /// The table for `key`, cached per stream and shared across streams
+    /// via `grammars` when `std` is enabled.
     fn cached(
         &self,
         key: crate::grammar::TableKey,
         make: impl FnOnce() -> CodeTable,
     ) -> Table<'_> {
-        #[cfg(feature = "std")]
-        let cache = self.grammars.table_cache();
-        #[cfg(feature = "std")]
-        let mut map = cache.lock().unwrap_or_else(|e| e.into_inner());
-        #[cfg(not(feature = "std"))]
-        let mut map = self.tables.borrow_mut();
-        if let Some(t) = map.get(&key) {
-            return Table::Shared(t.clone());
+        if let Ok(t) = core::cell::Ref::filter_map(self.tables.borrow(), |m| {
+            m.get(&key).map(|t| &**t)
+        }) {
+            return Table::Ref(t);
         }
+        #[cfg(feature = "std")]
+        let t = {
+            let cache = self.grammars.table_cache();
+            let mut map = cache.lock().unwrap_or_else(|e| e.into_inner());
+            map.entry(key)
+                .or_insert_with(|| alloc::sync::Arc::new(make()))
+                .clone()
+        };
+        #[cfg(not(feature = "std"))]
         let t = alloc::sync::Arc::new(make());
-        map.insert(key, t.clone());
-        Table::Shared(t)
+        self.tables.borrow_mut().insert(key, t);
+        Table::Ref(core::cell::Ref::map(self.tables.borrow(), |m| &*m[&key]))
     }
 
     /// The code table of an informed state without strict: its
@@ -660,21 +663,20 @@ impl<'g> State<'g> {
         };
         let n = first_level.len() as u32;
         let has_ee = first_level.contains(&Terminal::EE);
-        let declared: Vec<Terminal> = first_level
+        let declared_count = first_level
             .iter()
-            .copied()
             .filter(|t| matches!(t, Terminal::AT(_)))
-            .collect();
-        let mut full: Vec<(Terminal, Vec<u32>)> = first_level
+            .count() as u32;
+        let mut full: Vec<(Terminal, EventCode)> = first_level
             .iter()
             .enumerate()
-            .map(|(i, t)| (*t, alloc::vec![i as u32]))
+            .map(|(i, t)| (*t, EventCode::new(&[i as u32])))
             .collect();
         let mut k = 0u32;
-        let second = |full: &mut Vec<(Terminal, Vec<u32>)>,
+        let second = |full: &mut Vec<(Terminal, EventCode)>,
                       k: &mut u32,
                       t: Terminal| {
-            full.push((t, alloc::vec![n, *k]));
+            full.push((t, EventCode::new(&[n, *k])));
             *k += 1;
         };
         if !has_ee {
@@ -687,13 +689,14 @@ impl<'g> State<'g> {
         }
         if first || start {
             second(&mut full, &mut k, Terminal::AtAny);
-            for (j, t) in declared.iter().enumerate() {
-                full.push((*t, alloc::vec![n, k, j as u32]));
+            let mut j = 0u32;
+            for t in &first_level {
+                if matches!(t, Terminal::AT(_)) {
+                    full.push((*t, EventCode::new(&[n, k, j])));
+                    j += 1;
+                }
             }
-            full.push((
-                Terminal::AtAny,
-                alloc::vec![n, k, declared.len() as u32],
-            ));
+            full.push((Terminal::AtAny, EventCode::new(&[n, k, declared_count])));
             k += 1;
         }
         if first {
@@ -703,8 +706,8 @@ impl<'g> State<'g> {
         second(&mut full, &mut k, Terminal::SeAny);
         second(&mut full, &mut k, Terminal::CH);
         second(&mut full, &mut k, Terminal::ER);
-        full.push((Terminal::CM, alloc::vec![n, k, 0]));
-        full.push((Terminal::PI, alloc::vec![n, k, 1]));
+        full.push((Terminal::CM, EventCode::new(&[n, k, 0])));
+        full.push((Terminal::PI, EventCode::new(&[n, k, 1])));
         pruned(&full, self.keep)
     }
 

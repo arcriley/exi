@@ -217,15 +217,7 @@ fn bring(d: &mut Document<'_>, n: *mut RawCommon) -> Option<NodeId> {
 /// `version` is NULL or NUL-terminated.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiNewDoc(s!("1.0"));
 ///     assert_eq!((*d).r#type, EXI_DOCUMENT_NODE);
@@ -247,15 +239,7 @@ pub unsafe extern "C" fn exiNewDoc(_version: *const exiChar) -> exiDocPtr {
 /// `strings` is a live `exi_strings`.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     use exi::capi::{exi_strings_free, exi_strings_new};
 ///     let strings = exi_strings_new(null());
@@ -304,15 +288,7 @@ unsafe fn strings_of<'a>(s: *mut exi_strings) -> Option<&'a GlobalStrings> {
 /// `d` is NULL or a live document, not used again.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a><b/></a>"));
 ///     let loose = exiNewDocNode(d, null_mut(), s!("c"), null());   // never linked
@@ -338,15 +314,7 @@ pub unsafe extern "C" fn exiFreeDoc(d: exiDocPtr) {
 /// `d` is NULL or live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<!--first--><a/>"));
 ///     assert_eq!(name(exiDocGetRootElement(d)), "a");
@@ -370,15 +338,7 @@ pub unsafe extern "C" fn exiDocGetRootElement(d: *const RawDoc) -> exiNodePtr {
 /// `d` and `root` are live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a/>"));
 ///     let b = exiNewDocNode(d, null_mut(), s!("b"), null());
@@ -415,15 +375,7 @@ pub unsafe extern "C" fn exiDocSetRootElement(
 /// `d` is live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a><b/></a>"));
 ///     let (full, bare) = (exiCopyDoc(d, 1), exiCopyDoc(d, 0));
@@ -492,15 +444,7 @@ fn element_in(
 /// `d` is live; `ns` NULL or live; strings NUL-terminated.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiNewDoc(s!("1.0"));
 ///     let r = exiNewDocNode(d, null_mut(), s!("r"), null());
@@ -543,15 +487,7 @@ pub unsafe extern "C" fn exiNewDocNode(
 /// As `exiNewDocNode`.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let n = exiNewNode(null_mut(), s!("a"));                     // no document yet
 ///     let d = exiNewDoc(s!("1.0"));
@@ -579,15 +515,7 @@ pub unsafe extern "C" fn exiNewNode(
 /// `parent` is live; `ns` NULL or live; strings NUL-terminated.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<r xmlns='urn:x'/>"));
 ///     let r = exiDocGetRootElement(d);
@@ -636,15 +564,7 @@ pub unsafe extern "C" fn exiNewChild(
 /// As `exiNewChild`.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<r/>"));
 ///     let r = exiDocGetRootElement(d);
@@ -685,15 +605,7 @@ fn leaf(
 /// `d` NULL or live; `content` NUL-terminated.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a/>"));
 ///     let a = exiDocGetRootElement(d);
@@ -721,15 +633,7 @@ pub unsafe extern "C" fn exiNewDocText(
 /// `d` NULL or live; `content` valid for `len` bytes.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiNewDoc(s!("1.0"));
 ///     let t = exiNewDocTextLen(d, s!("hello"), 4);
@@ -756,15 +660,7 @@ pub unsafe extern "C" fn exiNewDocTextLen(
 /// `content` is NUL-terminated.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let t = exiNewText(s!("hi"));                                // no document yet
 ///     let d = exiParseDoc(s!("<a/>"));
@@ -788,15 +684,7 @@ pub unsafe extern "C" fn exiNewText(content: *const exiChar) -> exiNodePtr {
 /// `content` is valid for `len` bytes.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let t = exiNewTextLen(s!("hi there"), 2);
 ///     assert_eq!(text(exiNodeGetContent(t)), "hi");
@@ -819,15 +707,7 @@ pub unsafe extern "C" fn exiNewTextLen(
 /// `d` NULL or live; `content` NUL-terminated.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a/>"));
 ///     let c = exiNewDocComment(d, s!(" note "));
@@ -854,15 +734,7 @@ pub unsafe extern "C" fn exiNewDocComment(
 /// `content` is NUL-terminated.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let c = exiNewComment(s!("note"));
 ///     assert_eq!((*c).r#type, EXI_COMMENT_NODE);
@@ -883,15 +755,7 @@ pub unsafe extern "C" fn exiNewComment(content: *const exiChar) -> exiNodePtr {
 /// `d` NULL or live; strings NUL-terminated (`content` may be NULL).
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a/>"));
 ///     let pi = exiNewDocPI(d, s!("style"), s!("href='x.css'"));
@@ -920,15 +784,7 @@ pub unsafe extern "C" fn exiNewDocPI(
 /// As `exiNewDocPI`.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let pi = exiNewPI(s!("target"), s!("data"));
 ///     assert_eq!((*pi).r#type, EXI_PI_NODE);
@@ -952,15 +808,7 @@ pub unsafe extern "C" fn exiNewPI(
 /// `d` NULL or live; `name` NUL-terminated.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a/>"));
 ///     let r = exiNewReference(d, s!("&nbsp;"));                    // or "nbsp"
@@ -1000,15 +848,7 @@ fn plain_text(d: &Document<'_>, n: NodeId) -> Option<String> {
 /// Both NULL or live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a>x</a>"));
 ///     let a = exiDocGetRootElement(d);
@@ -1070,15 +910,7 @@ pub unsafe extern "C" fn exiAddChild(
 /// As `exiAddChild`; `cur` heads a list of unlinked siblings.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<r><from><a/><b/></from><to/></r>"));
 ///     let r = exiDocGetRootElement(d);
@@ -1147,15 +979,7 @@ fn add_sibling(cur: exiNodePtr, elem: exiNodePtr, after: bool) -> exiNodePtr {
 /// Both NULL or live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<r><a/><c/></r>"));
 ///     let r = exiDocGetRootElement(d);
@@ -1180,15 +1004,7 @@ pub unsafe extern "C" fn exiAddNextSibling(
 /// Both NULL or live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<r><b/></r>"));
 ///     let r = exiDocGetRootElement(d);
@@ -1213,15 +1029,7 @@ pub unsafe extern "C" fn exiAddPrevSibling(
 /// Both NULL or live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<r><a/><b/></r>"));
 ///     let r = exiDocGetRootElement(d);
@@ -1253,15 +1061,7 @@ pub unsafe extern "C" fn exiAddSibling(
 /// `cur` is NULL or live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<r><a/><b/></r>"));
 ///     let r = exiDocGetRootElement(d);
@@ -1293,15 +1093,7 @@ pub unsafe extern "C" fn exiUnlinkNode(cur: exiNodePtr) {
 /// `cur` is NULL or live, and not used again.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<r><a><deep/></a><b/></r>"));
 ///     let r = exiDocGetRootElement(d);
@@ -1336,15 +1128,7 @@ pub unsafe extern "C" fn exiFreeNode(cur: exiNodePtr) {
 /// As `exiFreeNode`.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<r><a/><b/><c/></r>"));
 ///     let r = exiDocGetRootElement(d);
@@ -1373,15 +1157,7 @@ pub unsafe extern "C" fn exiFreeNodeList(cur: exiNodePtr) {
 /// Both NULL or live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<r><a/><b/><c/></r>"));
 ///     let r = exiDocGetRootElement(d);
@@ -1425,15 +1201,7 @@ pub unsafe extern "C" fn exiReplaceNode(
 /// `n` is live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a k='v'><b/></a>"));
 ///     let a = exiDocGetRootElement(d);
@@ -1470,15 +1238,7 @@ pub unsafe extern "C" fn exiCopyNode(
 /// `n` and `d` are live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let (d, other) = (exiParseDoc(s!("<a><b/></a>")), exiNewDoc(s!("1.0")));
 ///     let copy = exiDocCopyNode(exiDocGetRootElement(d), other, 1);
@@ -1523,15 +1283,7 @@ pub unsafe extern "C" fn exiDocCopyNode(
 /// `n` is NULL or live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a>x<b>y</b><!--not text-->z</a>"));
 ///     assert_eq!(text(exiNodeGetContent(exiDocGetRootElement(d))), "xyz");
@@ -1568,15 +1320,7 @@ fn set_content(n: exiNodePtr, s: Option<&str>) -> c_int {
 /// `n` is live; `content` NULL or NUL-terminated.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a>old<b/></a>"));
 ///     let a = exiDocGetRootElement(d);
@@ -1602,15 +1346,7 @@ pub unsafe extern "C" fn exiNodeSetContent(
 /// `n` is live; `content` valid for `len` bytes.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a>old</a>"));
 ///     let a = exiDocGetRootElement(d);
@@ -1648,15 +1384,7 @@ fn add_content(n: exiNodePtr, s: Option<&str>) -> c_int {
 /// `n` is live; `content` NUL-terminated.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a>one</a>"));
 ///     let a = exiDocGetRootElement(d);
@@ -1681,15 +1409,7 @@ pub unsafe extern "C" fn exiNodeAddContent(
 /// `n` is live; `content` valid for `len` bytes.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a>one</a>"));
 ///     let a = exiDocGetRootElement(d);
@@ -1717,15 +1437,7 @@ pub unsafe extern "C" fn exiNodeAddContentLen(
 /// `list` is NULL or live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a>x</a>"));
 ///     let a = exiDocGetRootElement(d);
@@ -1774,15 +1486,7 @@ pub unsafe extern "C" fn exiNodeListGetString(
 /// `n` is NULL or live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a>t</a>"));
 ///     let a = exiDocGetRootElement(d);
@@ -1803,15 +1507,7 @@ pub unsafe extern "C" fn exiNodeIsText(n: *const RawNode) -> c_int {
 /// `n` is NULL or live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a> <b/>x</a>"));
 ///     let a = exiDocGetRootElement(d);
@@ -1838,15 +1534,7 @@ pub unsafe extern "C" fn exiIsBlankNode(n: *const RawNode) -> c_int {
 /// `n` is live; `name` NUL-terminated.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<x:a xmlns:x='urn:x'/>"));
 ///     let a = exiDocGetRootElement(d);
@@ -1887,15 +1575,7 @@ pub unsafe extern "C" fn exiNodeSetName(n: exiNodePtr, name: *const exiChar) {
 /// `n` is NULL or live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a>\n\n<b/></a>"));
 ///     let a = exiDocGetRootElement(d);
@@ -1921,15 +1601,7 @@ pub unsafe extern "C" fn exiGetLineNo(n: *const RawNode) -> c_long {
 /// `n` is NULL or live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<r><a/><a/></r>"));
 ///     let r = exiDocGetRootElement(d);
@@ -1958,15 +1630,7 @@ pub unsafe extern "C" fn exiGetNodePath(n: *const RawNode) -> *mut exiChar {
 /// `n` is live; `out` points to an `exi_value`.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     use exi::capi::{EXI_E_ARG, EXI_OK, EXI_V_STRING, exi_value};
 ///     let d = exiParseDoc(s!("<a>5</a>"));
@@ -2024,15 +1688,7 @@ pub unsafe extern "C" fn exiNodeGetValue(
 /// `n` is live; `v` points to a filled `exi_value`.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     use exi::capi::{EXI_OK, EXI_V_INT, exi_value};
 ///     let d = exiParseDoc(s!("<a>old</a>"));
@@ -2144,15 +1800,7 @@ fn set_prop(
 /// `node` NULL or live; strings NUL-terminated (`value` may be NULL).
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a/>"));
 ///     let a = exiDocGetRootElement(d);
@@ -2182,15 +1830,7 @@ pub unsafe extern "C" fn exiNewProp(
 /// As `exiNewProp`; `ns` NULL or live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a/>"));
 ///     let a = exiDocGetRootElement(d);
@@ -2219,15 +1859,7 @@ pub unsafe extern "C" fn exiNewNsProp(
 /// `node` live; strings NUL-terminated (`value` may be NULL).
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a xmlns:x='urn:x'/>"));
 ///     let a = exiDocGetRootElement(d);
@@ -2258,15 +1890,7 @@ pub unsafe extern "C" fn exiSetProp(
 /// As `exiSetProp`; `ns` NULL or live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a/>"));
 ///     let a = exiDocGetRootElement(d);
@@ -2318,15 +1942,7 @@ fn find_prop(n: *const RawNode, local: &str, uri: Option<&str>) -> exiAttrPtr {
 /// `n` NULL or live; `name` NUL-terminated.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a xmlns:x='urn:x' x:k='1'/>"));
 ///     let a = exiDocGetRootElement(d);
@@ -2354,15 +1970,7 @@ pub unsafe extern "C" fn exiHasProp(
 /// As `exiHasProp`.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a xmlns:x='urn:x' x:k='1' j='2'/>"));
 ///     let a = exiDocGetRootElement(d);
@@ -2406,15 +2014,7 @@ fn prop_value(a: exiAttrPtr) -> *mut exiChar {
 /// As `exiHasProp`.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a k='v &amp; w'/>"));
 ///     let a = exiDocGetRootElement(d);
@@ -2441,15 +2041,7 @@ pub unsafe extern "C" fn exiGetProp(
 /// As `exiHasProp`.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a xmlns:x='urn:x' x:k='in x' k='in none'/>"));
 ///     let a = exiDocGetRootElement(d);
@@ -2475,15 +2067,7 @@ pub unsafe extern "C" fn exiGetNoNsProp(
 /// As `exiHasProp`.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a xmlns:x='urn:x' x:k='in x' k='in none'/>"));
 ///     let a = exiDocGetRootElement(d);
@@ -2511,15 +2095,7 @@ pub unsafe extern "C" fn exiGetNsProp(
 /// `a` NULL or live, not used again.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a k='v'/>"));
 ///     let a = exiDocGetRootElement(d);
@@ -2551,15 +2127,7 @@ pub unsafe extern "C" fn exiRemoveProp(a: exiAttrPtr) -> c_int {
 /// As `exiRemoveProp`.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a k='v'/>"));
 ///     let a = exiDocGetRootElement(d);
@@ -2582,15 +2150,7 @@ pub unsafe extern "C" fn exiFreeProp(a: exiAttrPtr) {
 /// As `exiHasProp`.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a k='v'/>"));
 ///     let a = exiDocGetRootElement(d);
@@ -2615,15 +2175,7 @@ pub unsafe extern "C" fn exiUnsetProp(
 /// As `exiHasProp`; `ns` NULL or live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a xmlns:x='urn:x' x:k='1' k='2'/>"));
 ///     let a = exiDocGetRootElement(d);
@@ -2656,15 +2208,7 @@ pub unsafe extern "C" fn exiUnsetNsProp(
 /// `n` live; strings NUL-terminated (`prefix` may be NULL).
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a/>"));
 ///     let a = exiDocGetRootElement(d);
@@ -2707,15 +2251,7 @@ pub unsafe extern "C" fn exiNewNs(
 /// `n` live; `prefix` NULL or NUL-terminated.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a xmlns='urn:d' xmlns:x='urn:x'><b/></a>"));
 ///     let b = (*exiDocGetRootElement(d)).children;
@@ -2750,15 +2286,7 @@ pub unsafe extern "C" fn exiSearchNs(
 /// `n` live; `href` NUL-terminated.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a xmlns:x='urn:x'><b/></a>"));
 ///     let b = (*exiDocGetRootElement(d)).children;
@@ -2793,15 +2321,7 @@ pub unsafe extern "C" fn exiSearchNsByHref(
 /// `n` live; `ns` NULL or live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a xmlns:x='urn:x'><b/></a>"));
 ///     let a = exiDocGetRootElement(d);
@@ -2839,15 +2359,7 @@ pub unsafe extern "C" fn exiSetNs(n: exiNodePtr, ns: exiNsPtr) {
 /// `n` is live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a xmlns:x='urn:x' xmlns:y='urn:y'><b xmlns:x='urn:x2'/></a>"));
 ///     let b = (*exiDocGetRootElement(d)).children;
@@ -2925,15 +2437,7 @@ unsafe fn elem_from(mut c: *mut RawNode, forward: bool) -> exiNodePtr {
 /// `n` NULL or live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<r>t<a/>u<b/>v</r>"));
 ///     let r = exiDocGetRootElement(d);
@@ -2959,15 +2463,7 @@ pub unsafe extern "C" fn exiFirstElementChild(n: exiNodePtr) -> exiNodePtr {
 /// `n` NULL or live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<r>t<a/>u<b/>v</r>"));
 ///     let r = exiDocGetRootElement(d);
@@ -2992,15 +2488,7 @@ pub unsafe extern "C" fn exiLastElementChild(n: exiNodePtr) -> exiNodePtr {
 /// `n` NULL or live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<r><a/>u<b/></r>"));
 ///     let r = exiDocGetRootElement(d);
@@ -3027,15 +2515,7 @@ pub unsafe extern "C" fn exiNextElementSibling(n: exiNodePtr) -> exiNodePtr {
 /// `n` NULL or live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<r><a/>u<b/></r>"));
 ///     let r = exiDocGetRootElement(d);
@@ -3063,15 +2543,7 @@ pub unsafe extern "C" fn exiPreviousElementSibling(
 /// `n` NULL or live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<r>t<a/><!--c--><b/></r>"));
 ///     assert_eq!(exiChildElementCount(exiDocGetRootElement(d)), 2);
@@ -3105,15 +2577,7 @@ pub unsafe extern "C" fn exiChildElementCount(n: exiNodePtr) -> c_ulong {
 /// `d` live; strings NUL-terminated; the outputs point to `uint32_t`.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a xmlns='urn:x'/>"));
 ///     let a = exiDocGetRootElement(d);
@@ -3177,15 +2641,7 @@ fn read_xml(bytes: &[u8], url: Option<&str>, options: c_int) -> exiDocPtr {
 /// `buffer` valid for `size` bytes; `URL` NULL or NUL-terminated.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let xml = b"<a> <b/> </a>";
 ///     let d = exiReadMemory(xml.as_ptr().cast(), xml.len() as _, c"mem:a".as_ptr(), null(), EXI_PARSE_NOBLANKS);
@@ -3224,15 +2680,7 @@ pub unsafe extern "C" fn exiReadMemory(
 /// `cur` NUL-terminated; `URL` NULL or NUL-terminated.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiReadDoc(s!("<a> <b/></a>"), null(), null(), 0);
 ///     assert_eq!(exiIsBlankNode((*exiDocGetRootElement(d)).children), 1);   // blanks kept
@@ -3265,15 +2713,7 @@ pub unsafe extern "C" fn exiReadDoc(
 /// `filename` NUL-terminated.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let path = std::env::temp_dir().join(format!("exi-read-file-{}.xml", std::process::id()));
 ///     std::fs::write(&path, "<a/>").unwrap();
@@ -3310,15 +2750,7 @@ pub unsafe extern "C" fn exiReadFile(
 /// `buffer` valid for `size` bytes.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let xml = b"<a/>trailing";
 ///     assert!(exiParseMemory(xml.as_ptr().cast(), xml.len() as _).is_null());
@@ -3343,15 +2775,7 @@ pub unsafe extern "C" fn exiParseMemory(
 /// `cur` NUL-terminated.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a><b/></a>"));
 ///     assert_eq!(kids(exiDocGetRootElement(d)), ["b"]);
@@ -3372,15 +2796,7 @@ pub unsafe extern "C" fn exiParseDoc(cur: *const exiChar) -> exiDocPtr {
 /// `filename` NUL-terminated.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let path = std::env::temp_dir().join(format!("exi-parse-file-{}.xml", std::process::id()));
 ///     std::fs::write(&path, "<a><b/></a>").unwrap();
@@ -3408,15 +2824,7 @@ pub unsafe extern "C" fn exiParseFile(filename: *const c_char) -> exiDocPtr {
 /// `r` is live; `strings` NULL or live and outliving the document.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     use exi::capi::*;
 ///     let mut cfg = core::mem::zeroed::<exi_reader_config>();
@@ -3498,15 +2906,7 @@ impl EventSink for ToWriter<'_> {
 /// `d` and `w` are live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     use exi::capi::*;
 ///     let mut o = core::mem::zeroed::<exi_options>();
@@ -3547,15 +2947,7 @@ pub unsafe extern "C" fn exiDocWriteTo(
 /// `n` and `w` are live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     use exi::capi::*;
 ///     let mut o = core::mem::zeroed::<exi_options>();
@@ -3628,15 +3020,7 @@ fn dump(d: &Document<'_>) -> Option<Vec<u8>> {
 /// `d` live; `mem` and `size` point to writable storage.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<!--c--><a k='v'><b/></a>"));
 ///     let (mut mem, mut size) = (null_mut(), 0);
@@ -3682,15 +3066,7 @@ pub unsafe extern "C" fn exiDocDumpMemory(
 /// As `exiDocDumpMemory`.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a><b/></a>"));
 ///     let (mut mem, mut size) = (null_mut(), 0);
@@ -3718,15 +3094,7 @@ pub unsafe extern "C" fn exiDocDumpFormatMemory(
 /// As `exiDocDumpMemory`, for a node.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<r xmlns:x='urn:x'><x:m>hi</x:m></r>"));
 ///     let m = (*exiDocGetRootElement(d)).children;
@@ -3775,15 +3143,7 @@ pub unsafe extern "C" fn exiNodeDumpMemory(
 /// `filename` NUL-terminated; `d` live.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let path = std::env::temp_dir().join(format!("exi-save-file-{}.xml", std::process::id()));
 ///     let p = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
@@ -3825,15 +3185,7 @@ pub unsafe extern "C" fn exiSaveFile(
 /// As `exiSaveFile`.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let path = std::env::temp_dir().join(format!("exi-save-format-{}.xml", std::process::id()));
 ///     let p = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
@@ -3860,15 +3212,7 @@ pub unsafe extern "C" fn exiSaveFormatFile(
 /// `p` is NULL or from this API, freed once.
 ///
 /// ```
-/// # use exi::capi::dom::*;
-/// # use exi::dom::raw::*;
-/// # use core::ptr::{null, null_mut};
-/// # macro_rules! s { ($t:literal) => { concat!($t, "\0").as_ptr() } }
-/// # /// A malloc'd string from the API, freed.
-/// # unsafe fn text(p: *mut u8) -> String { unsafe { assert!(!p.is_null()); let t = core::ffi::CStr::from_ptr(p.cast()).to_str().unwrap().to_owned(); exiFree(p.cast()); t } }
-/// # unsafe fn name(n: *const RawNode) -> &'static str { unsafe { core::ffi::CStr::from_ptr((*n).name.cast()).to_str().unwrap() } }
-/// # /// The names of an element's children.
-/// # unsafe fn kids(p: *const RawNode) -> Vec<&'static str> { unsafe { let mut v = Vec::new(); let mut c = (*p).children; while !c.is_null() { v.push(name(c)); c = (*c).next; } v } }
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_dom.rs")); } use fixture::*;
 /// unsafe {
 ///     let d = exiParseDoc(s!("<a>t</a>"));
 ///     let p = exiNodeGetContent(exiDocGetRootElement(d));          // malloc'd

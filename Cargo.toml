@@ -28,10 +28,14 @@ html5ever = "0.40"
 markup5ever_rcdom = "0.40.1"
 
 [features]
-default = ["std", "xml", "bit-packed", "compression", "exig"]
+default = ["std", "xml", "bit-packed", "compression", "exig", "header-options"]
 std = []
+# Select a smaller header codec for devices with out-of-band options.
+bare-header-only = []
+# Keep options documents when combined with bare-header-only.
+header-options = []
 # Load and save .exig files, and generate Rust from them at build time.
-exig = ["dep:sha2"]
+exig = ["dep:sha2", "header-options"]
 # XML 1.0 text reader and writer (exi::xml).
 xml = []
 # The XML Schema compiler (exi::xsd): XSD documents to grammars. Reads XSD with the XML reader.

@@ -133,16 +133,30 @@
 //! An SE(\*) in Doc or Unc0, or any SE(datatypeRepresentationMap), is
 //! `ErrorKind::Unsupported` in this build.
 //!
+//! With `bare-header-only` and without `header-options`, the header
+//! codec accepts bare headers with or without the cookie. Options come
+//! from the application. A header carrying an options document returns
+//! `ErrorKind::Unsupported`.
+//!
 //! These tables were derived by hand from the options schema. Before
 //! this module is marked done, its header test vectors are confirmed
 //! against fixtures from a second implementation (D6).
 
 use crate::coding::bits::{BitDecoder, BitEncoder};
+#[cfg(any(
+    not(feature = "bare-header-only"),
+    feature = "header-options"
+))]
 use crate::coding::datatypes::{
     read_chars, read_uint, write_chars, write_uint,
 };
 use crate::coding::{Channel, Decoder, Encoder, Sink};
-use crate::options::{Coding, Preserve, SchemaId};
+use crate::options::Coding;
+#[cfg(any(
+    not(feature = "bare-header-only"),
+    feature = "header-options"
+))]
+use crate::options::{Preserve, SchemaId};
 use crate::{Error, ErrorKind, Limits, Options, Result};
 
 const S: Channel = Channel::Structure;
@@ -246,6 +260,8 @@ pub(crate) fn parse_header_split(
     second: &[u8],
     limits: &Limits,
 ) -> Result<Option<ParsedHeader>> {
+    #[cfg(all(feature = "bare-header-only", not(feature = "header-options")))]
+    let _ = limits;
     let mut prefix = [0; COOKIE.len()];
     let sniffed = if first.len() >= prefix.len() || second.is_empty() {
         sniff(first)
@@ -286,7 +302,25 @@ pub(crate) fn parse_header_split(
         if version != 1 {
             return Err(unsupported("EXI version other than 1"));
         }
+        #[cfg(all(
+            feature = "bare-header-only",
+            not(feature = "header-options")
+        ))]
+        let options: Option<Options> = {
+            if has_options {
+                return Err(unsupported("options documents are disabled"));
+            }
+            None
+        };
+        #[cfg(any(
+            not(feature = "bare-header-only"),
+            feature = "header-options"
+        ))]
         let doc_start = d.bit_position();
+        #[cfg(any(
+            not(feature = "bare-header-only"),
+            feature = "header-options"
+        ))]
         let options = if has_options {
             let o = read_options_doc(&mut d, limits)?;
             if (d.bit_position() - doc_start).div_ceil(8)
@@ -398,12 +432,20 @@ pub(crate) fn write_header_bits<E: Encoder>(
         Header::WithOptions { cookie } => (cookie, true),
         Header::Bare { cookie } => (cookie, false),
     };
+    #[cfg(all(feature = "bare-header-only", not(feature = "header-options")))]
+    {
+        let _ = opts;
+        if with_options {
+            return Err(unsupported("options documents are disabled"));
+        }
+    }
     if cookie {
         e.octets(S, COOKIE)?;
     }
     e.nbit(S, 0b10, 2)?;
     e.nbit(S, with_options as u32, 1)?;
     e.nbit(S, 0, 5)?; // final version, EXI 1.0
+    #[cfg(any(not(feature = "bare-header-only"), feature = "header-options"))]
     if with_options {
         write_options_doc(e, opts)?;
     }
@@ -470,10 +512,12 @@ pub fn sniff(input: &[u8]) -> Sniff {
 // ---------------------------------------------------------------------------------------
 
 /// Writes the code `pos` of a state with `n` productions.
+#[cfg(any(not(feature = "bare-header-only"), feature = "header-options"))]
 fn code<E: Encoder>(e: &mut E, pos: u32, n: u32) -> Result<()> {
     e.nbit(S, pos, crate::coding::width(n))
 }
 
+#[cfg(any(not(feature = "bare-header-only"), feature = "header-options"))]
 fn write_options_doc<E: Encoder>(e: &mut E, o: &Options) -> Result<()> {
     let byte_or_pre =
         matches!(o.coding(), Coding::ByteAligned | Coding::PreCompression);
@@ -607,6 +651,7 @@ fn write_options_doc<E: Encoder>(e: &mut E, o: &Options) -> Result<()> {
 }
 
 /// Reads the code of a state with `n` productions.
+#[cfg(any(not(feature = "bare-header-only"), feature = "header-options"))]
 fn choice(d: &mut BitDecoder<'_>, n: u32) -> Result<u32> {
     let v = d.nbit(S, crate::coding::width(n))?;
     if v >= n {
@@ -615,12 +660,14 @@ fn choice(d: &mut BitDecoder<'_>, n: u32) -> Result<u32> {
     Ok(v)
 }
 
+#[cfg(any(not(feature = "bare-header-only"), feature = "header-options"))]
 fn read_u32(d: &mut BitDecoder<'_>, limits: &Limits) -> Result<u32> {
     let v = read_uint(d, S, limits.get_max_integer_octets())?;
     u32::try_from(v)
         .map_err(|_| header_err("options value beyond unsignedInt"))
 }
 
+#[cfg(any(not(feature = "bare-header-only"), feature = "header-options"))]
 fn read_options_doc(
     d: &mut BitDecoder<'_>,
     limits: &Limits,
@@ -773,6 +820,7 @@ fn read_options_doc(
         .map_err(|_| header_err("options that cannot be combined"))
 }
 
+#[cfg(any(not(feature = "bare-header-only"), feature = "header-options"))]
 fn read_schema_string(
     d: &mut BitDecoder<'_>,
     limits: &Limits,
@@ -803,6 +851,36 @@ fn read_schema_string(
 mod tests {
     use super::*;
 
+    #[cfg(all(feature = "bare-header-only", not(feature = "header-options")))]
+    #[test]
+    fn bare_build_rejects_options_without_writing() -> Result<()> {
+        let opts = Options::builder().coding(Coding::ByteAligned).build()?;
+        let mut bytes = alloc::vec::Vec::new();
+        let error = write_header(
+            &mut bytes,
+            Header::WithOptions { cookie: true },
+            &opts,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        assert!(bytes.is_empty());
+        let limits = Limits::new();
+        assert_eq!(
+            parse_header(&[0xA0], &limits).unwrap_err().kind(),
+            ErrorKind::Unsupported
+        );
+        for cookie in [false, true] {
+            bytes.clear();
+            write_header(&mut bytes, Header::Bare { cookie }, &opts)?;
+            let h = parse_header(&bytes, &limits)?.unwrap();
+            assert_eq!(h.cookie, cookie);
+            assert!(h.options.is_none());
+            assert_eq!(h.body_offset_bits as usize, bytes.len() * 8);
+        }
+        Ok(())
+    }
+
+    #[cfg(any(not(feature = "bare-header-only"), feature = "header-options"))]
     #[test]
     fn header_can_wrap_at_any_octet() -> Result<()> {
         let limits = Limits::new();

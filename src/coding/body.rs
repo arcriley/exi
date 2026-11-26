@@ -22,6 +22,7 @@ use alloc::string::String;
 
 #[cfg(feature = "compression")]
 use super::block::BlockEncoder;
+#[cfg(feature = "bit-packed")]
 use crate::coding::bits::{BitDecoder, BitEncoder};
 use crate::coding::byte_aligned::{ByteDecoder, ByteEncoder};
 use crate::coding::{Channel, Decoder, Encoder, Sink};
@@ -30,6 +31,7 @@ use crate::{Coding, Options, Result};
 /// Writes a body bit-packed or byte-aligned.
 pub(crate) enum BodyEncoder<S: Sink> {
     Byte(ByteEncoder<S>),
+    #[cfg(feature = "bit-packed")]
     Bit(BitEncoder<S>),
     #[cfg(feature = "compression")]
     Block(BlockEncoder<S>),
@@ -43,6 +45,7 @@ impl<S: Sink> BodyEncoder<S> {
     pub fn new(options: &Options, level: u32, sink: S) -> Self {
         let _ = level;
         match options.coding() {
+            #[cfg(feature = "bit-packed")]
             Coding::BitPacked => BodyEncoder::Bit(BitEncoder::new(sink)),
             #[cfg(feature = "compression")]
             Coding::PreCompression => BodyEncoder::Block(BlockEncoder::new(
@@ -62,6 +65,7 @@ impl<S: Sink> BodyEncoder<S> {
     pub fn sink(&self) -> &S {
         match self {
             BodyEncoder::Byte(e) => e.sink(),
+            #[cfg(feature = "bit-packed")]
             BodyEncoder::Bit(e) => e.sink(),
             #[cfg(feature = "compression")]
             BodyEncoder::Block(e) => e.sink(),
@@ -70,6 +74,7 @@ impl<S: Sink> BodyEncoder<S> {
     pub fn sink_mut(&mut self) -> &mut S {
         match self {
             BodyEncoder::Byte(e) => e.sink_mut(),
+            #[cfg(feature = "bit-packed")]
             BodyEncoder::Bit(e) => e.sink_mut(),
             #[cfg(feature = "compression")]
             BodyEncoder::Block(e) => e.sink_mut(),
@@ -79,6 +84,7 @@ impl<S: Sink> BodyEncoder<S> {
     pub fn into_sink(self) -> S {
         match self {
             BodyEncoder::Byte(e) => e.into_sink(),
+            #[cfg(feature = "bit-packed")]
             BodyEncoder::Bit(e) => e.into_sink(),
             #[cfg(feature = "compression")]
             BodyEncoder::Block(e) => e.into_sink(),
@@ -90,6 +96,7 @@ impl<S: Sink> Encoder for BodyEncoder<S> {
     fn nbit(&mut self, ch: Channel, value: u32, width: u8) -> Result<()> {
         match self {
             BodyEncoder::Byte(e) => e.nbit(ch, value, width),
+            #[cfg(feature = "bit-packed")]
             BodyEncoder::Bit(e) => e.nbit(ch, value, width),
             #[cfg(feature = "compression")]
             BodyEncoder::Block(e) => e.nbit(ch, value, width),
@@ -98,6 +105,7 @@ impl<S: Sink> Encoder for BodyEncoder<S> {
     fn octets(&mut self, ch: Channel, data: &[u8]) -> Result<()> {
         match self {
             BodyEncoder::Byte(e) => e.octets(ch, data),
+            #[cfg(feature = "bit-packed")]
             BodyEncoder::Bit(e) => e.octets(ch, data),
             #[cfg(feature = "compression")]
             BodyEncoder::Block(e) => e.octets(ch, data),
@@ -106,6 +114,7 @@ impl<S: Sink> Encoder for BodyEncoder<S> {
     fn align(&mut self) -> Result<()> {
         match self {
             BodyEncoder::Byte(e) => e.align(),
+            #[cfg(feature = "bit-packed")]
             BodyEncoder::Bit(e) => e.align(),
             #[cfg(feature = "compression")]
             BodyEncoder::Block(e) => e.align(),
@@ -114,6 +123,7 @@ impl<S: Sink> Encoder for BodyEncoder<S> {
     fn bit_position(&self) -> u64 {
         match self {
             BodyEncoder::Byte(e) => e.bit_position(),
+            #[cfg(feature = "bit-packed")]
             BodyEncoder::Bit(e) => e.bit_position(),
             #[cfg(feature = "compression")]
             BodyEncoder::Block(e) => e.bit_position(),
@@ -122,6 +132,7 @@ impl<S: Sink> Encoder for BodyEncoder<S> {
     fn flush(&mut self) -> Result<u8> {
         match self {
             BodyEncoder::Byte(e) => e.flush(),
+            #[cfg(feature = "bit-packed")]
             BodyEncoder::Bit(e) => e.flush(),
             #[cfg(feature = "compression")]
             BodyEncoder::Block(e) => e.flush(),
@@ -133,6 +144,7 @@ impl<S: Sink> Encoder for BodyEncoder<S> {
 /// reader's input.
 pub(crate) enum BodyDecoder<'a> {
     Byte(ByteDecoder<'a>),
+    #[cfg(feature = "bit-packed")]
     Bit(BitDecoder<'a>),
 }
 
@@ -145,7 +157,10 @@ impl<'a> BodyDecoder<'a> {
         second: &'a [u8],
         bit: u8,
     ) -> Self {
+        #[cfg(not(feature = "bit-packed"))]
+        let _ = bit;
         match coding {
+            #[cfg(feature = "bit-packed")]
             Coding::BitPacked => {
                 BodyDecoder::Bit(BitDecoder::split(first, second, bit as u64))
             }
@@ -158,18 +173,21 @@ impl Decoder for BodyDecoder<'_> {
     fn nbit(&mut self, ch: Channel, width: u8) -> Result<u32> {
         match self {
             BodyDecoder::Byte(d) => d.nbit(ch, width),
+            #[cfg(feature = "bit-packed")]
             BodyDecoder::Bit(d) => d.nbit(ch, width),
         }
     }
     fn octets(&mut self, ch: Channel, out: &mut [u8]) -> Result<()> {
         match self {
             BodyDecoder::Byte(d) => d.octets(ch, out),
+            #[cfg(feature = "bit-packed")]
             BodyDecoder::Bit(d) => d.octets(ch, out),
         }
     }
     fn align(&mut self) {
         match self {
             BodyDecoder::Byte(d) => d.align(),
+            #[cfg(feature = "bit-packed")]
             BodyDecoder::Bit(d) => d.align(),
         }
     }
@@ -178,6 +196,7 @@ impl Decoder for BodyDecoder<'_> {
     fn bit_position(&self) -> u64 {
         match self {
             BodyDecoder::Byte(d) => d.bit_position(),
+            #[cfg(feature = "bit-packed")]
             BodyDecoder::Bit(d) => d.bit_position(),
         }
     }
@@ -189,6 +208,7 @@ impl Decoder for BodyDecoder<'_> {
     ) -> usize {
         match self {
             BodyDecoder::Byte(d) => d.take_ascii(ch, max, out),
+            #[cfg(feature = "bit-packed")]
             BodyDecoder::Bit(_) => 0,
         }
     }

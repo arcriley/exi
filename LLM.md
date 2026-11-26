@@ -98,6 +98,18 @@ cargo build --lib --no-default-features   # the no_std + alloc engine
 cargo doc --all-features --no-deps
 ```
 
+For devices with pre-agreed options, build with `--no-default-features --features
+bare-header-only` and explicitly select byte alignment and a bare header. The
+reader also needs the options out of band. Default features and `exig` enable
+`header-options`, which takes precedence when features are combined.
+
+```sh
+rustup target add --toolchain nightly riscv32imac-unknown-none-elf wasm32-unknown-unknown
+cargo +nightly build --release --lib --no-default-features --features bare-header-only --target riscv32imac-unknown-none-elf
+cargo +nightly build --release --lib --no-default-features --features bare-header-only --target wasm32-unknown-unknown
+```
+
+
 - The C tests (`tests/c_dom.rs`) need `cc`. They build `libexi.so` with
   `cargo rustc --crate-type cdylib` into `target/c-api`, and run under valgrind when it
   is installed. They link a Layer 1 round trip against the generated header and

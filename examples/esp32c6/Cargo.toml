@@ -1,0 +1,19 @@
+[package]
+name = "exi-esp32c6"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+exi = { path = "../..", default-features = false, features = ["bare-header-only"] }
+
+[target.'cfg(target_arch = "riscv32")'.dependencies]
+esp-hal = { version = "=1.0.0", features = ["esp32c6", "unstable"] }
+esp-alloc = { version = "0.9", features = ["esp32c6", "internal-heap-stats"] }
+esp-bootloader-esp-idf = { version = "0.4", features = ["esp32c6"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

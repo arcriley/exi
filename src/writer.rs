@@ -1197,7 +1197,9 @@ impl<'g, S: Sink> Writer<'g, S> {
 
     fn start(&mut self) -> Result<()> {
         if !self.started {
-            if self.cfg.options.coding() == Coding::BitPacked {
+            if cfg!(feature = "bit-packed")
+                && self.cfg.options.coding() == Coding::BitPacked
+            {
                 // The body continues in the header's last octet.
                 crate::header::write_header_bits(
                     &mut self.enc,

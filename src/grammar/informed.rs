@@ -241,6 +241,12 @@ pub struct GrammarBuilder {
 
 impl SimpleTypeId {
     /// The first simple type a builder creates. For tests.
+    ///
+    /// ```
+    /// use exi::grammar::{GrammarSet, informed::{Representation, SimpleTypeId}};
+    /// let mut b = GrammarSet::builder();
+    /// assert_eq!(b.simple_type(None, Representation::Decimal), SimpleTypeId::first());
+    /// ```
     pub const fn first() -> Self {
         SimpleTypeId(0)
     }
@@ -266,6 +272,15 @@ impl GrammarBuilder {
     /// bounded integer must have `min ≤ max` and at most 4096 values;
     /// an enumeration at least one value; a list's item type must
     /// not itself be a list.
+    ///
+    /// ```
+    /// use exi::grammar::informed::Representation;
+    /// use exi::{OwnedName, grammar::GrammarSet};
+    /// let mut b = GrammarSet::builder();
+    /// let a = b.simple_type(None, Representation::Decimal);
+    /// let c = b.simple_type(None, Representation::Float);
+    /// assert_ne!(a, c);
+    /// ```
     pub fn simple_type(
         &mut self,
         name: Option<OwnedName>,
@@ -276,6 +291,16 @@ impl GrammarBuilder {
     }
     /// A type with simple content of type `ty`: states `[CH(ty) → 1]`,
     /// `[EE]`; `content` 0.
+    ///
+    /// ```
+    /// use exi::grammar::informed::Representation;
+    /// use exi::{OwnedName, grammar::GrammarSet};
+    /// let mut b = GrammarSet::builder();
+    /// let scalar = b.simple_type(None, Representation::Decimal);
+    /// b.simple_content_type(None, scalar);
+    /// assert!(b.build()?.is_schema_informed());
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn simple_content_type(
         &mut self,
         name: Option<OwnedName>,
@@ -290,12 +315,31 @@ impl GrammarBuilder {
         )
     }
     /// A type with no content and no attributes: `[EE]`.
+    ///
+    /// ```
+    /// use exi::{OwnedName, grammar::GrammarSet};
+    /// let mut b = GrammarSet::builder();
+    /// let ty = b.empty_type(Some(OwnedName::new("urn:demo", "Empty")));
+    /// let root = b.element(OwnedName::new("urn:demo", "root"), ty, false);
+    /// b.global(root);
+    /// assert_eq!(b.build()?.stats().states, 1);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn empty_type(&mut self, name: Option<OwnedName>) -> TypeId {
         self.complex_type(name, alloc::vec![alloc::vec![Prod::EE]])
     }
     /// A type from its states, state 0 first, each in code order
     /// (module documentation). `content` is computed: the first state
     /// with no AT production.
+    ///
+    /// ```
+    /// use exi::grammar::informed::Prod;
+    /// use exi::{OwnedName, grammar::GrammarSet};
+    /// let mut b = GrammarSet::builder();
+    /// b.complex_type(None, vec![vec![Prod::EE]]);
+    /// assert_eq!(b.build()?.stats().productions, 1);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn complex_type(
         &mut self,
         name: Option<OwnedName>,
@@ -306,16 +350,44 @@ impl GrammarBuilder {
     }
     /// Marks a type as having named sub-types or being a union: strict
     /// grammars then allow `xsi:type` on elements of this type.
+    ///
+    /// ```
+    /// use exi::{OwnedName, grammar::GrammarSet};
+    /// let mut b = GrammarSet::builder();
+    /// let ty = b.empty_type(None);
+    /// b.castable(ty);
+    /// assert!(b.build()?.is_schema_informed());
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn castable(&mut self, t: TypeId) {
         self.castable.push(t);
     }
     /// Declares that named type `sub` derives from `t`, so `xsi:type`
     /// may name `sub` where `t` is expected. Implies `castable(t)`.
+    ///
+    /// ```
+    /// use exi::{OwnedName, grammar::GrammarSet};
+    /// let mut b = GrammarSet::builder();
+    /// let base = b.empty_type(Some(OwnedName::new("", "Base")));
+    /// let derived = b.empty_type(Some(OwnedName::new("", "Derived")));
+    /// b.derives(derived, base);
+    /// assert!(b.build()?.is_schema_informed());
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn derives(&mut self, sub: TypeId, t: TypeId) {
         self.castable.push(t);
         self.derives.push((sub, t));
     }
     /// An element declaration.
+    ///
+    /// ```
+    /// use exi::{OwnedName, grammar::GrammarSet};
+    /// let mut b = GrammarSet::builder();
+    /// let ty = b.empty_type(None);
+    /// b.element(OwnedName::new("", "root"), ty, false);
+    /// assert_eq!(b.build()?.stats().element_declarations, 1);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn element(
         &mut self,
         name: OwnedName,
@@ -352,6 +424,16 @@ impl GrammarBuilder {
 
     /// The states of a type from [`reserve_type`](Self::reserve_type). Replaces any given
     /// before.
+    ///
+    /// ```
+    /// use exi::grammar::informed::Prod;
+    /// use exi::{OwnedName, grammar::GrammarSet};
+    /// let mut b = GrammarSet::builder();
+    /// let ty = b.reserve_type(None);
+    /// b.set_states(ty, vec![vec![Prod::EE]]);
+    /// assert!(b.build()?.is_schema_informed());
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn set_states(&mut self, t: TypeId, states: Vec<Vec<Prod>>) {
         if let Some(slot) = self.types.get_mut(t.0 as usize) {
             slot.1 = states;
@@ -361,16 +443,42 @@ impl GrammarBuilder {
     /// A name for the initial string table that no declaration uses,
     /// such as a global attribute no type refers to. EXI pre-loads the
     /// local names of every declaration and named type in a schema.
+    ///
+    /// ```
+    /// use exi::{OwnedName, grammar::GrammarSet};
+    /// let mut b = GrammarSet::builder();
+    /// b.name(OwnedName::new("urn:demo", "unused"));
+    /// assert!(b.build()?.name_id("urn:demo", "unused").is_some());
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn name(&mut self, name: OwnedName) {
         self.extra_names.push(name);
     }
 
     /// A URI for the initial string table, such as a target namespace
     /// with no names.
+    ///
+    /// ```
+    /// use exi::{OwnedName, grammar::GrammarSet};
+    /// let mut b = GrammarSet::builder();
+    /// b.uri("urn:demo");
+    /// assert!(b.build()?.initial_entries().uris().contains(&"urn:demo"));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn uri(&mut self, uri: &str) {
         self.extra_uris.push(uri.into());
     }
 
+    ///
+    /// ```
+    /// use exi::{OwnedName, grammar::GrammarSet};
+    /// let mut b = GrammarSet::builder();
+    /// let ty = b.empty_type(None);
+    /// let root = b.element(OwnedName::new("", "root"), ty, false);
+    /// b.global(root);
+    /// assert!(b.build()?.is_schema_informed());
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn global(&mut self, e: ElementId) {
         self.globals.push(e);
     }
@@ -383,6 +491,13 @@ impl GrammarBuilder {
     ///
     /// `ErrorKind::Schema` for anything the checks reject;
     /// `ErrorKind::Limit` when a count exceeds `u32::MAX − 1`.
+    ///
+    /// ```
+    /// use exi::{OwnedName, grammar::GrammarSet};
+    /// let mut b = GrammarSet::builder();
+    /// b.reserve_type(None);
+    /// assert_eq!(b.build().unwrap_err().kind(), exi::ErrorKind::Schema);
+    /// ```
     pub fn build(self) -> Result<GrammarSet> {
         let b = self;
         let count_ok = |n: usize| n < u32::MAX as usize - 1;
@@ -448,20 +563,30 @@ impl GrammarBuilder {
             }
         }
         let entries = ib.build()?;
+        use hashbrown::HashMap;
+        use rustc_hash::FxBuildHasher;
+
         let uris = entries.uris();
-        let uri_no = |u: &str| {
-            uris.iter()
-                .position(|x| *x == u)
-                .expect("every URI is an initial entry") as u32
-        };
+        let mut uri_ids =
+            HashMap::with_capacity_and_hasher(uris.len(), FxBuildHasher);
+        let mut local_ids = Vec::with_capacity(uris.len());
+        for (uri, name) in uris.into_iter().enumerate() {
+            uri_ids.insert(name, uri as u32);
+            let locals = entries.locals(uri as u32);
+            let mut ids =
+                HashMap::with_capacity_and_hasher(locals.len(), FxBuildHasher);
+            ids.extend(
+                locals
+                    .into_iter()
+                    .enumerate()
+                    .map(|(id, name)| (name, id as u32)),
+            );
+            local_ids.push(ids);
+        }
+        let uri_no = |u: &str| uri_ids[u];
         let id_of = |n: &OwnedName| {
             let uri = uri_no(&n.uri);
-            let local = entries
-                .locals(uri)
-                .iter()
-                .position(|l| *l == &*n.local)
-                .expect("every name is an initial entry")
-                as u32;
+            let local = local_ids[uri as usize][&*n.local];
             NameId { uri, local }
         };
 
@@ -594,6 +719,8 @@ impl GrammarBuilder {
         let simple = b.simple.into_iter().map(|(_, r)| r).collect();
         let schema =
             Schema { simple, types, elements, globals, fragment, closed };
+        drop(local_ids);
+        drop(uri_ids);
         Ok(GrammarSet { entries, schema: Some(schema) })
     }
 }

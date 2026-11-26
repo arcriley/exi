@@ -140,6 +140,13 @@ impl GrammarSet {
     /// `ErrorKind::Schema` when it is not a schema this compiler
     /// understands; `ErrorKind::Unsupported` for XSD features listed in
     /// the module documentation.
+    ///
+    /// ```
+    /// use exi::grammar::GrammarSet;
+    /// let schema = br#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"/>"#;
+    /// assert!(GrammarSet::from_xsd(schema)?.is_schema_informed());
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn from_xsd(xsd: &[u8]) -> Result<GrammarSet> {
         XsdCompiler::new().document("schema.xsd", xsd).compile("schema.xsd")
     }
@@ -160,6 +167,11 @@ impl Default for XsdCompiler<'_> {
 }
 
 impl<'a> XsdCompiler<'a> {
+    ///
+    /// ```
+    /// use exi::xsd::XsdCompiler;
+    /// assert!(XsdCompiler::new().compile("missing.xsd").is_err());
+    /// ```
     pub fn new() -> Self {
         XsdCompiler {
             docs: Vec::new(),
@@ -170,12 +182,28 @@ impl<'a> XsdCompiler<'a> {
 
     /// A document the schema may use, under the location includes and
     /// imports name it by.
+    ///
+    /// ```
+    /// use exi::xsd::XsdCompiler;
+    /// let schema = br#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"/>"#;
+    /// let compiler = XsdCompiler::new().document("schema.xsd", schema);
+    /// assert!(compiler.compile("schema.xsd")?.is_schema_informed());
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn document(mut self, location: &str, xsd: &'a [u8]) -> Self {
         self.docs.push((normalize_path(location), xsd));
         self
     }
 
     /// Limits for reading the documents as XML.
+    ///
+    /// ```
+    /// use exi::xsd::XsdCompiler;
+    /// let schema = br#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="a"/></xs:schema>"#;
+    /// let compiler = XsdCompiler::new().limits(exi::Limits::new().max_depth(1));
+    /// let err = compiler.document("main.xsd", schema).compile("main.xsd").unwrap_err();
+    /// assert_eq!(err.kind(), exi::ErrorKind::Limit);
+    /// ```
     pub fn limits(mut self, l: Limits) -> Self {
         self.limits = l;
         self
@@ -201,6 +229,13 @@ impl<'a> XsdCompiler<'a> {
 
     /// Reads `main` and every document it includes or imports, and
     /// builds the grammars.
+    ///
+    /// ```
+    /// use exi::xsd::XsdCompiler;
+    /// let schema = br#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"/>"#;
+    /// assert!(XsdCompiler::new().document("main.xsd", schema).compile("main.xsd")?.is_schema_informed());
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn compile(self, main: &str) -> Result<GrammarSet> {
         self.compile_documents([main])
     }

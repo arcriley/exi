@@ -70,18 +70,52 @@ impl Default for HtmlWriterOptions {
 }
 
 impl HtmlWriterOptions {
+    ///
+    /// ```
+    /// use exi::html::{HtmlWriter, HtmlWriterOptions};
+    /// use exi::{Event, EventSink};
+    /// let mut w = HtmlWriter::with_options(Vec::new(), HtmlWriterOptions::new());
+    /// w.start_element("p")?;
+    /// w.end_element()?;
+    /// w.event(&Event::EndDocument)?;
+    /// assert_eq!(w.into_sink(), b"<!DOCTYPE html><p></p>");
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn new() -> Self {
         Self::default()
     }
     /// Turn coerced names (`U000040click`) back into what they were
     /// (`@click`). Default on. A page whose own names look coerced
     /// comes back changed, so turn it off for those.
+    ///
+    /// ```
+    /// use exi::html::{HtmlWriter, HtmlWriterOptions};
+    /// use exi::{Event, EventSink};
+    /// let options = HtmlWriterOptions::new().reverse_coercion(false).doctype(false);
+    /// let mut w = HtmlWriter::with_options(Vec::new(), options);
+    /// w.start_element("U000040tag")?;
+    /// w.end_element()?;
+    /// w.event(&Event::EndDocument)?;
+    /// assert_eq!(w.into_sink(), b"<U000040tag></U000040tag>");
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn reverse_coercion(mut self, on: bool) -> Self {
         self.reverse_coercion = on;
         self
     }
     /// Write `<!DOCTYPE html>` before the first element when the events
     /// carry no DOCTYPE. Default on.
+    ///
+    /// ```
+    /// use exi::html::{HtmlWriter, HtmlWriterOptions};
+    /// use exi::{Event, EventSink};
+    /// let mut w = HtmlWriter::with_options(Vec::new(), HtmlWriterOptions::new().doctype(false));
+    /// w.start_element("p")?;
+    /// w.end_element()?;
+    /// w.event(&Event::EndDocument)?;
+    /// assert_eq!(w.into_sink(), b"<p></p>");
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn doctype(mut self, on: bool) -> Self {
         self.doctype = on;
         self
@@ -127,10 +161,26 @@ pub struct HtmlWriter<S: Sink> {
 }
 
 impl<S: Sink> HtmlWriter<S> {
+    ///
+    /// ```
+    /// use exi::html::HtmlWriter;
+    /// assert!(HtmlWriter::new(Vec::new()).into_sink().is_empty());
+    /// ```
     pub fn new(sink: S) -> Self {
         Self::with_options(sink, HtmlWriterOptions::default())
     }
 
+    ///
+    /// ```
+    /// use exi::html::{HtmlWriter, HtmlWriterOptions};
+    /// use exi::{Event, EventSink};
+    /// let mut w = HtmlWriter::with_options(Vec::new(), HtmlWriterOptions::new().doctype(false));
+    /// w.start_element(("http://www.w3.org/1999/xhtml", "br"))?;
+    /// w.end_element()?;
+    /// w.event(&Event::EndDocument)?;
+    /// assert_eq!(w.into_sink(), b"<br>");
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn with_options(sink: S, opts: HtmlWriterOptions) -> Self {
         let doctype_due = opts.doctype;
         HtmlWriter {
@@ -145,6 +195,11 @@ impl<S: Sink> HtmlWriter<S> {
         }
     }
 
+    ///
+    /// ```
+    /// use exi::html::HtmlWriter;
+    /// assert_eq!(HtmlWriter::new(b"prefix".to_vec()).into_sink(), b"prefix");
+    /// ```
     pub fn into_sink(self) -> S {
         self.sink
     }

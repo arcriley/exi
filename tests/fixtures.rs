@@ -283,7 +283,7 @@ fn normalize(evs: Vec<OwnedEvent>, prefixes: bool) -> Vec<OwnedEvent> {
 /// Compiles `main` (relative to `fixtures/input`) with every `.xsd` beside it.
 fn compile_schema(dir: &Path, main: &str) -> Result<GrammarSet> {
     let main_path = Path::new(main);
-    let sub = main_path.parent().unwrap_or(Path::new(""));
+    let sub = main_path.parent().unwrap_or_else(|| Path::new(""));
     let main = main_path.file_name().unwrap().to_str().unwrap();
     let mut docs = Vec::new();
     for e in std::fs::read_dir(dir.join("input").join(sub)).unwrap() {

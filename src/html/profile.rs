@@ -67,6 +67,12 @@ pub const XSD_V1: &str = include_str!("../../schemas/xhtml5-1.xsd");
 pub const EXIG_V1: &[u8] = include_bytes!("../../schemas/xhtml5-1.exig");
 
 /// The schema id of a version.
+///
+/// ```
+/// use exi::html::profile::{schema_id, SCHEMA_V1};
+/// assert_eq!(schema_id(1), Some(SCHEMA_V1));
+/// assert_eq!(schema_id(0), None);
+/// ```
 pub fn schema_id(version: u32) -> Option<&'static str> {
     match version {
         1 => Some(SCHEMA_V1),
@@ -75,6 +81,12 @@ pub fn schema_id(version: u32) -> Option<&'static str> {
 }
 
 /// The version a schema id names.
+///
+/// ```
+/// use exi::html::profile::{version_of, SCHEMA_V1};
+/// assert_eq!(version_of(SCHEMA_V1), Some(1));
+/// assert_eq!(version_of("urn:unknown"), None);
+/// ```
 pub fn version_of(schema_id: &str) -> Option<u32> {
     match schema_id {
         SCHEMA_V1 => Some(1),
@@ -83,12 +95,24 @@ pub fn version_of(schema_id: &str) -> Option<u32> {
 }
 
 /// The media type of pages in a version.
+///
+/// ```
+/// use exi::html::profile::media_type;
+/// assert_eq!(media_type(1).as_deref(), Some(r#"application/exi; schema="urn:libexi:xhtml5:1""#));
+/// assert_eq!(media_type(0), None);
+/// ```
 pub fn media_type(version: u32) -> Option<String> {
     schema_id(version)
         .map(|id| std::format!("application/exi; schema=\"{id}\""))
 }
 
 /// A version's grammars, loaded once from the `.exig` built in.
+///
+/// ```
+/// use exi::html::profile::grammars;
+/// assert!(grammars(1).unwrap().is_schema_informed());
+/// assert!(grammars(0).is_none());
+/// ```
 pub fn grammars(version: u32) -> Option<&'static GrammarSet> {
     static V1: OnceLock<GrammarSet> = OnceLock::new();
     match version {
@@ -118,6 +142,17 @@ pub fn resolve(schema_id: &str) -> Option<&'static GrammarSet> {
 
 /// A version's options. The schema id is in them, for headers that
 /// carry options.
+///
+/// ```
+/// use exi::html::profile::{options, SCHEMA_V1};
+/// use exi::{Coding, ErrorKind, SchemaId};
+/// let o = options(1)?;
+/// assert_eq!(o.coding(), Coding::ByteAligned);
+/// assert!(!o.strict());
+/// assert_eq!(o.schema_id(), &SchemaId::Id(SCHEMA_V1.into()));
+/// assert_eq!(options(0).unwrap_err().kind(), ErrorKind::Arg);
+/// # Ok::<(), exi::Error>(())
+/// ```
 pub fn options(version: u32) -> Result<Options> {
     let id = schema_id(version).ok_or_else(|| {
         Error::new(ErrorKind::Arg, "no such XHTML5 profile version")
@@ -132,6 +167,17 @@ pub fn options(version: u32) -> Result<Options> {
 
 /// Encodes an HTML page with a profile version, with the bare header
 /// `0x80`.
+///
+/// ```
+/// # #[cfg(feature = "html5ever")] {
+/// use exi::html::profile;
+/// let exi = profile::encode("<p>hi</p>", 1)?;
+/// assert_eq!(exi[0], 0x80);
+/// assert!(profile::decode(&exi, 1)?.contains("<p>hi</p>"));
+/// assert_eq!(profile::encode("<p>hi</p>", 0).unwrap_err().kind(), exi::ErrorKind::Arg);
+/// # }
+/// # Ok::<(), exi::Error>(())
+/// ```
 #[cfg(feature = "html5ever")]
 pub fn encode(html: &str, version: u32) -> Result<Vec<u8>> {
     encode_with(html, version, crate::Header::Bare { cookie: false })
@@ -139,6 +185,18 @@ pub fn encode(html: &str, version: u32) -> Result<Vec<u8>> {
 
 /// As [`encode`], with another header (`Header::WithOptions` for a page
 /// kept outside HTTP: the header then names the version).
+///
+/// ```
+/// # #[cfg(feature = "html5ever")] {
+/// use exi::html::profile;
+/// use exi::{Header, Limits};
+/// let exi = profile::encode_with("<p>hi</p>", 1, Header::WithOptions { cookie: false })?;
+/// let h = exi::header::parse_header(&exi, &Limits::new())?.unwrap();
+/// assert_eq!(h.options.unwrap().schema_id(), &exi::SchemaId::Id(profile::SCHEMA_V1.into()));
+/// assert!(profile::decode(&exi, 1)?.contains("<p>hi</p>"));
+/// # }
+/// # Ok::<(), exi::Error>(())
+/// ```
 #[cfg(feature = "html5ever")]
 pub fn encode_with(
     html: &str,
@@ -162,6 +220,29 @@ pub fn encode_with(
 
 /// Decodes a page of a profile version to HTML text. A header with
 /// options must name the same version.
+///
+/// ```
+/// use exi::html::profile;
+/// use exi::strings::{GlobalConfig, GlobalStrings};
+/// use exi::{ErrorKind, EventSink, Header, Options, SchemaId, Writer, WriterConfig};
+/// let strings = GlobalStrings::new(GlobalConfig::new())?;
+/// let g = profile::grammars(1).unwrap().attach(&strings)?;
+/// let mut w = Writer::new(Vec::new(), WriterConfig::new(profile::options(1)?, &g))?;
+/// w.start_element(("http://www.w3.org/1999/xhtml", "p"))?;
+/// w.text("hi")?;
+/// w.end_element()?;
+/// w.end_document()?;
+/// assert_eq!(profile::decode(&w.into_sink(), 1)?, "<!DOCTYPE html><p>hi</p>");
+///
+/// let other = Options::builder().coding(exi::Coding::ByteAligned)
+///     .schema_id(SchemaId::Id("urn:other".into())).build()?;
+/// let mut w0 = Writer::new(Vec::new(), WriterConfig::new(other, &g).header(Header::WithOptions { cookie: false }))?;
+/// w0.start_element("a")?;
+/// w0.end_element()?;
+/// w0.end_document()?;
+/// assert_eq!(profile::decode(&w0.into_sink(), 1).unwrap_err().kind(), ErrorKind::Schema);
+/// # Ok::<(), exi::Error>(())
+/// ```
 pub fn decode(exi: &[u8], version: u32) -> Result<String> {
     use crate::ReaderConfig;
     use crate::strings::{GlobalConfig, GlobalStrings};

@@ -109,6 +109,14 @@ pub fn html_to_xhtml(html: &str) -> Result<String> {
 }
 
 /// As [`html_to_xhtml`], with options.
+///
+/// ```
+/// use exi::html::{HtmlOptions, html_to_xhtml_with};
+/// let xhtml = html_to_xhtml_with("<!--note--><p>text", &HtmlOptions::new().keep_comments(false))?;
+/// assert!(xhtml.contains("<p>text</p>"));
+/// assert!(!xhtml.contains("<!--note-->"));
+/// # Ok::<(), exi::Error>(())
+/// ```
 pub fn html_to_xhtml_with(html: &str, opts: &HtmlOptions) -> Result<String> {
     use crate::xml::{XmlWriter, XmlWriterConfig};
     let mut w = XmlWriter::new(Vec::new(), XmlWriterConfig::new());

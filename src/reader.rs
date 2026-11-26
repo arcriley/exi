@@ -516,6 +516,7 @@ pub struct Reader<'g, const N: usize = 4096> {
     fed: u64,
     frame_ends: VecDeque<u64>,
     events: u64,
+    depth_out: u32,
     skip_to: Option<u32>,
     /// Decoded events not yet returned.
     queue: VecDeque<(Out, EventMeta)>,
@@ -530,6 +531,10 @@ pub struct Reader<'g, const N: usize = 4096> {
     /// queue.
     collecting: bool,
     collect_at: usize,
+    /// SC started while `collecting` still held the enclosing SE (and
+    /// any NS events) in `queue`; resolve those from the saved outer
+    /// partition until `Out::SC` is popped.
+    sc_collect: bool,
     /// Self-contained elements: the next SE repeats the element (not
     /// returned); the next ED ends its fragment (not returned); the
     /// event just decoded is not returned.
@@ -641,22 +646,24 @@ fn owned_value(t: &SessionTables<'_>, v: DVal, text: &str) -> OwnedValue {
 
 fn name<'a>(
     t: &'a SessionTables<'_>,
+    outer: bool,
     id: NameId,
     prefix: Option<u32>,
 ) -> Name<'a> {
     let n = Name::new(
-        t.uri_str(id.uri).unwrap_or(""),
-        t.local_str(id.uri, id.local).unwrap_or(""),
+        t.uri_str_at(outer, id.uri).unwrap_or(""),
+        t.local_str_at(outer, id.uri, id.local).unwrap_or(""),
     );
     // The empty prefix is the default namespace: no prefix.
-    let n = match prefix.and_then(|p| t.prefix_str(id.uri, p)) {
+    let n = match prefix.and_then(|p| t.prefix_str_at(outer, id.uri, p)) {
         Some(p) if !p.is_empty() => n.with_prefix(p),
         _ => n,
     };
-    let global = match (t.uri(id.uri), t.local(id.uri, id.local)) {
-        (Some(uri), Some(local)) => Some(GlobalName { uri, local }),
-        _ => None,
-    };
+    let global =
+        match (t.uri_at(outer, id.uri), t.local_at(outer, id.uri, id.local)) {
+            (Some(uri), Some(local)) => Some(GlobalName { uri, local }),
+            _ => None,
+        };
     n.with_ids(Some(id), global)
 }
 
@@ -711,6 +718,7 @@ impl<'g, const N: usize> Reader<'g, N> {
             fed: 0,
             frame_ends: VecDeque::new(),
             events: 0,
+            depth_out: 0,
             skip_to: None,
             queue: VecDeque::new(),
             #[cfg(feature = "compression")]
@@ -719,6 +727,7 @@ impl<'g, const N: usize> Reader<'g, N> {
             released: 0,
             collecting: false,
             collect_at: 0,
+            sc_collect: false,
             sc_se: false,
             sc_ed: false,
             suppress: false,
@@ -1023,7 +1032,7 @@ impl<'g, const N: usize> Reader<'g, N> {
     /// # Ok::<(), exi::Error>(())
     /// ```
     pub fn depth(&self) -> u32 {
-        self.sess.as_ref().map_or(0, |s| s.st.depth())
+        self.depth_out
     }
     /// Decodes the rest of the current element without returning its
     /// events. Values are still decoded, to keep the string tables in
@@ -1126,6 +1135,7 @@ impl<'g, const N: usize> Reader<'g, N> {
         self.fed = 0;
         self.frame_ends.clear();
         self.events = 0;
+        self.depth_out = 0;
         self.skip_to = None;
         self.queue.clear();
         #[cfg(feature = "compression")]
@@ -1134,6 +1144,7 @@ impl<'g, const N: usize> Reader<'g, N> {
             self.released = 0;
         }
         self.collecting = false;
+        self.sc_collect = false;
         self.collect_at = 0;
         self.sc_se = false;
         self.sc_ed = false;
@@ -1287,6 +1298,8 @@ impl<'g, const N: usize> Reader<'g, N> {
         let (st, tables) =
             engine::new_session(opts, self.cfg.grammars, self.cfg.limits);
         self.sess = Some(Session { st, tables });
+        self.depth_out = 0;
+        self.sc_collect = false;
         self.phase = Phase::Body;
         self.out = Out::SD;
         Ok(Some(()))
@@ -1536,6 +1549,9 @@ impl<'g, const N: usize> Reader<'g, N> {
                 Out::ED
             }
             Terminal::SC => {
+                if self.collecting {
+                    self.sc_collect = true;
+                }
                 sess.tables.begin_self_contained();
                 sess.st.begin_sc();
                 self.sc_se = true;
@@ -1668,11 +1684,18 @@ impl<'g, const N: usize> Reader<'g, N> {
                 "the reader is poisoned by an earlier error",
             ));
         }
+        let mut outer = false;
         let meta = loop {
             if !self.collecting {
                 if self.can_release() {
                     if let Some((o, meta)) = self.queue.pop_front() {
                         self.popped();
+                        self.depth_out = meta.depth;
+                        if matches!(o, Out::SC) {
+                            self.sc_collect = false;
+                        } else {
+                            outer = self.sc_collect;
+                        }
                         self.out = o;
                         break meta;
                     }
@@ -1712,15 +1735,15 @@ impl<'g, const N: usize> Reader<'g, N> {
             Out::None => return Err(err(ErrorKind::Internal, "no event")),
             Out::SD => Event::StartDocument,
             Out::ED => Event::EndDocument,
-            Out::SE(id, p) => Event::StartElement(name(t, *id, *p)),
-            Out::EE(id, p) => Event::EndElement(name(t, *id, *p)),
+            Out::SE(id, p) => Event::StartElement(name(t, outer, *id, *p)),
+            Out::EE(id, p) => Event::EndElement(name(t, false, *id, *p)),
             Out::AT(id, p, v) => {
-                Event::Attribute(name(t, *id, *p), v.as_value())
+                Event::Attribute(name(t, false, *id, *p), v.as_value())
             }
             Out::CH(v) => Event::Characters(v.as_value()),
             Out::NS(u, p, l) => Event::Namespace(NsDecl {
-                prefix: t.prefix_str(*u, *p).unwrap_or(""),
-                uri: t.uri_str(*u).unwrap_or(""),
+                prefix: t.prefix_str_at(outer, *u, *p).unwrap_or(""),
+                uri: t.uri_str_at(outer, *u).unwrap_or(""),
                 local_element_ns: *l,
             }),
             Out::CM(c) => Event::Comment(c),

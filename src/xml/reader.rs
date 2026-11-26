@@ -128,6 +128,14 @@ pub struct XmlConfig {
 }
 
 impl XmlConfig {
+    ///
+    /// ```
+    /// use exi::xml::XmlConfig;
+    /// let config = XmlConfig::new();
+    /// assert!(config.get_report_comments());
+    /// assert!(config.get_report_pis());
+    /// assert!(!config.get_report_doctype());
+    /// ```
     pub fn new() -> Self {
         XmlConfig {
             limits: Limits::new(),
@@ -137,9 +145,34 @@ impl XmlConfig {
             report_pis: true,
         }
     }
+    ///
+    /// ```
+    /// use exi::{Step, xml::{XmlConfig, XmlReader}};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let mut r = XmlReader::<64>::new(XmlConfig::new().limits(exi::Limits::new().max_depth(1)), &grammars);
+    /// r.feed(b"<a><b/></a>");
+    /// r.end_input();
+    /// loop {
+    ///     match r.next() {
+    ///         Ok(Step::Event(..)) => {}
+    ///         Err(e) => { assert_eq!(e.kind(), exi::ErrorKind::Limit); break; }
+    ///         other => panic!("expected a depth error, got {other:?}"),
+    ///     }
+    /// }
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn limits(self, l: Limits) -> Self {
         XmlConfig { limits: l, ..self }
     }
+    ///
+    /// ```
+    /// use exi::xml::{EntityPolicy, XmlConfig};
+    /// let config = XmlConfig::new().entities(EntityPolicy::PredefinedOnly);
+    /// assert_eq!(config.get_entities(), EntityPolicy::PredefinedOnly);
+    /// ```
     pub fn entities(self, p: EntityPolicy) -> Self {
         XmlConfig { entities: p, ..self }
     }
@@ -157,21 +190,51 @@ impl XmlConfig {
     pub fn report_doctype(self, on: bool) -> Self {
         XmlConfig { report_doctype: on, ..self }
     }
+    ///
+    /// ```
+    /// use exi::xml::XmlConfig;
+    /// assert!(!XmlConfig::new().report_comments(false).get_report_comments());
+    /// ```
     pub fn report_comments(self, on: bool) -> Self {
         XmlConfig { report_comments: on, ..self }
     }
+    ///
+    /// ```
+    /// use exi::xml::XmlConfig;
+    /// assert!(!XmlConfig::new().report_pis(false).get_report_pis());
+    /// ```
     pub fn report_pis(self, on: bool) -> Self {
         XmlConfig { report_pis: on, ..self }
     }
+    ///
+    /// ```
+    /// use exi::xml::{EntityPolicy, XmlConfig};
+    /// assert_eq!(XmlConfig::new().get_entities(), EntityPolicy::Internal);
+    /// ```
     pub fn get_entities(&self) -> EntityPolicy {
         self.entities
     }
+    ///
+    /// ```
+    /// use exi::xml::XmlConfig;
+    /// assert!(XmlConfig::new().report_doctype(true).get_report_doctype());
+    /// ```
     pub fn get_report_doctype(&self) -> bool {
         self.report_doctype
     }
+    ///
+    /// ```
+    /// use exi::xml::XmlConfig;
+    /// assert!(XmlConfig::new().get_report_comments());
+    /// ```
     pub fn get_report_comments(&self) -> bool {
         self.report_comments
     }
+    ///
+    /// ```
+    /// use exi::xml::XmlConfig;
+    /// assert!(XmlConfig::new().get_report_pis());
+    /// ```
     pub fn get_report_pis(&self) -> bool {
         self.report_pis
     }
@@ -455,6 +518,17 @@ pub struct XmlReader<'g, const N: usize = 4096> {
 impl<'g, const N: usize> XmlReader<'g, N> {
     /// Names are numbered in session tables started from `grammars`'
     /// initial entries.
+    ///
+    /// ```
+    /// use exi::{Step, xml::{XmlConfig, XmlReader}};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let mut r = XmlReader::<64>::new(XmlConfig::new(), &grammars);
+    /// assert!(matches!(r.next()?, Step::Event(exi::Event::StartDocument, _)));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn new(cfg: XmlConfig, grammars: &'g Grammars<'g>) -> Self {
         let () = InputRing::<N>::VALID;
         let tables = SessionTables::new(
@@ -497,25 +571,125 @@ impl<'g, const N: usize> XmlReader<'g, N> {
         }
     }
     /// Same contract as [`Reader::feed`](crate::Reader::feed).
+    ///
+    /// ```
+    /// use exi::{Step, xml::{XmlConfig, XmlReader}};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let mut r = XmlReader::<64>::new(XmlConfig::new(), &grammars);
+    /// assert_eq!(r.feed(b"<root/>"), 7);
+    /// r.end_input();
+    /// assert!(matches!(r.next()?, Step::Event(exi::Event::StartDocument, _)));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn feed(&mut self, data: &[u8]) -> usize {
         self.ring.feed(data)
     }
+    ///
+    /// ```
+    /// use exi::{Step, xml::{XmlConfig, XmlReader}};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let mut r = XmlReader::<64>::new(XmlConfig::new(), &grammars);
+    /// r.buffer()[..4].copy_from_slice(b"<a/>");
+    /// r.commit(4);
+    /// r.end_input();
+    /// r.next()?;
+    /// assert!(matches!(r.next()?, Step::Event(exi::Event::StartElement(_), _)));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn buffer(&mut self) -> &mut [u8] {
         self.ring.buffer()
     }
+    ///
+    /// ```
+    /// use exi::{Step, xml::{XmlConfig, XmlReader}};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let mut r = XmlReader::<64>::new(XmlConfig::new(), &grammars);
+    /// r.buffer()[..4].copy_from_slice(b"<a/>");
+    /// r.commit(4);
+    /// r.end_input();
+    /// r.next()?;
+    /// assert!(matches!(r.next()?, Step::Event(exi::Event::StartElement(_), _)));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn commit(&mut self, n: usize) {
         self.ring.commit(n);
     }
+    ///
+    /// ```
+    /// use exi::{Step, xml::{XmlConfig, XmlReader}};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let mut r = XmlReader::<64>::new(XmlConfig::new(), &grammars);
+    /// r.feed(b"<a");
+    /// r.end_input();
+    /// r.next()?;
+    /// assert_eq!(r.next().unwrap_err().kind(), exi::ErrorKind::Xml);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn end_input(&mut self) {
         self.ended = true;
     }
+    ///
+    /// ```
+    /// use exi::{Step, xml::{XmlConfig, XmlReader}};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let mut r = XmlReader::<64>::new(XmlConfig::new(), &grammars);
+    /// r.feed(b"<root/>");
+    /// r.end_input();
+    /// assert!(matches!(r.next()?, Step::Event(exi::Event::StartDocument, _)));
+    /// assert!(matches!(r.next()?, Step::Event(exi::Event::StartElement(_), _)));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     #[allow(clippy::should_implement_trait)] // events borrow the reader: not an Iterator
     pub fn next(&mut self) -> Result<Step<'_>> {
         self.step()
     }
+    ///
+    /// ```
+    /// use exi::{Step, xml::{XmlConfig, XmlReader}};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let mut r = XmlReader::<64>::new(XmlConfig::new(), &grammars);
+    /// assert_eq!(r.position().byte, 0);
+    /// r.feed(b"<root>");
+    /// r.next()?;
+    /// assert!(matches!(r.next()?, Step::Event(exi::Event::StartElement(_), _)));
+    /// assert_eq!(r.position().byte, 6);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn position(&self) -> Position {
         self.pos_now()
     }
+    ///
+    /// ```
+    /// use exi::{Step, xml::{XmlConfig, XmlReader}};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let mut r = XmlReader::<64>::new(XmlConfig::new(), &grammars);
+    /// r.feed(b"<root>");
+    /// r.next()?;
+    /// assert!(matches!(r.next()?, Step::Event(exi::Event::StartElement(_), _)));
+    /// assert_eq!(r.depth(), 1);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn depth(&self) -> u32 {
         self.stack.len() as u32
     }

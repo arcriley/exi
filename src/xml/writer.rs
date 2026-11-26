@@ -91,6 +91,16 @@ pub struct XmlWriterConfig {
 }
 
 impl XmlWriterConfig {
+    ///
+    /// ```
+    /// use exi::{EventSink, xml::{XmlWriter, XmlWriterConfig}};
+    /// let mut w = XmlWriter::new(Vec::new(), XmlWriterConfig::new());
+    /// w.start_element("a")?;
+    /// w.end_element()?;
+    /// w.end_document()?;
+    /// assert_eq!(w.into_sink(), b"<a/>");
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn new() -> Self {
         XmlWriterConfig {
             declaration: false,
@@ -98,9 +108,31 @@ impl XmlWriterConfig {
         }
     }
     /// Write the XML declaration first (default off).
+    ///
+    /// ```
+    /// use exi::{EventSink, xml::{XmlWriter, XmlWriterConfig}};
+    /// let cfg = XmlWriterConfig::new().declaration(true);
+    /// let mut w = XmlWriter::new(Vec::new(), cfg);
+    /// w.start_element("a")?;
+    /// w.end_element()?;
+    /// assert!(w.into_sink().starts_with(b"<?xml "));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn declaration(self, on: bool) -> Self {
         XmlWriterConfig { declaration: on, ..self }
     }
+    ///
+    /// ```
+    /// use exi::{EventSink, xml::{XmlWriter, XmlWriterConfig}};
+    /// use exi::xml::PrefixPolicy;
+    /// let cfg = XmlWriterConfig::new().prefixes(PrefixPolicy::FromEvents);
+    /// let mut w = XmlWriter::new(Vec::new(), cfg);
+    /// w.start_element("a")?;
+    /// w.namespace("p", "urn:p")?;
+    /// w.end_element()?;
+    /// assert_eq!(w.into_sink(), br#"<a xmlns:p="urn:p"/>"#);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn prefixes(self, p: PrefixPolicy) -> Self {
         XmlWriterConfig { prefixes: p, ..self }
     }
@@ -196,6 +228,11 @@ struct OpenTag {
 }
 
 impl<S: Sink> XmlWriter<S> {
+    ///
+    /// ```
+    /// use exi::{EventSink, xml::{XmlWriter, XmlWriterConfig}};
+    /// assert!(XmlWriter::new(Vec::new(), XmlWriterConfig::new()).into_sink().is_empty());
+    /// ```
     pub fn new(sink: S, cfg: XmlWriterConfig) -> Self {
         XmlWriter {
             sink,
@@ -209,9 +246,23 @@ impl<S: Sink> XmlWriter<S> {
     }
     /// Ends the document: an error while elements are open. The
     /// `EndDocument` event does the same.
+    ///
+    /// ```
+    /// use exi::{EventSink, xml::{XmlWriter, XmlWriterConfig}};
+    /// let mut w = XmlWriter::new(Vec::new(), XmlWriterConfig::new());
+    /// w.start_element("a")?;
+    /// assert_eq!(w.end_document().unwrap_err().kind(), exi::ErrorKind::State);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn end_document(&mut self) -> Result<()> {
         self.end_doc()
     }
+    ///
+    /// ```
+    /// use exi::{EventSink, xml::{XmlWriter, XmlWriterConfig}};
+    /// let w = XmlWriter::new(b"prefix".to_vec(), XmlWriterConfig::new());
+    /// assert_eq!(w.into_sink(), b"prefix");
+    /// ```
     pub fn into_sink(self) -> S {
         self.sink
     }

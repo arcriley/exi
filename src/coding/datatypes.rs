@@ -173,6 +173,19 @@ pub fn read_uint_big<D: Decoder>(
 ///
 /// `ErrorKind::Value` when `digits` is empty or holds anything but
 /// ASCII digits.
+///
+/// ```
+/// use exi::coding::{Channel::Structure as S, byte_aligned::{ByteEncoder, ByteDecoder}, datatypes::*};
+/// let mut e = ByteEncoder::new(Vec::new());
+/// write_uint_digits(&mut e, S, "27670116110564327423")?;
+/// let bytes = e.into_sink();
+/// let mut out = String::new();
+/// read_uint_big(&mut ByteDecoder::new(&bytes, &[]), S, 64, &mut out)?;
+/// assert_eq!(out, "27670116110564327423");
+/// assert_eq!(write_uint_digits(&mut ByteEncoder::new(Vec::new()), S, "").unwrap_err().kind(), exi::ErrorKind::Value);
+/// assert_eq!(write_uint_digits(&mut ByteEncoder::new(Vec::new()), S, "12a").unwrap_err().kind(), exi::ErrorKind::Value);
+/// # Ok::<(), exi::Error>(())
+/// ```
 pub fn write_uint_digits<E: Encoder>(
     e: &mut E,
     ch: Channel,
@@ -260,6 +273,18 @@ pub fn read_int<D: Decoder>(
 
 /// Reads an Integer of any size and appends `-` (when negative) and its
 /// decimal digits.
+///
+/// ```
+/// use exi::coding::{Channel::Structure as S, byte_aligned::ByteDecoder, datatypes::read_int_big};
+/// let mut out = String::new();
+/// // Sign negative (0x01), then magnitude 2^64 + 2^63 − 1 → value −(2^64 + 2^63)
+/// let mut bytes = vec![0x01];
+/// bytes.extend([0xFF; 9]);
+/// bytes.push(0x02);
+/// read_int_big(&mut ByteDecoder::new(&bytes, &[]), S, 64, &mut out)?;
+/// assert_eq!(out, "-27670116110564327424");
+/// # Ok::<(), exi::Error>(())
+/// ```
 pub fn read_int_big<D: Decoder>(
     d: &mut D,
     ch: Channel,
@@ -275,6 +300,17 @@ pub fn read_int_big<D: Decoder>(
     }
     out.push_str(&digits);
     Ok(())
+}
+
+fn bounded_width(min: i64, max: i64) -> Result<(i128, u8)> {
+    let range = max as i128 - min as i128 + 1;
+    if !(1..=4096).contains(&range) {
+        return Err(err(
+            ErrorKind::Internal,
+            "bounded integer range must hold 1 to 4096 values",
+        ));
+    }
+    Ok((range, width(range as u32)))
 }
 
 /// An Integer whose type has `max − min + 1 ≤ 4096` values.
@@ -302,46 +338,62 @@ pub fn write_bounded<E: Encoder>(
     min: i64,
     max: i64,
 ) -> Result<()> {
-    let range = max as i128 - min as i128 + 1;
-    if !(1..=4096).contains(&range) {
-        return Err(err(
-            ErrorKind::Internal,
-            "bounded integer range must hold 1 to 4096 values",
-        ));
-    }
+    let (_, w) = bounded_width(min, max)?;
     if v < min || v > max {
         return Err(err(ErrorKind::Value, "integer outside its type's range"));
     }
-    e.nbit(ch, (v as i128 - min as i128) as u32, width(range as u32))
+    e.nbit(ch, (v as i128 - min as i128) as u32, w)
 }
 
 /// # Errors
 ///
 /// `ErrorKind::Value` when the n-bit value exceeds `max − min`.
+///
+/// ```
+/// use exi::coding::{Channel::Structure as S, byte_aligned::ByteDecoder, datatypes::read_bounded};
+/// let dec = |b: &[u8], min, max| read_bounded(&mut ByteDecoder::new(b, &[]), S, min, max);
+/// assert_eq!(dec(&[37], 0, 100)?, 37);
+/// assert_eq!(dec(&[], 5, 5)?, 5);
+/// assert_eq!(dec(&[101], 0, 100).unwrap_err().kind(), exi::ErrorKind::Value);
+/// assert_eq!(dec(&[0], 0, 4096).unwrap_err().kind(), exi::ErrorKind::Internal);
+/// # Ok::<(), exi::Error>(())
+/// ```
 pub fn read_bounded<D: Decoder>(
     d: &mut D,
     ch: Channel,
     min: i64,
     max: i64,
 ) -> Result<i64> {
-    let range = max as i128 - min as i128 + 1;
-    if !(1..=4096).contains(&range) {
-        return Err(err(
-            ErrorKind::Internal,
-            "bounded integer range must hold 1 to 4096 values",
-        ));
-    }
-    let x = d.nbit(ch, width(range as u32))? as i128;
+    let (range, w) = bounded_width(min, max)?;
+    let x = d.nbit(ch, w)? as i128;
     if x >= range {
         return Err(err(ErrorKind::Value, "bounded integer beyond its range"));
     }
     Ok((min as i128 + x) as i64)
 }
 
+/// ```
+/// use exi::coding::{Channel::Structure as S, byte_aligned::{ByteEncoder, ByteDecoder}, datatypes::*};
+/// let mut e = ByteEncoder::new(Vec::new());
+/// write_bool(&mut e, S, false)?;
+/// write_bool(&mut e, S, true)?;
+/// let bytes = e.into_sink();
+/// assert_eq!(bytes, [0, 1]);
+/// let mut d = ByteDecoder::new(&bytes, &[]);
+/// assert!(!read_bool(&mut d, S)?);
+/// assert!(read_bool(&mut d, S)?);
+/// # Ok::<(), exi::Error>(())
+/// ```
 pub fn write_bool<E: Encoder>(e: &mut E, ch: Channel, v: bool) -> Result<()> {
     e.nbit(ch, v as u32, 1)
 }
 
+/// ```
+/// use exi::coding::{Channel::Structure as S, byte_aligned::ByteDecoder, datatypes::read_bool};
+/// let mut d = ByteDecoder::new(&[0, 1], &[]);
+/// assert_eq!((read_bool(&mut d, S)?, read_bool(&mut d, S)?), (false, true));
+/// # Ok::<(), exi::Error>(())
+/// ```
 pub fn read_bool<D: Decoder>(d: &mut D, ch: Channel) -> Result<bool> {
     Ok(d.nbit(ch, 1)? == 1)
 }
@@ -372,6 +424,14 @@ pub fn write_bool_pattern<E: Encoder>(
 }
 
 /// Returns `(value, digit)`.
+///
+/// ```
+/// use exi::coding::{Channel::Structure as S, byte_aligned::ByteDecoder, datatypes::read_bool_pattern};
+/// let mut d = ByteDecoder::new(&[2, 3], &[]);
+/// assert_eq!(read_bool_pattern(&mut d, S)?, (true, false));
+/// assert_eq!(read_bool_pattern(&mut d, S)?, (true, true));
+/// # Ok::<(), exi::Error>(())
+/// ```
 pub fn read_bool_pattern<D: Decoder>(
     d: &mut D,
     ch: Channel,
@@ -422,6 +482,17 @@ pub fn write_decimal<E: Encoder>(
 ///
 /// As [`read_uint`]; `ErrorKind::Unsupported` when a part exceeds `u64`
 /// or the fraction has more than 19 digits (big decimals come later).
+///
+/// ```
+/// use exi::coding::{Channel::Structure as S, byte_aligned::ByteDecoder, datatypes::read_decimal};
+/// use exi::{Decimal, ErrorKind};
+/// assert_eq!(read_decimal(&mut ByteDecoder::new(&[0x01, 0x00, 0x05], &[]), S, 64)?, Decimal::new(true, 0, 5, 1));
+/// let mut too_big = vec![0x00];
+/// too_big.extend([0xFF; 9]);
+/// too_big.push(0x02);
+/// assert_eq!(read_decimal(&mut ByteDecoder::new(&too_big, &[]), S, 64).unwrap_err().kind(), ErrorKind::Unsupported);
+/// # Ok::<(), exi::Error>(())
+/// ```
 pub fn read_decimal<D: Decoder>(
     d: &mut D,
     ch: Channel,
@@ -476,6 +547,18 @@ pub fn write_float<E: Encoder>(
 ///
 /// `ErrorKind::Value` when the mantissa exceeds `i64` or the exponent
 /// is outside `−16384..=16383`.
+///
+/// ```
+/// use exi::coding::{Channel::Structure as S, byte_aligned::{ByteEncoder, ByteDecoder}, datatypes::*};
+/// use exi::{ErrorKind, Float};
+/// let mut e = ByteEncoder::new(Vec::new());
+/// write_float(&mut e, S, Float::INFINITY)?;
+/// let bytes = e.into_sink();
+/// assert_eq!(read_float(&mut ByteDecoder::new(&bytes, &[]), S, 64)?, Float::INFINITY);
+/// // Exponent 16384: sign 0, magnitude 16384 (0x80, 0x80, 0x01).
+/// assert_eq!(read_float(&mut ByteDecoder::new(&[0x00, 0x01, 0x00, 0x80, 0x80, 0x01], &[]), S, 64).unwrap_err().kind(), ErrorKind::Value);
+/// # Ok::<(), exi::Error>(())
+/// ```
 pub fn read_float<D: Decoder>(
     d: &mut D,
     ch: Channel,
@@ -514,6 +597,17 @@ pub fn write_binary<E: Encoder>(
 /// # Errors
 ///
 /// `ErrorKind::Limit` when the length exceeds `max_bytes`.
+///
+/// ```
+/// use exi::coding::{Channel::Structure as S, Decoder, byte_aligned::ByteDecoder, datatypes::read_binary_len};
+/// let mut d = ByteDecoder::new(&[0x02, b'h', b'i'], &[]);
+/// let n = read_binary_len(&mut d, S, 64, 10)?;
+/// let mut buf = vec![0u8; n as usize];
+/// d.octets(S, &mut buf)?;
+/// assert_eq!(buf, b"hi");
+/// assert_eq!(read_binary_len(&mut ByteDecoder::new(&[0x0B], &[]), S, 64, 10).unwrap_err().kind(), exi::ErrorKind::Limit);
+/// # Ok::<(), exi::Error>(())
+/// ```
 pub fn read_binary_len<D: Decoder>(
     d: &mut D,
     ch: Channel,
@@ -733,6 +827,14 @@ pub fn read_datetime<D: Decoder>(
 }
 
 /// Writes the characters of `s` (no length) as code points.
+///
+/// ```
+/// use exi::coding::{Channel::Structure as S, byte_aligned::ByteEncoder, datatypes::write_chars};
+/// let mut e = ByteEncoder::new(Vec::new());
+/// write_chars(&mut e, S, "aé")?;
+/// assert_eq!(e.into_sink(), [0x61, 0xE9, 0x01]);
+/// # Ok::<(), exi::Error>(())
+/// ```
 pub fn write_chars<E: Encoder>(e: &mut E, ch: Channel, s: &str) -> Result<()> {
     for c in s.chars() {
         write_uint(e, ch, c as u64)?;
@@ -864,6 +966,16 @@ pub fn write_restricted_chars<E: Encoder>(
 ///
 /// `ErrorKind::Grammar` for an index above `N`; otherwise as
 /// [`read_chars`].
+///
+/// ```
+/// use exi::coding::{Channel::Structure as S, byte_aligned::ByteDecoder, datatypes::read_restricted_chars};
+/// let digits: Vec<char> = ('0'..='9').collect();
+/// let mut out = String::new();
+/// read_restricted_chars(&mut ByteDecoder::new(&[0x01, 0x0A, 0x78], &[]), S, 2, &digits, &mut out)?;
+/// assert_eq!(out, "1x");
+/// assert_eq!(read_restricted_chars(&mut ByteDecoder::new(&[0x0B], &[]), S, 1, &digits, &mut String::new()).unwrap_err().kind(), exi::ErrorKind::Grammar);
+/// # Ok::<(), exi::Error>(())
+/// ```
 pub fn read_restricted_chars<D: Decoder>(
     d: &mut D,
     ch: Channel,
@@ -904,6 +1016,19 @@ pub fn read_restricted_chars<D: Decoder>(
 /// # Errors
 ///
 /// `ErrorKind::Internal` when `ordinal ≥ count`.
+///
+/// ```
+/// use exi::coding::{Channel::Structure as S, byte_aligned::{ByteEncoder, ByteDecoder}, datatypes::*};
+/// let mut e = ByteEncoder::new(Vec::new());
+/// write_enum(&mut e, S, 0, 1)?;                               // 1 value: 0 bits
+/// write_enum(&mut e, S, 2, 3)?;                               // 3 values: width(3) = 2 bits
+/// let bytes = e.into_sink();
+/// assert_eq!(bytes, [0x02]);
+/// let mut d = ByteDecoder::new(&bytes, &[]);
+/// assert_eq!((read_enum(&mut d, S, 1)?, read_enum(&mut d, S, 3)?), (0, 2));
+/// assert_eq!(write_enum(&mut ByteEncoder::new(Vec::new()), S, 3, 3).unwrap_err().kind(), exi::ErrorKind::Internal);
+/// # Ok::<(), exi::Error>(())
+/// ```
 pub fn write_enum<E: Encoder>(
     e: &mut E,
     ch: Channel,
@@ -922,6 +1047,13 @@ pub fn write_enum<E: Encoder>(
 /// # Errors
 ///
 /// `ErrorKind::Grammar` when the ordinal read is `≥ count`.
+///
+/// ```
+/// use exi::coding::{Channel::Structure as S, byte_aligned::ByteDecoder, datatypes::read_enum};
+/// assert_eq!(read_enum(&mut ByteDecoder::new(&[0x02], &[]), S, 3)?, 2);
+/// assert_eq!(read_enum(&mut ByteDecoder::new(&[0x03], &[]), S, 3).unwrap_err().kind(), exi::ErrorKind::Grammar);
+/// # Ok::<(), exi::Error>(())
+/// ```
 pub fn read_enum<D: Decoder>(
     d: &mut D,
     ch: Channel,
@@ -974,6 +1106,15 @@ pub fn write_event_code<E: Encoder>(
 /// # Errors
 ///
 /// `ErrorKind::Grammar` when the value read is `≥ count`.
+///
+/// ```
+/// use exi::coding::{byte_aligned::ByteDecoder, datatypes::read_code_part};
+/// let mut d = ByteDecoder::new(&[0x02, 0x03], &[]);
+/// assert_eq!(read_code_part(&mut d, 1)?, 0);                  // 0 bits consumed
+/// assert_eq!(read_code_part(&mut d, 3)?, 2);
+/// assert_eq!(read_code_part(&mut d, 3).unwrap_err().kind(), exi::ErrorKind::Grammar);
+/// # Ok::<(), exi::Error>(())
+/// ```
 pub fn read_code_part<D: Decoder>(d: &mut D, count: u32) -> Result<u32> {
     let x = d.nbit(Channel::Structure, width(count))?;
     if x >= count {

@@ -212,7 +212,7 @@ fn compile(main: &str) -> Result<GrammarSet> {
             if rel.contains("://") {
                 continue;
             }
-            let dir = Path::new(&loc).parent().unwrap_or(Path::new(""));
+            let dir = Path::new(&loc).parent().unwrap_or_else(|| Path::new(""));
             let joined = dir.join(rel).to_str().unwrap().replace('\\', "/");
             let mut p = Vec::new();
             for c in joined.split('/') {
@@ -504,6 +504,10 @@ fn known() -> BTreeMap<String, String> {
 #[test]
 fn w3c_interop() {
     if !Path::new(ENCODINGS).join("MANIFEST").exists() {
+        assert!(
+            std::env::var_os("EXI_REQUIRE_W3C").is_none(),
+            "no {ENCODINGS}: run fixtures/fetch-w3c.sh"
+        );
         eprintln!("no {ENCODINGS}: run fixtures/fetch-w3c.sh; skipped");
         return;
     }
@@ -585,7 +589,7 @@ fn w3c_interop() {
                     .iter()
                     .zip(&their_events)
                     .position(|(a, b)| a != b)
-                    .unwrap_or(our_events.len().min(their_events.len()));
+                    .unwrap_or_else(|| our_events.len().min(their_events.len()));
                 return Err(format!(
                     "events differ at {i}: ours {:?}, EXIficient {:?}",
                     our_events.get(i),

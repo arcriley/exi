@@ -104,6 +104,12 @@ impl EventCode {
     ///
     /// When `parts` is empty or longer than 3: codes are built only by
     /// grammar code.
+    ///
+    /// ```
+    /// use exi::grammar::EventCode;
+    /// const CODE: EventCode = EventCode::new(&[2, 1]);
+    /// assert_eq!(CODE.to_string(), "2.1");
+    /// ```
     pub const fn new(parts: &[u32]) -> Self {
         assert!(
             !parts.is_empty() && parts.len() <= 3,
@@ -117,9 +123,19 @@ impl EventCode {
         }
         EventCode { parts: p, len: parts.len() as u8 }
     }
+    ///
+    /// ```
+    /// use exi::grammar::EventCode;
+    /// assert_eq!(EventCode::new(&[2, 1]).parts(), &[2, 1]);
+    /// ```
     pub fn parts(&self) -> &[u32] {
         &self.parts[..self.len as usize]
     }
+    ///
+    /// ```
+    /// use exi::grammar::EventCode;
+    /// assert_eq!(EventCode::new(&[2, 1]).len(), 2);
+    /// ```
     #[allow(clippy::len_without_is_empty)] // a code always has 1 to 3 parts
     pub const fn len(&self) -> u8 {
         self.len
@@ -197,23 +213,54 @@ pub struct GrammarSet {
 
 impl GrammarSet {
     /// No schema: built-in grammars only (`schemaId` nil).
+    ///
+    /// ```
+    /// use exi::grammar::GrammarSet;
+    /// assert!(!GrammarSet::schemaless().is_schema_informed());
+    /// ```
     pub fn schemaless() -> GrammarSet {
         GrammarSet { entries: InitialEntries::schemaless(), schema: None }
     }
     /// Starts a schema-informed grammar set built in code (see
     /// [`informed`]).
+    ///
+    /// ```
+    /// use exi::grammar::GrammarSet;
+    /// let mut builder = GrammarSet::builder();
+    /// builder.empty_type(None);
+    /// assert!(builder.build()?.is_schema_informed());
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn builder() -> informed::GrammarBuilder {
         informed::GrammarBuilder::new()
     }
+    ///
+    /// ```
+    /// use exi::grammar::GrammarSet;
+    /// assert!(!GrammarSet::schemaless().is_schema_informed());
+    /// ```
     pub fn is_schema_informed(&self) -> bool {
         self.schema.is_some()
     }
+    ///
+    /// ```
+    /// use exi::grammar::GrammarSet;
+    /// assert_eq!(GrammarSet::schemaless().initial_entries().uris()[0], "");
+    /// ```
     pub fn initial_entries(&self) -> &InitialEntries {
         &self.entries
     }
     /// The fixed numbers of a name among the initial entries: the same
     /// in every session that uses this grammar set, so they can be
     /// looked up once and compared as integers.
+    ///
+    /// ```
+    /// use exi::grammar::GrammarSet;
+    /// let set = GrammarSet::schemaless();
+    /// assert_eq!(set.name_id("http://www.w3.org/XML/1998/namespace", "lang"),
+    ///     Some(exi::NameId { uri: 1, local: 2 }));
+    /// assert_eq!(set.name_id("", "unknown"), None);
+    /// ```
     pub fn name_id(&self, uri: &str, local: &str) -> Option<NameId> {
         let u = self.entries.uris().iter().position(|x| *x == uri)? as u32;
         let l =
@@ -222,9 +269,21 @@ impl GrammarSet {
     }
     /// True when the grammars accept no name they do not declare:
     /// schema-informed, and no wildcard anywhere.
+    ///
+    /// ```
+    /// use exi::grammar::GrammarSet;
+    /// assert!(!GrammarSet::schemaless().is_closed());
+    /// ```
     pub fn is_closed(&self) -> bool {
         self.schema.as_ref().is_some_and(|s| s.closed)
     }
+    ///
+    /// ```
+    /// use exi::grammar::GrammarSet;
+    /// let stats = GrammarSet::schemaless().stats();
+    /// assert_eq!(stats.type_grammars, 0);
+    /// assert!(stats.names > 0);
+    /// ```
     pub fn stats(&self) -> GrammarStats {
         let names = (0..self.entries.uris().len() as u32)
             .map(|u| self.entries.locals(u).len() as u32)
@@ -251,6 +310,16 @@ impl GrammarSet {
     /// # Errors
     ///
     /// `ErrorKind::Limit` when `strings` cannot take them.
+    ///
+    /// ```
+    /// use exi::grammar::GrammarSet;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let set = GrammarSet::schemaless();
+    /// let attached = set.attach(&strings)?;
+    /// assert!(core::ptr::eq(attached.set(), &set));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn attach<'g>(
         &'g self,
         strings: &'g GlobalStrings,
@@ -305,9 +374,28 @@ pub struct Grammars<'g> {
 }
 
 impl<'g> Grammars<'g> {
+    ///
+    /// ```
+    /// use exi::grammar::GrammarSet;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let set = GrammarSet::schemaless();
+    /// assert!(core::ptr::eq(set.attach(&strings)?.set(), &set));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn set(&self) -> &'g GrammarSet {
         self.set
     }
+    ///
+    /// ```
+    /// use exi::grammar::GrammarSet;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let set = GrammarSet::schemaless();
+    /// let attached = set.attach(&strings)?;
+    /// assert!(core::ptr::eq(attached.initial().global(), &strings));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn initial(&self) -> &Initial<'g> {
         &self.initial
     }
@@ -336,6 +424,15 @@ impl<'g> Grammars<'g> {
             .clone()
     }
 
+    ///
+    /// ```
+    /// use exi::grammar::GrammarSet;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let set = GrammarSet::schemaless();
+    /// assert!(core::ptr::eq(set.attach(&strings)?.strings(), &strings));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn strings(&self) -> &'g GlobalStrings {
         self.initial.global()
     }

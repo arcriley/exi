@@ -51,15 +51,41 @@ pub struct ByteEncoder<S: Sink> {
 }
 
 impl<S: Sink> ByteEncoder<S> {
+    ///
+    /// ```
+    /// use exi::coding::byte_aligned::ByteEncoder;
+    /// assert!(ByteEncoder::new(Vec::new()).into_sink().is_empty());
+    /// ```
     pub fn new(sink: S) -> Self {
         ByteEncoder { sink, total: 0 }
     }
+    ///
+    /// ```
+    /// use exi::coding::byte_aligned::ByteEncoder;
+    /// let encoder = ByteEncoder::new(vec![0xAA]);
+    /// assert_eq!(encoder.sink(), &[0xAA]);
+    /// ```
     pub fn sink(&self) -> &S {
         &self.sink
     }
+    ///
+    /// ```
+    /// use exi::coding::byte_aligned::ByteEncoder;
+    /// let mut encoder = ByteEncoder::new(vec![0xAA]);
+    /// encoder.sink_mut().push(0xBB);
+    /// assert_eq!(encoder.into_sink(), [0xAA, 0xBB]);
+    /// ```
     pub fn sink_mut(&mut self) -> &mut S {
         &mut self.sink
     }
+    ///
+    /// ```
+    /// use exi::coding::{Channel, Encoder, byte_aligned::ByteEncoder};
+    /// let mut encoder = ByteEncoder::new(Vec::new());
+    /// encoder.nbit(Channel::Structure, 3, 2)?;
+    /// assert_eq!(encoder.into_sink(), [3]);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn into_sink(self) -> S {
         self.sink
     }
@@ -120,16 +146,38 @@ pub struct ByteDecoder<'a> {
 }
 
 impl<'a> ByteDecoder<'a> {
+    ///
+    /// ```
+    /// use exi::coding::{Channel, Decoder, byte_aligned::ByteDecoder};
+    /// let mut d = ByteDecoder::new(&[0x34], &[0x12]);
+    /// assert_eq!(d.nbit(Channel::Structure, 16)?, 0x1234);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn new(first: &'a [u8], second: &'a [u8]) -> Self {
         ByteDecoder { first, second, pos: 0 }
     }
     /// Octets not yet read.
+    ///
+    /// ```
+    /// use exi::coding::byte_aligned::ByteDecoder;
+    /// let mut d = ByteDecoder::new(b"ab", b"c");
+    /// d.advance(1);
+    /// assert_eq!(d.remaining(), 2);
+    /// ```
     pub fn remaining(&self) -> usize {
         self.first.len() + self.second.len() - self.pos
     }
     /// The next up to `n` unread octets, without consuming them, as the
     /// run that is contiguous in memory. The string decoder uses it to
     /// find runs of ASCII.
+    ///
+    /// ```
+    /// use exi::coding::byte_aligned::ByteDecoder;
+    /// let mut d = ByteDecoder::new(b"ab", b"c");
+    /// assert_eq!(d.peek_contiguous(3), b"ab");
+    /// d.advance(2);
+    /// assert_eq!(d.peek_contiguous(3), b"c");
+    /// ```
     pub fn peek_contiguous(&self, n: usize) -> &'a [u8] {
         if self.pos < self.first.len() {
             let end = self.first.len().min(self.pos + n);
@@ -141,6 +189,14 @@ impl<'a> ByteDecoder<'a> {
         }
     }
     /// Consumes `n` octets already seen through `peek_contiguous`.
+    ///
+    /// ```
+    /// use exi::coding::{Channel, Decoder, byte_aligned::ByteDecoder};
+    /// let mut d = ByteDecoder::new(b"ab", b"c");
+    /// d.advance(2);
+    /// assert_eq!(d.nbit(Channel::Structure, 8)?, u32::from(b'c'));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn advance(&mut self, n: usize) {
         assert!(n <= self.remaining(), "advance past the end of input");
         self.pos += n;

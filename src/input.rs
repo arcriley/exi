@@ -90,22 +90,57 @@ impl<const N: usize> InputRing<N> {
         "ring size: a power of two, at least 64"
     );
 
+    ///
+    /// ```
+    /// use exi::input::InputRing;
+    /// assert_eq!(InputRing::<64>::new().free(), 64);
+    /// ```
     pub const fn new() -> Self {
         let () = Self::VALID;
         InputRing { buf: [0; N], read: 0, write: 0 }
     }
     /// Octets filled.
+    ///
+    /// ```
+    /// use exi::input::InputRing;
+    /// let mut ring = InputRing::<64>::new();
+    /// ring.feed(b"abc");
+    /// ring.consume(1);
+    /// assert_eq!(ring.len(), 2);
+    /// ```
     pub const fn len(&self) -> usize {
         self.write.wrapping_sub(self.read)
     }
+    ///
+    /// ```
+    /// use exi::input::InputRing;
+    /// let mut ring = InputRing::<64>::new();
+    /// assert!(ring.is_empty());
+    /// ring.feed(b"x");
+    /// assert!(!ring.is_empty());
+    /// ```
     pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
     /// Octets free.
+    ///
+    /// ```
+    /// use exi::input::InputRing;
+    /// let mut ring = InputRing::<64>::new();
+    /// ring.feed(b"abc");
+    /// assert_eq!(ring.free(), 61);
+    /// ```
     pub const fn free(&self) -> usize {
         N - self.len()
     }
     /// Copies as much of `data` as fits and returns how much.
+    ///
+    /// ```
+    /// use exi::input::InputRing;
+    /// let mut ring = InputRing::<64>::new();
+    /// assert_eq!(ring.feed(&[0; 65]), 64);
+    /// assert_eq!(ring.feed(b"x"), 0);
+    /// ```
     pub fn feed(&mut self, data: &[u8]) -> usize {
         let mut done = 0;
         while done < data.len() {
@@ -124,6 +159,15 @@ impl<const N: usize> InputRing<N> {
     /// buffer or the read cursor, whichever comes first. When the ring
     /// is empty both cursors first move to 0, so the whole buffer is
     /// offered.
+    ///
+    /// ```
+    /// use exi::input::InputRing;
+    /// let mut ring = InputRing::<64>::new();
+    /// assert_eq!(ring.buffer().len(), 64);
+    /// ring.feed(&[0; 63]);
+    /// ring.consume(62);
+    /// assert_eq!(ring.buffer().len(), 1);
+    /// ```
     pub fn buffer(&mut self) -> &mut [u8] {
         if self.is_empty() {
             self.read = 0;
@@ -144,6 +188,14 @@ impl<const N: usize> InputRing<N> {
     ///
     /// When `n` exceeds the length `buffer` returned: a bug in the
     /// caller.
+    ///
+    /// ```
+    /// use exi::input::InputRing;
+    /// let mut ring = InputRing::<64>::new();
+    /// ring.buffer()[..2].copy_from_slice(b"ab");
+    /// ring.commit(2);
+    /// assert_eq!(ring.filled().0, b"ab");
+    /// ```
     pub fn commit(&mut self, n: usize) {
         let w = self.write & (N - 1);
         let r = self.read & (N - 1);
@@ -159,6 +211,17 @@ impl<const N: usize> InputRing<N> {
     }
     /// The filled region, as the part up to the end of the buffer and
     /// the wrapped part.
+    ///
+    /// ```
+    /// use exi::input::InputRing;
+    /// let mut ring = InputRing::<64>::new();
+    /// ring.feed(&[0; 63]);
+    /// ring.consume(62);
+    /// ring.feed(b"ab");
+    /// let (first, second) = ring.filled();
+    /// assert_eq!(first, &[0, b'a']);
+    /// assert_eq!(second, b"b");
+    /// ```
     pub fn filled(&self) -> (&[u8], &[u8]) {
         let len = self.len();
         let r = self.read & (N - 1);
@@ -173,11 +236,28 @@ impl<const N: usize> InputRing<N> {
     /// # Panics
     ///
     /// When `n` exceeds `len()`.
+    ///
+    /// ```
+    /// use exi::input::InputRing;
+    /// let mut ring = InputRing::<64>::new();
+    /// ring.feed(b"abc");
+    /// ring.consume(1);
+    /// assert_eq!(ring.filled().0, b"bc");
+    /// ```
     pub fn consume(&mut self, n: usize) {
         assert!(n <= self.len(), "consume beyond the filled region");
         self.read = self.read.wrapping_add(n);
     }
     /// Empties the ring.
+    ///
+    /// ```
+    /// use exi::input::InputRing;
+    /// let mut ring = InputRing::<64>::new();
+    /// ring.feed(b"abc");
+    /// ring.clear();
+    /// assert!(ring.is_empty());
+    /// assert_eq!(ring.buffer().len(), 64);
+    /// ```
     pub fn clear(&mut self) {
         self.read = 0;
         self.write = 0;

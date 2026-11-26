@@ -704,14 +704,24 @@ impl<'a> SessionTables<'a> {
 
     // ----- URIs, prefixes, local names (R2, R3) -----
 
+    fn active(&self, outer: bool) -> &Partitions {
+        if outer { self.stack.last().unwrap_or(&self.cur) } else { &self.cur }
+    }
+
     pub fn uri_count(&self) -> u32 {
         (self.initial_uris() + self.cur.uris.added.len()) as u32
     }
+    pub(crate) fn uri_at(&self, outer: bool, n: u32) -> Option<UriId> {
+        lookup(&self.initial.uris, Some(&self.active(outer).uris), n)
+    }
     pub fn uri(&self, n: u32) -> Option<UriId> {
-        lookup(&self.initial.uris, Some(&self.cur.uris), n)
+        self.uri_at(false, n)
+    }
+    pub(crate) fn uri_str_at(&self, outer: bool, n: u32) -> Option<&str> {
+        self.uri_at(outer, n).map(|id| self.global().uris().resolve(id))
     }
     pub fn uri_str(&self, n: u32) -> Option<&str> {
-        self.uri(n).map(|id| self.global().uris().resolve(id))
+        self.uri_str_at(false, n)
     }
     /// The most recent number of the URI with global id `id`.
     pub fn find_uri(&self, id: UriId) -> Option<u32> {
@@ -780,16 +790,33 @@ impl<'a> SessionTables<'a> {
             self.cur.per_uri.get(&uri).map_or(0, |p| p.prefixes.added.len());
         (init + added) as u32
     }
-    pub fn prefix(&self, uri: u32, n: u32) -> Option<PrefixId> {
-        let part = self.cur.per_uri.get(&uri).map(|p| &p.prefixes);
+    pub(crate) fn prefix_at(
+        &self,
+        outer: bool,
+        uri: u32,
+        n: u32,
+    ) -> Option<PrefixId> {
+        let part = self.active(outer).per_uri.get(&uri).map(|p| &p.prefixes);
         lookup(
             self.initial.prefixes.get(uri as usize).map_or(&[][..], |v| v),
             part,
             n,
         )
     }
+    pub fn prefix(&self, uri: u32, n: u32) -> Option<PrefixId> {
+        self.prefix_at(false, uri, n)
+    }
+    pub(crate) fn prefix_str_at(
+        &self,
+        outer: bool,
+        uri: u32,
+        n: u32,
+    ) -> Option<&str> {
+        self.prefix_at(outer, uri, n)
+            .map(|id| self.global().prefixes().resolve(id))
+    }
     pub fn prefix_str(&self, uri: u32, n: u32) -> Option<&str> {
-        self.prefix(uri, n).map(|id| self.global().prefixes().resolve(id))
+        self.prefix_str_at(false, uri, n)
     }
     pub fn find_prefix(&self, uri: u32, id: PrefixId) -> Option<u32> {
         find(
@@ -829,16 +856,33 @@ impl<'a> SessionTables<'a> {
             self.cur.per_uri.get(&uri).map_or(0, |p| p.locals.added.len());
         (init + added) as u32
     }
-    pub fn local(&self, uri: u32, n: u32) -> Option<LocalId> {
-        let part = self.cur.per_uri.get(&uri).map(|p| &p.locals);
+    pub(crate) fn local_at(
+        &self,
+        outer: bool,
+        uri: u32,
+        n: u32,
+    ) -> Option<LocalId> {
+        let part = self.active(outer).per_uri.get(&uri).map(|p| &p.locals);
         lookup(
             self.initial.locals.get(uri as usize).map_or(&[][..], |v| v),
             part,
             n,
         )
     }
+    pub fn local(&self, uri: u32, n: u32) -> Option<LocalId> {
+        self.local_at(false, uri, n)
+    }
+    pub(crate) fn local_str_at(
+        &self,
+        outer: bool,
+        uri: u32,
+        n: u32,
+    ) -> Option<&str> {
+        self.local_at(outer, uri, n)
+            .map(|id| self.global().locals().resolve(id))
+    }
     pub fn local_str(&self, uri: u32, n: u32) -> Option<&str> {
-        self.local(uri, n).map(|id| self.global().locals().resolve(id))
+        self.local_str_at(false, uri, n)
     }
     pub fn find_local(&self, uri: u32, id: LocalId) -> Option<u32> {
         find(

@@ -204,7 +204,7 @@ fn exports(src: &str) -> Vec<(String, String, Vec<String>)> {
             .map(|p| c_type(p.split_once(':').unwrap().1))
             .collect();
         let tail = &rest[close + 1..rest[close..].find('{').unwrap() + close];
-        let ret = tail.trim().strip_prefix("->").map_or("void".into(), c_type);
+        let ret = tail.trim().strip_prefix("->").map_or_else(|| "void".into(), c_type);
         out.push((name, ret, params));
     }
     out

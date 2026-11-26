@@ -150,7 +150,7 @@ fn pages_round_trip() {
                 .bytes()
                 .zip(want.bytes())
                 .position(|(a, b)| a != b)
-                .unwrap_or(back.len().min(want.len()));
+                .unwrap_or_else(|| back.len().min(want.len()));
             let from = at.saturating_sub(80);
             panic!(
                 "{}: differs at {at}\n ours: {:?}\n html5ever: {:?}",

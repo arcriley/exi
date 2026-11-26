@@ -30,6 +30,7 @@
 //! | Nodes made without a document | `exiNewNode`, `exiNewText`, `exiNewComment`, `exiNewPI` and `exiNewProp(NULL, …)` make nodes in a holding document of the thread. Adding one to a document moves it there, keeping its pointer |
 //! | Unlinked nodes | an unlinked element's `ns` is NULL until it is placed again: its declaration may have been freed with its old parent |
 //! | `exiNewChild` | `content` is text, as `xmlNewTextChild`; no entity references are parsed |
+//! | `exiNewNs` | `exiNewNs(el, href, NULL)` returns NULL when `el` has no namespace (a default declaration would move `el` into that namespace); libxml2 allows it |
 //! | Typed values | text nodes from schema-informed streams may have `content` NULL: `exiNodeGetContent` and `exiNodeGetValue` give the value |
 //! | Encodings | UTF-8 only; the `encoding` arguments are ignored |
 //! | `exiCopyNode` | `extended` 0 copies as 2 (with properties and namespaces) |

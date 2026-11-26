@@ -53,6 +53,15 @@ pub struct DocumentBuilder<'g> {
 }
 
 impl<'g> DocumentBuilder<'g> {
+    ///
+    /// ```
+    /// use exi::{Event, EventSink, dom::DocumentBuilder};
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut builder = DocumentBuilder::new(&strings);
+    /// assert!(builder.document().root().is_none());
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn new(strings: &'g GlobalStrings) -> DocumentBuilder<'g> {
         DocumentBuilder {
             doc: Document::new(strings),
@@ -93,6 +102,16 @@ impl<'g> DocumentBuilder<'g> {
     }
 
     /// The tree so far. Open elements are in it, without their end.
+    ///
+    /// ```
+    /// use exi::{Event, EventSink, dom::DocumentBuilder};
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut builder = DocumentBuilder::new(&strings);
+    /// builder.start_element("root")?;
+    /// assert_eq!(builder.document().root(), builder.current());
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn document(&self) -> &Document<'g> {
         &self.doc
     }
@@ -118,6 +137,19 @@ impl<'g> DocumentBuilder<'g> {
     }
 
     /// The open element, if any.
+    ///
+    /// ```
+    /// use exi::{Event, EventSink, dom::DocumentBuilder};
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut builder = DocumentBuilder::new(&strings);
+    /// assert_eq!(builder.current(), None);
+    /// builder.start_element("root")?;
+    /// assert!(builder.current().is_some());
+    /// builder.end_element()?;
+    /// assert_eq!(builder.current(), None);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn current(&self) -> Option<NodeId> {
         self.stack.last().copied().filter(|&id| self.doc.contains(id))
     }
@@ -127,6 +159,18 @@ impl<'g> DocumentBuilder<'g> {
     /// # Errors
     ///
     /// `ErrorKind::State` before `EndDocument`.
+    ///
+    /// ```
+    /// use exi::{Event, EventSink, dom::DocumentBuilder};
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut builder = DocumentBuilder::new(&strings);
+    /// builder.start_element("root")?;
+    /// builder.end_element()?;
+    /// builder.event(&Event::EndDocument)?;
+    /// assert!(builder.finish()?.root().is_some());
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn finish(self) -> Result<Document<'g>> {
         if !self.ended {
             return Err(Error::new(
@@ -138,6 +182,18 @@ impl<'g> DocumentBuilder<'g> {
     }
 
     /// The tree, ended or not: open elements stay as they are.
+    ///
+    /// ```
+    /// use exi::{Event, EventSink, dom::DocumentBuilder};
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut builder = DocumentBuilder::new(&strings);
+    /// builder.start_element("root")?;
+    /// builder.text("partial")?;
+    /// let doc = builder.into_document();
+    /// assert_eq!(doc.content(doc.root().unwrap()), "partial");
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn into_document(mut self) -> Document<'g> {
         let _ = self.flush();
         let _ = self.settle();
@@ -145,6 +201,21 @@ impl<'g> DocumentBuilder<'g> {
     }
 
     /// An event with its position: the start tag's line goes to `line`.
+    ///
+    /// ```
+    /// use exi::{Event, EventSink, dom::DocumentBuilder};
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut builder = DocumentBuilder::new(&strings);
+    /// let mut meta = exi::EventMeta::default();
+    /// meta.position.line = 7;
+    /// builder.event_at(&Event::StartElement(exi::Name::new("", "root")), Some(&meta))?;
+    /// let doc = builder.into_document();
+    /// let node = doc.raw(doc.root().unwrap()).cast::<exi::dom::raw::RawNode>();
+    /// // The root is a live element owned by doc.
+    /// assert_eq!(unsafe { (*node).line }, 7);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn event_at(
         &mut self,
         ev: &Event<'_>,
@@ -416,6 +487,15 @@ impl<'g> Document<'g> {
 
     /// A document from XML text (`xmlReadMemory`). Comments, PIs and
     /// the DOCTYPE are kept.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let doc = Document::parse_xml(&strings, b"<root/>")?;
+    /// assert_eq!(doc.node_name(doc.root().unwrap()), "root");
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     #[cfg(feature = "xml")]
     pub fn parse_xml(
         strings: &'g GlobalStrings,
@@ -425,6 +505,17 @@ impl<'g> Document<'g> {
     }
 
     /// As [`parse_xml`](Self::parse_xml), with a configured builder.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// use exi::dom::DocumentBuilder;
+    /// let builder = DocumentBuilder::new(&strings).ignore_blanks(true);
+    /// let doc = Document::parse_xml_with(&strings, b"<root>  <child/>  </root>", builder)?;
+    /// assert_eq!(doc.children(doc.root().unwrap()).count(), 1);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     #[cfg(feature = "xml")]
     pub fn parse_xml_with(
         strings: &'g GlobalStrings,
@@ -460,6 +551,20 @@ impl<'g> Document<'g> {
 
     /// Writes the document's events to `sink` (`xmlDocDump` for any
     /// layer 1 writer).
+    ///
+    /// ```
+    /// use exi::{dom::Document, Event, EventSource, OwnedEvent, Step};
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// let mut events: Vec<OwnedEvent> = Vec::new();
+    /// doc.write(&mut events)?;
+    /// assert_eq!(events.first(), Some(&OwnedEvent::StartDocument));
+    /// assert_eq!(events.last(), Some(&OwnedEvent::EndDocument));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn write(&self, sink: &mut impl EventSink) -> Result<()> {
         let mut e = self.events();
         while let Step::Event(ev, _) = e.next()? {
@@ -471,6 +576,19 @@ impl<'g> Document<'g> {
     /// Writes one element and everything inside it, with the namespace
     /// declarations it needs from its ancestors: a stanza from a
     /// stream.
+    ///
+    /// ```
+    /// use exi::{dom::Document, Event, EventSource, OwnedEvent, Step};
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// let mut events: Vec<OwnedEvent> = Vec::new();
+    /// doc.write_subtree(root, &mut events)?;
+    /// assert!(matches!(events.as_slice(), [OwnedEvent::StartElement(_), OwnedEvent::EndElement(_)]));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn write_subtree(
         &self,
         element: NodeId,
@@ -484,6 +602,18 @@ impl<'g> Document<'g> {
     }
 
     /// The document as events: an [`EventSource`].
+    ///
+    /// ```
+    /// use exi::{dom::Document, Event, EventSource, OwnedEvent, Step};
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// let mut events = doc.events();
+    /// assert!(matches!(events.next()?, Step::Event(Event::StartDocument, _)));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn events(&self) -> DocEvents<'_, 'g> {
         DocEvents {
             doc: self,
@@ -495,6 +625,18 @@ impl<'g> Document<'g> {
     }
 
     /// One element as events (no StartDocument or EndDocument).
+    ///
+    /// ```
+    /// use exi::{dom::Document, Event, EventSource, OwnedEvent, Step};
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// let mut events = doc.subtree_events(root);
+    /// assert!(matches!(events.next()?, Step::Event(Event::StartElement(_), _)));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn subtree_events(&self, element: NodeId) -> DocEvents<'_, 'g> {
         let p = self.p(element);
         // Declarations in scope at the element, nearest first, one per
@@ -529,6 +671,15 @@ impl<'g> Document<'g> {
     }
 
     /// The document as XML text, without an XML declaration.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let doc = Document::parse_xml(&strings, b"<root/>")?;
+    /// assert_eq!(doc.to_xml()?, "<root/>");
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     #[cfg(feature = "xml")]
     pub fn to_xml(&self) -> Result<String> {
         let b = self.write_xml(crate::xml::XmlWriterConfig::new())?;
@@ -543,6 +694,16 @@ impl<'g> Document<'g> {
     /// The document as XML text with this writer configuration
     /// (`xmlDocDumpMemory`). The tree's own prefixes and declarations
     /// are written.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let doc = Document::parse_xml(&strings, b"<root/>")?;
+    /// let cfg = exi::xml::XmlWriterConfig::new().declaration(true);
+    /// assert!(doc.write_xml(cfg)?.starts_with(b"<?xml "));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     #[cfg(feature = "xml")]
     pub fn write_xml(
         &self,
@@ -556,6 +717,20 @@ impl<'g> Document<'g> {
     }
 
     /// Builds a document from owned events, mainly for tests.
+    ///
+    /// ```
+    /// use exi::{dom::Document, Event, EventSource, OwnedEvent, Step};
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// let mut events: Vec<OwnedEvent> = Vec::new();
+    /// doc.write(&mut events)?;
+    /// let rebuilt = Document::from_events(&strings, &events)?;
+    /// assert_eq!(rebuilt.node_name(rebuilt.root().unwrap()), "root");
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn from_events(
         strings: &'g GlobalStrings,
         events: &[crate::OwnedEvent],

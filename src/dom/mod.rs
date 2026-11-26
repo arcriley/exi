@@ -220,6 +220,15 @@ fn arg(detail: &'static str) -> Error {
 impl<'g> Document<'g> {
     /// An empty document whose names are kept in `strings`. Documents
     /// sharing one `GlobalStrings` give the same name the same ids.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let doc = Document::new(&strings);
+    /// assert_eq!(doc.root(), None);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn new(strings: &'g GlobalStrings) -> Document<'g> {
         let inner = Box::new(DocInner {
             raw: RawDoc::blank(),
@@ -244,6 +253,17 @@ impl<'g> Document<'g> {
 
     /// Gives the document to C: `exiDocPtr`. Take it back with
     /// [`from_raw`](Self::from_raw) to free it.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let raw = Document::new(&strings).into_raw();
+    /// // The pointer came from into_raw and this takes back sole ownership.
+    /// let doc = unsafe { Document::from_raw(raw) };
+    /// assert_eq!(doc.as_raw(), raw.cast_const());
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn into_raw(self) -> *mut RawDoc {
         let p = self.doc_ptr();
         core::mem::forget(self);
@@ -256,6 +276,17 @@ impl<'g> Document<'g> {
     ///
     /// `p` came from `into_raw` of a document whose strings outlive
     /// `'g`, and is not used after the returned document is dropped.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let raw = Document::new(&strings).into_raw();
+    /// // The pointer came from into_raw and this takes back sole ownership.
+    /// let doc = unsafe { Document::from_raw(raw) };
+    /// assert_eq!(doc.as_raw(), raw.cast_const());
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub unsafe fn from_raw(p: *mut RawDoc) -> Document<'g> {
         Document {
             inner: NonNull::new(p as *mut DocInner<'g>)
@@ -298,11 +329,29 @@ impl<'g> Document<'g> {
     }
 
     /// The C view of this document: `exiDocPtr`.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let doc = Document::new(&strings);
+    /// assert!(!doc.as_raw().is_null());
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn as_raw(&self) -> *const RawDoc {
         self.doc_ptr()
     }
 
     /// The string tables this document's names are in.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let doc = Document::new(&strings);
+    /// assert!(core::ptr::eq(doc.strings(), &strings));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn strings(&self) -> &'g GlobalStrings {
         self.d().strings
     }
@@ -337,6 +386,18 @@ impl<'g> Document<'g> {
     }
 
     /// Whether `n` is a live node of this document.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let text = doc.new_text("hello");
+    /// assert!(doc.contains(text));
+    /// doc.remove(text);
+    /// assert!(!doc.contains(text));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn contains(&self, n: NodeId) -> bool {
         self.live_ptr(n).is_some()
     }
@@ -392,6 +453,16 @@ impl<'g> Document<'g> {
 
     /// The node's C struct: `exiNode*`, `exiAttr*`, `exiDtd*` or
     /// `exiDoc*` by its kind.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let text = doc.new_text("hello");
+    /// assert_eq!(doc.node_id(doc.raw(text)), Some(text));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn raw(&self, n: NodeId) -> *const RawCommon {
         self.p(n)
     }
@@ -481,6 +552,17 @@ impl<'g> Document<'g> {
 
     /// A new attribute on no element (`xmlNewProp` with a NULL node).
     /// Put it on one with [`attach_attribute`](Self::attach_attribute).
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let attr = doc.new_attribute("mode", "auto")?;
+    /// assert_eq!(doc.parent(attr), None);
+    /// assert_eq!(doc.content(attr), "auto");
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn new_attribute(
         &mut self,
         name: impl AsName,
@@ -505,6 +587,21 @@ impl<'g> Document<'g> {
     /// Puts an attribute node on an element, moving it from wherever it
     /// was and freeing an attribute of the same name already there
     /// (`xmlAddChild` with an attribute).
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// let attr = doc.set_attribute(root, "mode", "auto")?;
+    /// let replacement = doc.new_attribute("mode", "manual")?;
+    /// doc.attach_attribute(root, replacement)?;
+    /// assert!(!doc.contains(attr));
+    /// assert_eq!(doc.attribute(root, "mode").as_deref(), Some("manual"));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn attach_attribute(
         &mut self,
         element: NodeId,
@@ -545,6 +642,18 @@ impl<'g> Document<'g> {
 
     /// Gives an element or attribute a new name, or a PI a new target
     /// (`xmlNodeSetName`, and with a namespace `xmlSetNs`).
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// doc.rename(root, "settings")?;
+    /// assert_eq!(doc.node_name(root), "settings");
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn rename(&mut self, n: NodeId, name: impl AsName) -> Result<()> {
         let name = name.as_name();
         let p = self.p(n);
@@ -663,6 +772,17 @@ impl<'g> Document<'g> {
     /// A new element, not yet in the tree (`xmlNewDocNode`). Its
     /// namespace is declared when it is placed, if no declaration in
     /// scope has it.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let element = doc.new_element(("urn:demo", "root"))?;
+    /// assert!(doc.name(element).unwrap().is("urn:demo", "root"));
+    /// assert_eq!(doc.parent(element), None);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn new_element(&mut self, name: impl AsName) -> Result<NodeId> {
         let name = name.as_name();
         let p = self.alloc_node(EXI_ELEMENT_NODE);
@@ -672,6 +792,16 @@ impl<'g> Document<'g> {
     }
 
     /// A new text node (`xmlNewDocText`).
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let text = doc.new_text("hello");
+    /// assert_eq!(doc.content(text), "hello");
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn new_text(&mut self, text: &str) -> NodeId {
         self.new_text_buffer(cstr(text))
     }
@@ -707,6 +837,17 @@ impl<'g> Document<'g> {
     }
 
     /// A new comment (`xmlNewDocComment`).
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let node = doc.new_comment("note");
+    /// assert_eq!(doc.kind(node), exi::dom::NodeKind::Comment);
+    /// assert_eq!(doc.content(node), "note");
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn new_comment(&mut self, text: &str) -> NodeId {
         let p = self.alloc_node(EXI_COMMENT_NODE);
         // SAFETY: `p` is new.
@@ -716,6 +857,17 @@ impl<'g> Document<'g> {
     }
 
     /// A new processing instruction (`xmlNewDocPI`).
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let node = doc.new_pi("target", "data");
+    /// assert_eq!(doc.node_name(node), "target");
+    /// assert_eq!(doc.content(node), "data");
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn new_pi(&mut self, target: &str, data: &str) -> NodeId {
         let p = self.alloc_node(EXI_PI_NODE);
         let b = cstr(target);
@@ -729,6 +881,16 @@ impl<'g> Document<'g> {
     }
 
     /// A new entity reference `&name;`, kept as the reader reported it.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let node = doc.new_entity_ref("example");
+    /// assert_eq!(doc.node_name(node), "example");
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn new_entity_ref(&mut self, name: &str) -> NodeId {
         let p = self.alloc_node(EXI_ENTITY_REF_NODE);
         let b = cstr(name);
@@ -794,6 +956,17 @@ impl<'g> Document<'g> {
     }
 
     /// The DOCTYPE, if the document has one.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// assert!(doc.doctype().is_none());
+    /// doc.set_doctype(exi::Doctype { name: "root", public_id: "", system_id: "", text: "" });
+    /// assert_eq!(doc.doctype().unwrap().name, "root");
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn doctype(&self) -> Option<Doctype<'_>> {
         let n = self.doctype_node()?;
         let p = self.p(n);
@@ -817,6 +990,19 @@ impl<'g> Document<'g> {
 
     /// A new element appended to `parent`, with `text` as its content
     /// (`xmlNewTextChild`).
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// let child = doc.new_child(root, "child", Some("hello"))?;
+    /// assert_eq!(doc.parent(child), Some(root));
+    /// assert_eq!(doc.content(child), "hello");
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn new_child(
         &mut self,
         parent: NodeId,
@@ -835,11 +1021,33 @@ impl<'g> Document<'g> {
     // ----- reading the tree -----
 
     /// The document node: the parent of the root element.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// assert_eq!(doc.parent(root), Some(doc.document_node()));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn document_node(&self) -> NodeId {
         NodeId { index: 0, generation: 0 }
     }
 
     /// The root element (`xmlDocGetRootElement`).
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// assert_eq!(doc.root(), Some(root));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn root(&self) -> Option<NodeId> {
         // SAFETY: walking the document's children.
         let mut c = unsafe { (*self.doc_ptr()).children };
@@ -858,6 +1066,19 @@ impl<'g> Document<'g> {
     /// Makes `element` the root, unlinking the old root
     /// (`xmlDocSetRootElement`); returns the old root, which is still
     /// the document's.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// let next = doc.new_element("next")?;
+    /// assert_eq!(doc.set_root(next)?, Some(root));
+    /// assert_eq!(doc.root(), Some(next));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn set_root(&mut self, element: NodeId) -> Result<Option<NodeId>> {
         if self.kind(element) != NodeKind::Element {
             return Err(arg("the root must be an element"));
@@ -875,6 +1096,16 @@ impl<'g> Document<'g> {
         }
     }
 
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let text = doc.new_text("hello");
+    /// assert_eq!(doc.kind(text), exi::dom::NodeKind::Text);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn kind(&self, n: NodeId) -> NodeKind {
         // SAFETY: a live node.
         NodeKind::of(unsafe { (*self.p(n)).r#type })
@@ -883,32 +1114,122 @@ impl<'g> Document<'g> {
     /// The parent: an element, the document node, or (for text in an
     /// attribute) an attribute. `None` for the document node and
     /// unlinked nodes.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// # let a = doc.new_child(root, "a", None)?;
+    /// # let text = doc.new_text(" ");
+    /// # doc.append_child(root, text)?;
+    /// # let b = doc.new_child(root, "b", None)?;
+    /// assert_eq!(doc.parent(a), Some(root));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn parent(&self, n: NodeId) -> Option<NodeId> {
         // SAFETY: a live node.
         self.opt(unsafe { (*self.p(n)).parent })
     }
 
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// # let a = doc.new_child(root, "a", None)?;
+    /// # let text = doc.new_text(" ");
+    /// # doc.append_child(root, text)?;
+    /// # let b = doc.new_child(root, "b", None)?;
+    /// assert_eq!(doc.first_child(root), Some(a));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn first_child(&self, n: NodeId) -> Option<NodeId> {
         // SAFETY: a live node.
         self.opt(unsafe { (*self.p(n)).children })
     }
 
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// # let a = doc.new_child(root, "a", None)?;
+    /// # let text = doc.new_text(" ");
+    /// # doc.append_child(root, text)?;
+    /// # let b = doc.new_child(root, "b", None)?;
+    /// assert_eq!(doc.last_child(root), Some(b));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn last_child(&self, n: NodeId) -> Option<NodeId> {
         // SAFETY: a live node.
         self.opt(unsafe { (*self.p(n)).last })
     }
 
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// # let a = doc.new_child(root, "a", None)?;
+    /// # let text = doc.new_text(" ");
+    /// # doc.append_child(root, text)?;
+    /// # let b = doc.new_child(root, "b", None)?;
+    /// assert_eq!(doc.next_sibling(a), Some(text));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn next_sibling(&self, n: NodeId) -> Option<NodeId> {
         // SAFETY: a live node.
         self.opt(unsafe { (*self.p(n)).next })
     }
 
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// # let a = doc.new_child(root, "a", None)?;
+    /// # let text = doc.new_text(" ");
+    /// # doc.append_child(root, text)?;
+    /// # let b = doc.new_child(root, "b", None)?;
+    /// assert_eq!(doc.prev_sibling(b), Some(text));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn prev_sibling(&self, n: NodeId) -> Option<NodeId> {
         // SAFETY: a live node.
         self.opt(unsafe { (*self.p(n)).prev })
     }
 
     /// The children of `n` in order.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// # let a = doc.new_child(root, "a", None)?;
+    /// # let text = doc.new_text(" ");
+    /// # doc.append_child(root, text)?;
+    /// # let b = doc.new_child(root, "b", None)?;
+    /// assert_eq!(doc.children(root).collect::<Vec<_>>(), [a, text, b]);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn children(&self, n: NodeId) -> Children<'_, 'g> {
         Children { doc: self, next: self.first_child(n) }
     }
@@ -932,32 +1253,118 @@ impl<'g> Document<'g> {
     }
 
     /// `xmlFirstElementChild`.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// # let a = doc.new_child(root, "a", None)?;
+    /// # let text = doc.new_text(" ");
+    /// # doc.append_child(root, text)?;
+    /// # let b = doc.new_child(root, "b", None)?;
+    /// assert_eq!(doc.first_element_child(root), Some(a));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn first_element_child(&self, n: NodeId) -> Option<NodeId> {
         self.element_from(self.first_child(n), true)
     }
 
     /// `xmlLastElementChild`.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// # let a = doc.new_child(root, "a", None)?;
+    /// # let text = doc.new_text(" ");
+    /// # doc.append_child(root, text)?;
+    /// # let b = doc.new_child(root, "b", None)?;
+    /// assert_eq!(doc.last_element_child(root), Some(b));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn last_element_child(&self, n: NodeId) -> Option<NodeId> {
         self.element_from(self.last_child(n), false)
     }
 
     /// `xmlNextElementSibling`.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// # let a = doc.new_child(root, "a", None)?;
+    /// # let text = doc.new_text(" ");
+    /// # doc.append_child(root, text)?;
+    /// # let b = doc.new_child(root, "b", None)?;
+    /// assert_eq!(doc.next_element_sibling(a), Some(b));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn next_element_sibling(&self, n: NodeId) -> Option<NodeId> {
         self.element_from(self.next_sibling(n), true)
     }
 
     /// `xmlPreviousElementSibling`.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// # let a = doc.new_child(root, "a", None)?;
+    /// # let text = doc.new_text(" ");
+    /// # doc.append_child(root, text)?;
+    /// # let b = doc.new_child(root, "b", None)?;
+    /// assert_eq!(doc.prev_element_sibling(b), Some(a));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn prev_element_sibling(&self, n: NodeId) -> Option<NodeId> {
         self.element_from(self.prev_sibling(n), false)
     }
 
     /// `xmlChildElementCount`.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// # let a = doc.new_child(root, "a", None)?;
+    /// # let text = doc.new_text(" ");
+    /// # doc.append_child(root, text)?;
+    /// # let b = doc.new_child(root, "b", None)?;
+    /// assert_eq!(doc.child_element_count(root), 2);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn child_element_count(&self, n: NodeId) -> usize {
         self.children(n).filter(|&c| self.kind(c) == NodeKind::Element).count()
     }
 
     /// The name of an element or attribute, with its prefix and global
     /// ids; `None` for other nodes.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// assert!(doc.name(root).unwrap().is("", "root"));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn name(&self, n: NodeId) -> Option<Name<'_>> {
         let p = self.p(n);
         // SAFETY: a live node; its held strings live as long as
@@ -987,6 +1394,17 @@ impl<'g> Document<'g> {
     /// libxml2's `name` field: the local name of an element or
     /// attribute, the target of a PI, `"text"`, `"comment"`, the
     /// DOCTYPE's name, or the entity's name.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// assert_eq!(doc.node_name(root), "root");
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn node_name(&self, n: NodeId) -> &str {
         // SAFETY: a live node; the name lives as long as `&self`.
         unsafe { str_at((*self.p(n)).name) }
@@ -995,12 +1413,36 @@ impl<'g> Document<'g> {
     /// The name of an element or attribute as global ids: equal for
     /// equal names in every document and stream sharing these string
     /// tables.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// assert_eq!(doc.global_name(root), doc.lookup_name("", "root"));
+    /// assert!(doc.global_name(root).is_some());
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn global_name(&self, n: NodeId) -> Option<GlobalName> {
         self.name(n).and_then(|n| n.global())
     }
 
     /// The global ids of a name, if some node holds it: compare with
     /// [`global_name`](Self::global_name) instead of comparing strings.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// assert!(doc.lookup_name("", "root").is_some());
+    /// assert!(doc.lookup_name("", "unknown").is_none());
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn lookup_name(&self, uri: &str, local: &str) -> Option<GlobalName> {
         let s = self.d().strings;
         Some(GlobalName {
@@ -1011,6 +1453,16 @@ impl<'g> Document<'g> {
 
     /// The value of a text node, typed when it came typed; for an
     /// attribute, its value. `None` for other nodes.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let node = doc.new_value(exi::OwnedValue::Int(7));
+    /// assert!(matches!(doc.value(node), Some(exi::Value::Int(7))));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn value(&self, n: NodeId) -> Option<Value<'_>> {
         let p = self.p(n);
         // SAFETY: a live node; values live as long as `&self`.
@@ -1042,6 +1494,19 @@ impl<'g> Document<'g> {
     /// or an attribute, the text of every text node inside it, in
     /// order; for a text node, its value as text; for a comment or PI,
     /// its data.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// doc.new_child(root, "a", Some("one"))?;
+    /// doc.new_child(root, "b", Some("two"))?;
+    /// assert_eq!(doc.content(root), "onetwo");
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn content(&self, n: NodeId) -> String {
         let mut out = String::new();
         self.content_into(self.p(n), &mut out);
@@ -1084,6 +1549,21 @@ impl<'g> Document<'g> {
 
     /// Whether `n` is a text node of whitespace only
     /// (`xmlIsBlankNode`).
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// # let a = doc.new_child(root, "a", None)?;
+    /// # let text = doc.new_text(" ");
+    /// # doc.append_child(root, text)?;
+    /// # let b = doc.new_child(root, "b", None)?;
+    /// assert!(doc.is_blank(text));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn is_blank(&self, n: NodeId) -> bool {
         self.kind(n) == NodeKind::Text
             && matches!(self.value(n), Some(Value::Str(s)) if s.bytes().all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r')))
@@ -1234,6 +1714,20 @@ impl<'g> Document<'g> {
 
     /// Appends `child` as the last child of `parent`, moving it from
     /// wherever it was (`xmlAddChild`, without merging text).
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// let child = doc.new_element("child")?;
+    /// doc.append_child(root, child)?;
+    /// assert_eq!(doc.parent(child), Some(root));
+    /// assert!(doc.append_child(child, root).is_err());
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn append_child(
         &mut self,
         parent: NodeId,
@@ -1250,6 +1744,22 @@ impl<'g> Document<'g> {
     }
 
     /// Inserts `new` before `sibling` (`xmlAddPrevSibling`).
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// let a = doc.new_element("a")?;
+    /// let b = doc.new_element("b")?;
+    /// doc.append_child(root, a)?;
+    /// doc.append_child(root, b)?;
+    /// doc.insert_before(a, b)?;
+    /// assert_eq!(doc.children(root).collect::<Vec<_>>(), [b, a]);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn insert_before(
         &mut self,
         sibling: NodeId,
@@ -1274,6 +1784,22 @@ impl<'g> Document<'g> {
     }
 
     /// Inserts `new` after `sibling` (`xmlAddNextSibling`).
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// let a = doc.new_element("a")?;
+    /// let b = doc.new_element("b")?;
+    /// doc.append_child(root, a)?;
+    /// doc.append_child(root, b)?;
+    /// doc.insert_after(b, a)?;
+    /// assert_eq!(doc.children(root).collect::<Vec<_>>(), [b, a]);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn insert_after(
         &mut self,
         sibling: NodeId,
@@ -1311,6 +1837,24 @@ impl<'g> Document<'g> {
     /// Takes `n` out of the tree (`xmlUnlinkNode`). It stays the
     /// document's: put it back with `append_child` and the like, or
     /// free it with `remove`.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// let a = doc.new_element("a")?;
+    /// let b = doc.new_element("b")?;
+    /// doc.append_child(root, a)?;
+    /// doc.append_child(root, b)?;
+    /// doc.unlink(a);
+    /// assert_eq!(doc.parent(a), None);
+    /// assert!(doc.contains(a));
+    /// assert_eq!(doc.first_child(root), Some(b));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn unlink(&mut self, n: NodeId) {
         let p = self.p(n);
         if n.index == 0 {
@@ -1515,6 +2059,23 @@ impl<'g> Document<'g> {
     /// Unlinks and frees `n` and everything inside it (`xmlUnlinkNode`
     /// and `xmlFreeNode`). Its id and the ids inside it are no longer
     /// valid.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// let a = doc.new_element("a")?;
+    /// let b = doc.new_element("b")?;
+    /// doc.append_child(root, a)?;
+    /// doc.append_child(root, b)?;
+    /// doc.remove(a);
+    /// assert!(!doc.contains(a));
+    /// assert_eq!(doc.first_child(root), Some(b));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn remove(&mut self, n: NodeId) {
         if n.index == 0 {
             return;
@@ -1570,6 +2131,24 @@ impl<'g> Document<'g> {
 
     /// Puts `new` where `old` is; `old` is unlinked and stays the
     /// document's (`xmlReplaceNode`).
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// let a = doc.new_element("a")?;
+    /// let b = doc.new_element("b")?;
+    /// doc.append_child(root, a)?;
+    /// doc.append_child(root, b)?;
+    /// let new = doc.new_element("c")?;
+    /// doc.replace(a, new)?;
+    /// assert_eq!(doc.children(root).collect::<Vec<_>>(), [new, b]);
+    /// assert_eq!(doc.parent(a), None);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn replace(&mut self, old: NodeId, new: NodeId) -> Result<()> {
         if old == new {
             return Ok(());
@@ -1607,6 +2186,25 @@ impl<'g> Document<'g> {
     /// A copy of `n` in this document, unlinked: with everything inside
     /// it when `deep`, else with its attributes and namespace
     /// declarations only (`xmlCopyNode` with `extended` 1 or 2).
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// let a = doc.new_element("a")?;
+    /// let b = doc.new_element("b")?;
+    /// doc.append_child(root, a)?;
+    /// doc.append_child(root, b)?;
+    /// let deep = doc.copy(root, true)?;
+    /// let shallow = doc.copy(root, false)?;
+    /// assert_eq!(doc.children(deep).count(), 2);
+    /// assert_eq!(doc.children(shallow).count(), 0);
+    /// assert_eq!(doc.parent(deep), None);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn copy(&mut self, n: NodeId, deep: bool) -> Result<NodeId> {
         let p = self.p(n);
         // SAFETY: `p` is a live node of this document; copying reads it
@@ -1618,6 +2216,24 @@ impl<'g> Document<'g> {
     /// A copy of `n` from another document, unlinked in this one
     /// (`xmlDocCopyNode`). Names are interned in this document's string
     /// tables.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// let a = doc.new_element("a")?;
+    /// let b = doc.new_element("b")?;
+    /// doc.append_child(root, a)?;
+    /// doc.append_child(root, b)?;
+    /// let mut other = Document::new(&strings);
+    /// let copy = other.import(&doc, root, true)?;
+    /// assert_eq!(other.children(copy).count(), 2);
+    /// assert_eq!(doc.children(root).count(), 2);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn import(
         &mut self,
         from: &Document<'_>,
@@ -1767,6 +2383,17 @@ impl<'g> Document<'g> {
     }
 
     /// As [`set_content`](Self::set_content), with a typed value.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let node = doc.new_text("old");
+    /// doc.set_content_value(node, exi::OwnedValue::Int(2))?;
+    /// assert!(matches!(doc.value(node), Some(exi::Value::Int(2))));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn set_content_value(
         &mut self,
         n: NodeId,
@@ -1806,6 +2433,17 @@ impl<'g> Document<'g> {
     /// Appends text (`xmlNodeAddContent`): to a text node's text, or to
     /// an element's last child when that is text, else as a new text
     /// node.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let node = doc.new_text("one");
+    /// doc.add_content(node, " two")?;
+    /// assert_eq!(doc.content(node), "one two");
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn add_content(&mut self, n: NodeId, text: &str) -> Result<()> {
         let p = self.p(n);
         match self.kind(n) {
@@ -1892,6 +2530,18 @@ impl<'g> Document<'g> {
     }
 
     /// As [`set_attribute`](Self::set_attribute), with a typed value.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// doc.set_attribute_value(root, "count", exi::OwnedValue::Int(2))?;
+    /// assert_eq!(doc.attribute(root, "count").as_deref(), Some("2"));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn set_attribute_value(
         &mut self,
         element: NodeId,
@@ -1934,6 +2584,19 @@ impl<'g> Document<'g> {
 
     /// An attribute's value as text (`xmlGetNsProp`; a `&str` name is
     /// in no namespace, as `xmlGetNoNsProp`).
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// let attr = doc.set_attribute(root, "mode", "auto")?;
+    /// assert_eq!(doc.attribute(root, "mode").as_deref(), Some("auto"));
+    /// assert_eq!(doc.attribute(root, "missing"), None);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn attribute(
         &self,
         element: NodeId,
@@ -1944,6 +2607,18 @@ impl<'g> Document<'g> {
     }
 
     /// An attribute's value, typed when it came typed.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// doc.set_attribute_value(root, "count", exi::OwnedValue::Int(2))?;
+    /// assert!(matches!(doc.attribute_value(root, "count"), Some(exi::Value::Int(2))));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn attribute_value(
         &self,
         element: NodeId,
@@ -1954,6 +2629,18 @@ impl<'g> Document<'g> {
     }
 
     /// The attribute node (`xmlHasNsProp`).
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// let attr = doc.set_attribute(root, "mode", "auto")?;
+    /// assert_eq!(doc.attribute_node(root, "mode"), Some(attr));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn attribute_node(
         &self,
         element: NodeId,
@@ -1965,6 +2652,20 @@ impl<'g> Document<'g> {
 
     /// Removes an attribute (`xmlUnsetNsProp`); `false` if there was
     /// none.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// let attr = doc.set_attribute(root, "mode", "auto")?;
+    /// assert!(doc.remove_attribute(root, "mode"));
+    /// assert!(!doc.remove_attribute(root, "mode"));
+    /// assert!(!doc.contains(attr));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn remove_attribute(
         &mut self,
         element: NodeId,
@@ -1980,6 +2681,19 @@ impl<'g> Document<'g> {
     }
 
     /// The attribute nodes of an element, in order.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// let attr = doc.set_attribute(root, "mode", "auto")?;
+    /// let other = doc.set_attribute(root, "active", "yes")?;
+    /// assert_eq!(doc.attributes(root).collect::<Vec<_>>(), [attr, other]);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn attributes(&self, element: NodeId) -> Children<'_, 'g> {
         let p = self.p(element);
         // SAFETY: a live node.
@@ -1998,6 +2712,18 @@ impl<'g> Document<'g> {
     /// Declares `prefix` (`None` for the default namespace) for `uri`
     /// on an element (`xmlNewNs`). Declaring a prefix the element
     /// already declares for another URI is `ErrorKind::Arg`.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// doc.declare_ns(root, Some("p"), "urn:demo")?;
+    /// assert!(doc.declare_ns(root, Some("p"), "urn:other").is_err());
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn declare_ns(
         &mut self,
         element: NodeId,
@@ -2163,6 +2889,22 @@ impl<'g> Document<'g> {
     /// The URI `prefix` is bound to at `node` (`xmlSearchNs`); `None`
     /// for the default namespace when there is none. `xml` is always
     /// bound.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// let a = doc.new_element("a")?;
+    /// let b = doc.new_element("b")?;
+    /// doc.append_child(root, a)?;
+    /// doc.append_child(root, b)?;
+    /// doc.declare_ns(root, Some("p"), "urn:demo")?;
+    /// assert_eq!(doc.search_ns(a, Some("p")), Some("urn:demo"));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn search_ns(
         &self,
         node: NodeId,
@@ -2182,6 +2924,22 @@ impl<'g> Document<'g> {
     /// A prefix bound to `uri` at `node` (`xmlSearchNsByHref`):
     /// `Some(None)` for the default namespace, `None` when `uri` is not
     /// in scope.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// let a = doc.new_element("a")?;
+    /// let b = doc.new_element("b")?;
+    /// doc.append_child(root, a)?;
+    /// doc.append_child(root, b)?;
+    /// doc.declare_ns(root, Some("p"), "urn:demo")?;
+    /// assert_eq!(doc.search_ns_by_href(a, "urn:demo"), Some(Some("p")));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn search_ns_by_href(
         &self,
         node: NodeId,
@@ -2199,6 +2957,23 @@ impl<'g> Document<'g> {
 
     /// The namespaces declared on an element: `(prefix, uri)`, `None`
     /// for the default.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// let root = doc.new_element("root")?;
+    /// doc.set_root(root)?;
+    /// let a = doc.new_element("a")?;
+    /// let b = doc.new_element("b")?;
+    /// doc.append_child(root, a)?;
+    /// doc.append_child(root, b)?;
+    /// doc.declare_ns(root, Some("p"), "urn:demo")?;
+    /// assert_eq!(doc.namespaces(root), [(Some("p"), "urn:demo")]);
+    /// assert!(doc.namespaces(a).is_empty());
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn namespaces(&self, element: NodeId) -> Vec<(Option<&str>, &str)> {
         let p = self.p(element);
         let mut out = Vec::new();
@@ -2484,10 +3259,31 @@ impl<'g> Document<'g> {
     }
 
     /// The document's URL (`doc->URL`), when it was read from one.
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// assert_eq!(doc.url(), None);
+    /// doc.set_url("urn:document");
+    /// assert_eq!(doc.url(), Some("urn:document"));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn url(&self) -> Option<&str> {
         self.d().url.as_ref().map(|b| text_of(b))
     }
 
+    ///
+    /// ```
+    /// use exi::dom::Document;
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut doc = Document::new(&strings);
+    /// doc.set_url("urn:document");
+    /// assert_eq!(doc.url(), Some("urn:document"));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn set_url(&mut self, url: &str) {
         let b = cstr(url);
         let d = self.dm();

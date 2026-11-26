@@ -62,18 +62,44 @@ pub struct BitEncoder<S: Sink> {
 }
 
 impl<S: Sink> BitEncoder<S> {
+    ///
+    /// ```
+    /// use exi::coding::bits::BitEncoder;
+    /// assert!(BitEncoder::new(Vec::new()).into_sink().is_empty());
+    /// ```
     pub fn new(sink: S) -> Self {
         BitEncoder { sink, acc: 0, held: 0, total: 0 }
     }
+    ///
+    /// ```
+    /// use exi::coding::bits::BitEncoder;
+    /// let encoder = BitEncoder::new(vec![0xAA]);
+    /// assert_eq!(encoder.sink(), &[0xAA]);
+    /// ```
     pub fn sink(&self) -> &S {
         &self.sink
     }
     /// The sink. Octets written to it directly go after the complete
     /// octets written so far, before any bits still held.
+    ///
+    /// ```
+    /// use exi::coding::bits::BitEncoder;
+    /// let mut encoder = BitEncoder::new(vec![0xAA]);
+    /// encoder.sink_mut().push(0xBB);
+    /// assert_eq!(encoder.into_sink(), [0xAA, 0xBB]);
+    /// ```
     pub fn sink_mut(&mut self) -> &mut S {
         &mut self.sink
     }
     /// Pads to an octet with zeros, flushes, and returns the sink.
+    ///
+    /// ```
+    /// use exi::coding::{Channel, Encoder, bits::BitEncoder};
+    /// let mut encoder = BitEncoder::new(Vec::new());
+    /// encoder.nbit(Channel::Structure, 3, 2)?;
+    /// assert_eq!(encoder.into_sink(), [192]);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn into_sink(self) -> S {
         let mut me = self;
         let _ = me.align();
@@ -165,6 +191,13 @@ pub struct BitDecoder<'a> {
 impl<'a> BitDecoder<'a> {
     /// Starts reading `input` at bit `start_bit` (0 = the most
     /// significant bit of the first octet).
+    ///
+    /// ```
+    /// use exi::coding::{Channel, Decoder, bits::BitDecoder};
+    /// let mut d = BitDecoder::new(&[0xA0], 2);
+    /// assert_eq!(d.nbit(Channel::Structure, 2)?, 2);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn new(input: &'a [u8], start_bit: u64) -> Self {
         BitDecoder { first: input, second: &[], bit: start_bit }
     }

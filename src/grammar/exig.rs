@@ -1326,6 +1326,12 @@ fn global_order(elements: &[(OwnedName, u32, bool)]) -> Vec<u32> {
 // =======================================================================================
 
 /// The EXIG schema's grammars, from the constant tables.
+///
+/// ```
+/// use exi::grammar::exig::exig_grammars;
+/// assert!(exig_grammars()?.is_schema_informed());
+/// # Ok::<(), exi::Error>(())
+/// ```
 pub fn exig_grammars() -> Result<GrammarSet> {
     super::exig_tables::model().build()
 }
@@ -1361,17 +1367,37 @@ impl GrammarSet {
     /// `ErrorKind::Arg` for schema-less grammars, which have nothing to
     /// save, and for xsi:type casts that do not follow one base per
     /// type.
+    ///
+    /// ```
+    /// use exi::grammar::{GrammarSet, exig::exig_grammars};
+    /// let bytes = exig_grammars()?.to_exig()?;
+    /// assert_eq!(GrammarSet::from_exig(&bytes)?.to_exig()?, bytes);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn to_exig(&self) -> Result<Vec<u8>> {
         let d = Doc::from_model(&Model::from_set(self)?)?;
         with_exig(|g| write_doc(g, &d))
     }
 
     /// Reads an `.exig` file and checks it (C.6) under default limits.
+    ///
+    /// ```
+    /// use exi::grammar::GrammarSet;
+    /// assert!(GrammarSet::from_exig(&[]).is_err());
+    /// ```
     pub fn from_exig(exig: &[u8]) -> Result<GrammarSet> {
         Self::from_exig_with(exig, Limits::new())
     }
 
     /// [`from_exig`](Self::from_exig) under `limits`.
+    ///
+    /// ```
+    /// use exi::{Limits, grammar::{GrammarSet, exig::exig_grammars}};
+    /// let bytes = exig_grammars()?.to_exig()?;
+    /// let set = GrammarSet::from_exig_with(&bytes, Limits::new())?;
+    /// assert!(set.is_schema_informed());
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn from_exig_with(exig: &[u8], limits: Limits) -> Result<GrammarSet> {
         let d = with_exig(|g| read_doc(g, exig, limits))?;
         d.to_model()?.build()
@@ -1380,6 +1406,13 @@ impl GrammarSet {
     /// `sha256:` and the 64 lowercase hex digits of the SHA-256 of [`to_exig`](Self::to_exig):
     /// a name for these grammars that is the same in every
     /// implementation of the format.
+    ///
+    /// ```
+    /// use exi::grammar::exig::exig_grammars;
+    /// let digest = exig_grammars()?.digest()?;
+    /// assert_eq!(digest.strip_prefix("sha256:").unwrap().len(), 64);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
     pub fn digest(&self) -> Result<String> {
         use sha2::{Digest, Sha256};
         let bytes = self.to_exig()?;
@@ -1860,7 +1893,11 @@ fn type_of(t: &Node) -> Result<DType> {
     for k in &t.kids {
         match k.name.as_str() {
             "attributes" => {
-                d.attrs = Some((k.get("set").is_some(), k.numbers()?))
+                let set = k.opt("set")?;
+                if set.is_some_and(|n| n != 0) {
+                    return Err(schema_err("an attribute set other than zero"));
+                }
+                d.attrs = Some((set.is_some(), k.numbers()?));
             }
             "anyAttribute" => d.wild.push(k.opt("uri")?),
             "empty" => d.content = DContent::Empty,
@@ -2240,7 +2277,26 @@ pub(crate) fn render_tables(m: &Model) -> String {
 
 #[cfg(all(test, feature = "xsd", feature = "std"))]
 mod tests {
+    use alloc::vec;
+
     use super::*;
+
+    #[test]
+    fn attribute_set_must_be_zero() {
+        let mut ty = Node {
+            kids: vec![Node {
+                name: "attributes".into(),
+                attrs: vec![("set".into(), OwnedValue::Int(1))],
+                ..Node::default()
+            }],
+            ..Node::default()
+        };
+        assert!(type_of(&ty).is_err());
+        ty.kids[0].attrs[0].1 = OwnedValue::Int(0);
+        assert_eq!(type_of(&ty).unwrap().attrs, Some((true, vec![])));
+        ty.kids[0].attrs.clear();
+        assert_eq!(type_of(&ty).unwrap().attrs, Some((false, vec![])));
+    }
 
     /// The committed tables are the EXIG schema compiled by this crate.
     /// With EXIG_REGEN=1 the file is written instead.

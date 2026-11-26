@@ -110,6 +110,12 @@ pub struct Error {
 
 impl Error {
     /// A new error at position zero.
+    ///
+    /// ```
+    /// use exi::{Error, ErrorKind, Position};
+    /// let error = Error::new(ErrorKind::Limit, "max_depth");
+    /// assert_eq!(error.position(), Position::default());
+    /// ```
     pub const fn new(kind: ErrorKind, detail: &'static str) -> Self {
         Error {
             kind,
@@ -124,19 +130,48 @@ impl Error {
         }
     }
     /// The same error at `p`.
+    ///
+    /// ```
+    /// use exi::{Error, ErrorKind, Position};
+    /// let error = Error::new(ErrorKind::Value, "invalid character");
+    /// let pos = Position { byte: 2, ..Position::default() };
+    /// assert_eq!(error.at(pos).position(), pos);
+    /// ```
     pub const fn at(self, p: Position) -> Self {
         Error { position: p, ..self }
     }
+    ///
+    /// ```
+    /// use exi::{Error, ErrorKind, Position};
+    /// assert_eq!(Error::new(ErrorKind::Limit, "max_depth").kind(), ErrorKind::Limit);
+    /// ```
     pub const fn kind(&self) -> ErrorKind {
         self.kind
     }
+    ///
+    /// ```
+    /// use exi::{Error, ErrorKind, Position};
+    /// let pos = Position { event: 9, ..Position::default() };
+    /// assert_eq!(Error::new(ErrorKind::Grammar, "bad code").at(pos).position().event, 9);
+    /// ```
     pub const fn position(&self) -> Position {
         self.position
     }
+    ///
+    /// ```
+    /// use exi::{Error, ErrorKind, Position};
+    /// assert_eq!(Error::new(ErrorKind::Value, "invalid character").detail(), "invalid character");
+    /// ```
     pub const fn detail(&self) -> &'static str {
         self.detail
     }
     /// False only for `ErrorKind::Unencodable` (D23).
+    ///
+    /// ```
+    /// use exi::{Error, ErrorKind, Position};
+    /// assert!(!Error::new(ErrorKind::Unencodable, "undeclared attribute").is_fatal());
+    /// assert!(Error::new(ErrorKind::Grammar, "bad code").is_fatal());
+    /// ```
     pub const fn is_fatal(&self) -> bool {
         !matches!(self.kind, ErrorKind::Unencodable)
     }

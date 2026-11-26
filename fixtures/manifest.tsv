@@ -266,3 +266,4 @@ canon-utc-off	bit,canonical,strict	canon-utc.xml	canon-utc.xsd
 types-strict-lexical	bit,strict,lexical	types.xml	types.xsd
 types-strict-lexical-byte	byte,strict,lexical,options	types.xml	types.xsd
 nil-strict-lexical	bit,strict,lexical	nil.xml	nil.xsd
+# Strict lexical xsi:type differs from EXIficient (see LLM.md).

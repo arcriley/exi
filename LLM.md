@@ -126,7 +126,8 @@ of EXIficient bugs are noted in the manifest.
 
 `tests/w3c.rs` runs the interoperability cases of the W3C EXI test suite against the
 encodings EXIficient made of them in 2013. `fixtures/fetch-w3c.sh` puts both in
-`fixtures/w3c` (git-ignored, 21 MB); without them the test is skipped. Each encoding's
+`fixtures/w3c` (git-ignored, 21 MB); without them the test is skipped. Set `EXI_REQUIRE_W3C=1` to fail when
+fixtures are missing. Each encoding's
 options come from its file name. The test decodes EXIficient's encoding, encodes the
 input with the same options, and expects the same events from both. It compares events
 after allowing for quirks of the 2013 run, which the test's `normalize` documents.
@@ -205,7 +206,11 @@ Findings so far (synthetic XMPP data):
   - `selfContained` in schema-informed streams that are not strict;
   - `datatypeRepresentationMap` and user meta-data in the options document.
 - The `whiteSpace` facet of schema types is not applied (noted in `src/canonical.rs`).
-- Lexical `xsi:type` values under strict are untested against EXIficient.
+- Strict lexical `xsi:type` differs from EXIficient 1.0.7. A small
+  reproduction using `fixtures/input/complex.xsd` and `byte,strict,lexical`
+  is `<shape xmlns="urn:c" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="Derived" kind="mid"><name>one</name><extra>9</extra></shape>`.
+  EXIficient emits the lexical string `Derived`, while libexi emits
+  a QName and cannot decode the reference stream.
 - The generator for `schemas/xhtml5-1.xsd` (`gen_xhtml5.py`) lives outside the repo.
   Add it, or record how the schema is maintained.
 - No CI yet. The blueprint plans `cargo hack --each-feature`, `no_std` builds for

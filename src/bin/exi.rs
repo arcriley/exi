@@ -14,8 +14,10 @@
 //! crate feature this build does not have fails with a message naming
 //! the feature to build with.
 //!
-//!     cargo build --release --features infer        # everything: xml,
-//! xsd, infer     exi help
+//! ```text
+//! cargo build --release --features infer    # everything: xml, xsd, infer
+//! exi help
+//! ```
 
 use std::io::{BufWriter, Read, Write};
 use std::process::ExitCode;
@@ -44,13 +46,16 @@ usage:
                                                  learn a schema from examples (feature infer)
   exi exig IN.exig [-o OUT.xml]                  an .exig file as XML text
   exi xhtml PAGE.html [-o OUT.xhtml]             an HTML page as XHTML      (feature html5ever)
-  exi xhtml5 report|suggest PAGE.html ...        what pages need that the XHTML5
-                                                 schema lacks               (feature xhtml5)
+  exi xhtml5 report|suggest [--top N] PAGE.html ... [-o OUT]
+                                                 what pages need that the XHTML5 schema
+                                                 lacks, the N most common (default 40)
+                                                                            (feature xhtml5)
   exi digest SCHEMA ...                          the sha256: name of a schema's grammars
   exi features                                   what this build can do
   exi help | --version
 
 IN and OUT default to standard input and output; `-` names them too.
+Options that take a value also take it as `--name=value`.
 
 encode and decode options:
   -s, --schema FILE    an .exig file, or .xsd files (the first is the main one; the
@@ -67,7 +72,10 @@ encode and decode options:
   -c, --coding NAME    byte (default), bit, pre or compression: byte-aligned,
                        bit-packed, pre-compression (values grouped by name, ready
                        for an outside compressor) or compression (pre-compression
-                       and DEFLATE). For decode, only for headers without options.
+                       and DEFLATE).
+
+decode uses -c, -p, --block and --non-strict only for headers without options,
+and says so when the header has them.
       --block N        pre and compression: values per block (default 1000000).
       --level N        compression: the DEFLATE level, 0 to 9 (default 6).
       --canonical      encode: Canonical EXI (EXI C14N): one stream for given events,
@@ -75,8 +83,10 @@ encode and decode options:
       --utc-time       encode, with --canonical: date-times in UTC.
       --html           encode: the input is HTML text, parsed as browsers do.
                        decode: write HTML text.                    (feature html5ever)
-      --xhtml5         with the XHTML5 profile's schema and options (bare headers;
-                       a header that names the profile needs no flag). (feature xhtml5)
+      --xhtml5         with the XHTML5 profile's schema and options. encode: the
+                       header names the profile, unless --bare. decode: for bare
+                       headers; a header that names the profile needs no flag.
+                                                                   (feature xhtml5)
 
 The default body is byte-aligned: ready for zstd, xz or gzip, which do better on it
 than on bit-packed EXI or on the XML text. `-c pre` groups values by name first, which
@@ -101,8 +111,7 @@ fn main() -> ExitCode {
 
 fn run(args: &[String]) -> Res<()> {
     let Some(cmd) = args.first() else {
-        eprint!("{USAGE}");
-        return Err("no command given".into());
+        return Err(format!("no command given\n\n{USAGE}").into());
     };
     let a = Args::parse(&args[1..])?;
     match cmd.as_str() {
@@ -161,13 +170,20 @@ impl Args {
     fn parse(args: &[String]) -> Res<Args> {
         let mut a = Args::default();
         let mut it = args.iter();
-        while let Some(x) = it.next() {
-            let mut value = |name: &str| {
-                it.next()
-                    .cloned()
-                    .ok_or_else(|| format!("{name} needs a value"))
+        while let Some(arg) = it.next() {
+            // `--name=value` is `--name value`.
+            let (x, mut inline) = match arg.split_once('=') {
+                Some((k, v)) if k.starts_with("--") => (k, Some(v.to_owned())),
+                _ => (arg.as_str(), None),
             };
-            match x.as_str() {
+            let mut value = |name: &str| match inline.take() {
+                Some(v) => Ok(v),
+                None => it
+                    .next()
+                    .cloned()
+                    .ok_or_else(|| format!("{name} needs a value")),
+            };
+            match x {
                 "-o" | "--output" => a.out = Some(value(x)?),
                 "-d" | "--dir" => a.dir = Some(value(x)?),
                 "-s" | "--schema" => a.schemas.push(value(x)?),
@@ -208,14 +224,17 @@ impl Args {
                             .map_err(|_| "--max-enum needs a number")?,
                     )
                 }
-                "-" => a.files.push(x.clone()),
+                "-" => a.files.push(arg.clone()),
                 s if s.starts_with('-') => {
                     return Err(format!(
                         "unknown option `{s}` (try `exi help`)"
                     )
                     .into());
                 }
-                _ => a.files.push(x.clone()),
+                _ => a.files.push(arg.clone()),
+            }
+            if inline.is_some() {
+                return Err(format!("{x} takes no value").into());
             }
         }
         Ok(a)
@@ -283,6 +302,19 @@ impl Args {
             b = b.block_size(n);
         }
         Ok(b.build()?)
+    }
+    /// The flags given that only describe a header without options.
+    fn header_flags(&self) -> Vec<&'static str> {
+        [
+            (self.coding.is_some(), "--coding"),
+            (self.preserve != Preserve::empty(), "--preserve"),
+            (self.block.is_some(), "--block"),
+            (self.non_strict, "--non-strict"),
+            (self.bare, "--bare"),
+        ]
+        .into_iter()
+        .filter_map(|(given, flag)| given.then_some(flag))
+        .collect()
     }
     fn writer_config<'g>(
         &self,
@@ -457,7 +489,15 @@ fn decode(a: &Args) -> Res<()> {
     let strings = GlobalStrings::new(GlobalConfig::new())?;
     let g = set.attach(&strings)?;
     let mut cfg = ReaderConfig::new(&g);
-    if header.options.is_none() {
+    if header.options.is_some() {
+        let ignored = a.header_flags();
+        if !ignored.is_empty() {
+            eprintln!(
+                "exi: the stream's header has its options; ignoring {}",
+                ignored.join(", ")
+            );
+        }
+    } else {
         cfg = cfg.options(match profile {
             Some(v) => a.recoded(profile_options(v)?)?,
             None => assumed(a, !a.schemas.is_empty())?,
@@ -934,7 +974,12 @@ fn xhtml5(a: &Args) -> Res<()> {
     }
     let mut all = Deviations::default();
     for p in pages {
-        let b = std::fs::read(p).map_err(|e| format!("{p}: {e}"))?;
+        let mut b = Vec::new();
+        if p == "-" {
+            std::io::stdin().lock().read_to_end(&mut b)?;
+        } else {
+            b = std::fs::read(p).map_err(|e| format!("{p}: {e}"))?;
+        }
         all.merge(
             &exi::html::profile::report(
                 &String::from_utf8_lossy(&b),
@@ -945,17 +990,19 @@ fn xhtml5(a: &Args) -> Res<()> {
     }
     let local = |c: &str| c.rsplit('}').next().unwrap_or(c).to_string();
     let top = a.top.unwrap_or(40);
+    let mut out = a.output()?;
     match cmd.as_str() {
         "report" => {
-            println!("{:>8}  {:14} {:24} name", "count", "kind", "in element");
+            writeln!(out, "{:>8}  {:14} {:24} name", "count", "kind", "in element")?;
             for (k, el, name, n) in all.iter().take(top) {
-                println!(
+                writeln!(
+                out,
                     "{n:>8}  {:14} {:24} {name}",
                     format!("{k:?}"),
                     local(el)
-                );
+                )?;
             }
-            println!("{} in all, {} pages", all.total(), pages.len());
+            writeln!(out, "{} in all, {} pages", all.total(), pages.len())?;
         }
         "suggest" => {
             // Names the next version could declare: elements in the
@@ -986,13 +1033,15 @@ fn xhtml5(a: &Args) -> Res<()> {
             }
             let mut e: Vec<_> = elements.into_iter().collect();
             e.sort_by_key(|x| std::cmp::Reverse(x.1));
-            println!(
+            writeln!(
+                out,
                 "<!-- elements to declare (count): add a global element and a ref in the Flow choice -->"
-            );
+            )?;
             for (name, n) in e.iter().take(top) {
-                println!(
+                writeln!(
+                out,
                     "<xs:element name=\"{name}\" type=\"Flow\"/>  <!-- {n} -->"
-                );
+                )?;
             }
             let mut by_attr: std::collections::BTreeMap<
                 String,
@@ -1005,14 +1054,16 @@ fn xhtml5(a: &Args) -> Res<()> {
             }
             let mut v: Vec<_> = by_attr.into_iter().collect();
             v.sort_by_key(|x| std::cmp::Reverse(x.1.0));
-            println!(
+            writeln!(
+                out,
                 "<!-- attributes to declare (count; elements): on the element's type, or in the global group when on many -->"
-            );
+            )?;
             for (name, (n, els)) in v.iter().take(top) {
-                println!(
+                writeln!(
+                out,
                     "<xs:attribute name=\"{name}\" type=\"xs:string\"/>  <!-- {n}; {} -->",
                     els.join(" ")
-                );
+                )?;
             }
         }
         _ => {
@@ -1022,6 +1073,7 @@ fn xhtml5(a: &Args) -> Res<()> {
             .into());
         }
     }
+    out.flush()?;
     Ok(())
 }
 

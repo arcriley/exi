@@ -155,6 +155,12 @@ fn xhtml5_report_and_suggest() {
         suggest.contains(r#"<xs:attribute name="start""#),
         "{suggest}"
     );
+    // A page on standard input, the report to a file.
+    let page = std::fs::read(p).unwrap();
+    let out = dir.join("report.txt");
+    let out = out.to_str().unwrap();
+    assert!(ok(&["xhtml5", "report", "-", "-o", out], &page).is_empty());
+    assert_eq!(std::fs::read_to_string(out).unwrap(), report);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

@@ -56,6 +56,25 @@ fn schemaless_round_trip_through_pipes() {
 }
 
 #[test]
+fn options_take_name_equals_value() {
+    let svg = std::fs::read(SVG).unwrap();
+    let spaced = ok(&["encode", "--coding", "bit", "-p", "comments"], &svg);
+    assert_eq!(ok(&["encode", "--coding=bit", "--preserve=comments"], &svg), spaced);
+}
+
+/// decode says which flags a header with options makes pointless.
+#[test]
+fn decode_names_the_flags_the_header_overrides() {
+    let svg = std::fs::read(SVG).unwrap();
+    let exi = ok(&["encode"], &svg);
+    let o = run(&["decode", "-c", "bit", "--block", "10"], &exi);
+    assert!(o.status.success());
+    let warning = String::from_utf8(o.stderr).unwrap();
+    assert!(warning.contains("ignoring --coding, --block"), "{warning}");
+    assert!(run(&["decode"], &exi).stderr.is_empty());
+}
+
+#[test]
 fn bare_headers_need_the_same_options() {
     let svg = std::fs::read(SVG).unwrap();
     let exi = ok(&["encode", "--bare"], &svg);
@@ -108,6 +127,9 @@ fn usage_errors() {
     assert!(err(&["encode", "--nope"], b"").contains("unknown option"));
     assert!(err(&["encode", "-p", "colour"], b"").contains("unknown --preserve item"));
     assert!(err(&["decode"], b"<a/>").contains("not an EXI stream"));
+    assert!(err(&[], b"").starts_with("exi: no command given\n\nexi: "));
+    assert!(err(&["encode", "--bare=yes"], b"").contains("--bare takes no value"));
+    assert!(err(&["encode", "--coding="], b"").contains("unknown --coding ``"));
     assert!(
         err(&["infer", "fixtures/input/infer/feed.xml"], b"").contains("give a directory with -d")
     );

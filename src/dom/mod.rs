@@ -83,7 +83,7 @@ use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::ptr::{self, NonNull};
 
-use crate::strings::GlobalStrings;
+use crate::strings::{GlobalStrings, Held, Local, Uri};
 use crate::{
     AsName, Doctype, Error, ErrorKind, GlobalName, Name, OwnedValue, Result,
     Value,
@@ -92,6 +92,16 @@ use raw::*;
 
 const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 const XMLNS_NS: &str = "http://www.w3.org/2000/xmlns/";
+
+fn check_attribute_name(name: Name<'_>) -> Result<()> {
+    if name.uri() == XMLNS_NS
+        || name.prefix() == Some("xmlns")
+        || name.is("", "xmlns")
+    {
+        return Err(arg("namespace declarations are made with declare_ns"));
+    }
+    Ok(())
+}
 
 /// A node of a [`Document`]: a slot number and a generation, so an id
 /// kept after its node is freed is recognized instead of reaching
@@ -517,6 +527,18 @@ impl<'g> Document<'g> {
         let s = self.d().strings;
         let uri = s.uris().intern(name.uri())?;
         let local = s.locals().intern(name.local_name())?;
+        // SAFETY: the caller supplies a live element or attribute.
+        unsafe { Self::install_name(p, uri, local) };
+        Ok(())
+    }
+
+    /// Installs the already interned name of a live element or
+    /// attribute.
+    unsafe fn install_name(
+        p: *mut RawCommon,
+        uri: Held<'g, Uri>,
+        local: Held<'g, Local>,
+    ) {
         // SAFETY: `p` is a live element or attribute of this document.
         // The name pointer points into the table, alive while `local`
         // is held, which the node keeps.
@@ -537,7 +559,6 @@ impl<'g> Document<'g> {
             x.uri = Some(uri);
             x.local = Some(local);
         }
-        Ok(())
     }
 
     /// Remembers the prefix wanted for an element's or attribute's
@@ -569,11 +590,7 @@ impl<'g> Document<'g> {
         value: &str,
     ) -> Result<NodeId> {
         let name = name.as_name();
-        if name.uri() == XMLNS_NS {
-            return Err(arg(
-                "namespace declarations are made with declare_ns",
-            ));
-        }
+        check_attribute_name(name)?;
         let a = self.alloc_attr();
         self.set_name(a, name)?;
         self.want_prefix(a, name.prefix());
@@ -616,6 +633,13 @@ impl<'g> Document<'g> {
                 return Err(arg(
                     "attach_attribute takes an element and an attribute",
                 ));
+            }
+            if let Some(name) = self.name(attr) {
+                let prefix = extra(a).name_buf.as_deref().map(text_of);
+                check_attribute_name(match prefix {
+                    Some(prefix) => name.with_prefix(prefix),
+                    None => name,
+                })?;
             }
             if (*a).parent == el as *mut RawNode {
                 return Ok(());
@@ -666,6 +690,7 @@ impl<'g> Document<'g> {
                 self.fix_ns_tree(p as *mut RawNode, mode)
             }
             EXI_ATTRIBUTE_NODE => {
+                check_attribute_name(name)?;
                 self.set_name(p, name)?;
                 self.want_prefix(p, name.prefix());
                 let mode = self.mode_at(p);
@@ -1934,7 +1959,7 @@ impl<'g> Document<'g> {
     /// `xmlAddChild` does it for nodes of another document). Ids in
     /// `from` for the moved nodes are no longer valid; the nodes' C
     /// pointers stay the same. With different string tables the names
-    /// are interned again.
+    /// are interned again. An interning error leaves the source tree intact.
     ///
     /// ```
     /// # #[cfg(feature = "xml")] {
@@ -1965,95 +1990,114 @@ impl<'g> Document<'g> {
         if ptr::eq(self.doc_ptr(), from.doc_ptr()) {
             return Ok(n);
         }
-        from.unlink(n);
-        let same = ptr::eq(self.d().strings, from.d().strings);
-        let from_xml = from.doc_ptr();
-        // SAFETY: an unlinked subtree of `from`, moved box by box: each
-        // leaves `from`'s slots and enters ours, so exactly one
-        // document frees it.
+        let strings = self.d().strings;
+        let same = ptr::eq(strings, from.d().strings);
+        let from_doc = from.doc_ptr();
+        let mut todo = alloc::vec![p];
+        let mut nodes = Vec::new();
+        let mut namespaces = Vec::new();
+        let mut uses_xml = false;
+        // SAFETY: all pointers are in the source tree. Stage fallible
+        // operations while the source still owns every node.
         unsafe {
-            if (*p).r#type == EXI_DTD_NODE
-                && (*from_xml).intSubset == p as *mut RawDtd
-            {
-                (*from_xml).intSubset = ptr::null_mut();
+            while let Some(node) = todo.pop() {
+                let kind = (*node).r#type;
+                let ns_field = match kind {
+                    EXI_ELEMENT_NODE => {
+                        ptr::addr_of_mut!((*node.cast::<RawNode>()).ns)
+                    }
+                    EXI_ATTRIBUTE_NODE => {
+                        ptr::addr_of_mut!((*node.cast::<RawAttr>()).ns)
+                    }
+                    _ => ptr::null_mut(),
+                };
+                let implicit_xml = !ns_field.is_null()
+                    && !(*ns_field).is_null()
+                    && *ns_field == (*from_doc).oldNs;
+                uses_xml |= implicit_xml;
+                let name = if !same && !ns_field.is_null() {
+                    let x = extra(node);
+                    let uri = strings
+                        .uris()
+                        .intern(x.uri.as_ref().map_or("", Held::as_str))?;
+                    let local = strings
+                        .locals()
+                        .intern(x.local.as_ref().map_or("", Held::as_str))?;
+                    Some((uri, local))
+                } else {
+                    None
+                };
+                nodes.push((node, name, implicit_xml.then_some(ns_field)));
+                let mut child = (*node).children;
+                while !child.is_null() {
+                    todo.push(child.cast());
+                    child = (*child).next;
+                }
+                if kind == EXI_ELEMENT_NODE {
+                    let el = node.cast::<RawNode>();
+                    let mut attr = (*el).properties;
+                    while !attr.is_null() {
+                        todo.push(attr.cast());
+                        attr = (*attr).next;
+                    }
+                    let mut ns = (*el).nsDef;
+                    while !ns.is_null() {
+                        let names = if same {
+                            None
+                        } else {
+                            let b = &*ns.cast::<NsBox<'_>>();
+                            let uri = strings.uris().intern(b.uri.as_str())?;
+                            let prefix = b
+                                .prefix
+                                .as_ref()
+                                .map(|h| strings.prefixes().intern(h.as_str()))
+                                .transpose()?;
+                            Some((uri, prefix))
+                        };
+                        namespaces.push((ns, names));
+                        ns = (*ns).next;
+                    }
+                }
             }
-            self.adopt_raw(from, p, same)?;
+            let xml = if uses_xml { self.xml_ns()? } else { ptr::null_mut() };
+            from.unlink(n);
+            if (*p).r#type == EXI_DTD_NODE && (*from_doc).intSubset == p.cast()
+            {
+                (*from_doc).intSubset = ptr::null_mut();
+            }
+            for (node, name, xml_field) in nodes {
+                let slot = extra(node).slot as usize;
+                let source = from.dm();
+                source.slots[slot].ptr = ptr::null_mut();
+                source.slots[slot].generation =
+                    source.slots[slot].generation.wrapping_add(1);
+                source.free.push(slot as u32);
+                let mine = self.reserve_slot();
+                self.dm().slots[mine as usize].ptr = node;
+                extra_mut(node).slot = mine;
+                (*node).doc = self.doc_ptr();
+                if let Some((uri, local)) = name {
+                    Self::install_name(node, uri, local);
+                }
+                if let Some(field) = xml_field {
+                    *field = xml;
+                }
+            }
+            for (ns, names) in namespaces {
+                let b = &mut *ns.cast::<NsBox<'g>>();
+                b.raw.context = self.doc_ptr();
+                if let Some((uri, prefix)) = names {
+                    b.raw.href = uri.as_str().as_ptr();
+                    b.raw.uriId = uri.id().index();
+                    b.raw.prefix = prefix
+                        .as_ref()
+                        .map_or(ptr::null(), |h| h.as_str().as_ptr());
+                    b.uri = uri;
+                    b.prefix = prefix;
+                }
+            }
         }
         Ok(self.id(p))
-    }
-
-    /// # Safety
-    ///
-    /// `p` is a live node of `from`, in an unlinked subtree being
-    /// adopted.
-    unsafe fn adopt_raw(
-        &mut self,
-        from: &mut Document<'_>,
-        p: *mut RawCommon,
-        same: bool,
-    ) -> Result<()> {
-        // SAFETY: the caller's contract.
-        unsafe {
-            let slot = extra(p).slot as usize;
-            {
-                let f = from.dm();
-                f.slots[slot].ptr = ptr::null_mut();
-                f.slots[slot].generation =
-                    f.slots[slot].generation.wrapping_add(1);
-                f.free.push(slot as u32);
-            }
-            let mine = self.reserve_slot();
-            self.dm().slots[mine as usize].ptr = p;
-            extra_mut(p).slot = mine;
-            (*p).doc = self.doc_ptr();
-            let t = (*p).r#type;
-            if !same && matches!(t, EXI_ELEMENT_NODE | EXI_ATTRIBUTE_NODE) {
-                let x = extra(p);
-                let uri: String =
-                    x.uri.as_ref().map_or("", |h| h.as_str()).into();
-                let local: String =
-                    x.local.as_ref().map_or("", |h| h.as_str()).into();
-                self.set_name(p, Name::new(&uri, &local))?;
-            }
-            if t == EXI_ELEMENT_NODE {
-                let el = p as *mut RawNode;
-                let mut ns = (*el).nsDef;
-                while !ns.is_null() {
-                    (*ns).context = self.doc_ptr();
-                    if !same {
-                        let b = &mut *(ns as *mut NsBox<'g>);
-                        let s = self.d().strings;
-                        let uri: String = b.uri.as_str().into();
-                        b.uri = s.uris().intern(&uri)?;
-                        b.raw.href = b.uri.as_str().as_ptr();
-                        b.raw.uriId = b.uri.id().index();
-                        if let Some(pre) = b.prefix.as_ref().map(|h| {
-                            alloc::string::ToString::to_string(h.as_str())
-                        }) {
-                            let h = s.prefixes().intern(&pre)?;
-                            b.raw.prefix = h.as_str().as_ptr();
-                            b.prefix = Some(h);
-                        }
-                    }
-                    ns = (*ns).next;
-                }
-                let mut a = (*el).properties;
-                while !a.is_null() {
-                    if !(*a).ns.is_null() && (*a).ns == (*from.doc_ptr()).oldNs
-                    {
-                        (*a).ns = self.xml_ns()?;
-                    }
-                    self.adopt_raw(from, a as *mut RawCommon, same)?;
-                    a = (*a).next;
-                }
-            }
-            let mut c = (*p).children;
-            while !c.is_null() {
-                self.adopt_raw(from, c as *mut RawCommon, same)?;
-                c = (*c).next;
-            }
-        }
-        Ok(())
     }
 
     /// Unlinks and frees `n` and everything inside it (`xmlUnlinkNode`
@@ -2095,37 +2139,46 @@ impl<'g> Document<'g> {
     ///
     /// `p` is a live, unlinked node of this document.
     pub(crate) unsafe fn free_raw(&mut self, p: *mut RawCommon) {
-        // SAFETY: the caller's contract; children are this document's
-        // too.
+        // SAFETY: all descendants are live and belong to this document.
+        // Unlink each non-root leaf before freeing it, then resume at
+        // the live parent. The caller already unlinked the root.
         unsafe {
-            let mut c = (*p).children;
-            while !c.is_null() {
-                let next = (*c).next;
-                self.free_raw(c as *mut RawCommon);
-                c = next;
-            }
-            if (*p).r#type == EXI_ELEMENT_NODE {
-                let el = p as *mut RawNode;
-                let mut a = (*el).properties;
-                while !a.is_null() {
-                    let next = (*a).next;
-                    self.free_raw(a as *mut RawCommon);
-                    a = next;
+            let mut node = p;
+            loop {
+                if !(*node).children.is_null() {
+                    node = (*node).children.cast();
+                    continue;
                 }
-                free_ns_list((*el).nsDef);
+                if (*node).r#type == EXI_ELEMENT_NODE {
+                    let el = node.cast::<RawNode>();
+                    if !(*el).properties.is_null() {
+                        node = (*el).properties.cast();
+                        continue;
+                    }
+                    free_ns_list((*el).nsDef);
+                }
+                if (*node).r#type == EXI_DTD_NODE
+                    && (*self.doc_ptr()).intSubset == node.cast()
+                {
+                    (*self.doc_ptr()).intSubset = ptr::null_mut();
+                }
+                let done = node == p;
+                let parent = (*node).parent.cast::<RawCommon>();
+                if !done {
+                    unlink_raw(node);
+                }
+                let slot = extra(node).slot as usize;
+                let d = self.dm();
+                d.slots[slot].ptr = ptr::null_mut();
+                d.slots[slot].generation =
+                    d.slots[slot].generation.wrapping_add(1);
+                d.free.push(slot as u32);
+                drop_box(node);
+                if done {
+                    break;
+                }
+                node = parent;
             }
-            if (*p).r#type == EXI_DTD_NODE
-                && (*self.doc_ptr()).intSubset == p as *mut RawDtd
-            {
-                (*self.doc_ptr()).intSubset = ptr::null_mut();
-            }
-            let slot = extra(p).slot as usize;
-            let d = self.dm();
-            d.slots[slot].ptr = ptr::null_mut();
-            d.slots[slot].generation =
-                d.slots[slot].generation.wrapping_add(1);
-            d.free.push(slot as u32);
-            drop_box(p);
         }
     }
 
@@ -2554,11 +2607,7 @@ impl<'g> Document<'g> {
         if unsafe { (*el).r#type } != EXI_ELEMENT_NODE {
             return Err(arg("attributes go on elements"));
         }
-        if name.uri() == XMLNS_NS {
-            return Err(arg(
-                "namespace declarations are made with declare_ns",
-            ));
-        }
+        check_attribute_name(name)?;
         let existing = self.find_attr(el, name);
         if !existing.is_null() {
             let id = self.id(existing as *mut RawCommon);
@@ -3219,20 +3268,16 @@ impl<'g> Document<'g> {
     /// `fix_ns` for an element, its attributes and every element inside
     /// it.
     fn fix_ns_tree(&mut self, el: *mut RawNode, mode: Declare) -> Result<()> {
-        self.fix_ns(el, mode)?;
-        // SAFETY: walking a live subtree.
+        // SAFETY: the subtree stays live and namespace repair edits
+        // declarations and bindings without changing the tree links.
         unsafe {
-            let mut a = (*el).properties;
-            while !a.is_null() {
-                self.fix_attr_ns(a, mode)?;
-                a = (*a).next;
-            }
-            let mut c = (*el).children;
-            while !c.is_null() {
-                if (*c).r#type == EXI_ELEMENT_NODE {
-                    self.fix_ns_tree(c, mode)?;
+            for element in subtree_elements(el) {
+                self.fix_ns(element, mode)?;
+                let mut attr = (*element).properties;
+                while !attr.is_null() {
+                    self.fix_attr_ns(attr, mode)?;
+                    attr = (*attr).next;
                 }
-                c = (*c).next;
             }
         }
         Ok(())
@@ -3317,19 +3362,41 @@ impl Iterator for Children<'_, '_> {
 unsafe fn collect_ns(el: *mut RawNode, out: &mut Vec<*mut RawNs>) {
     // SAFETY: the caller's contract.
     unsafe {
-        let mut ns = (*el).nsDef;
-        while !ns.is_null() {
-            out.push(ns);
-            ns = (*ns).next;
-        }
-        let mut c = (*el).children;
-        while !c.is_null() {
-            if (*c).r#type == EXI_ELEMENT_NODE {
-                collect_ns(c, out);
+        for element in subtree_elements(el) {
+            let mut ns = (*element).nsDef;
+            while !ns.is_null() {
+                out.push(ns);
+                ns = (*ns).next;
             }
-            c = (*c).next;
         }
     }
+}
+
+/// Elements in preorder. The subtree must stay live with unchanged
+/// links while the iterator is in use.
+unsafe fn subtree_elements(
+    root: *mut RawNode,
+) -> impl Iterator<Item = *mut RawNode> {
+    let mut next = Some(root);
+    core::iter::from_fn(move || {
+        let element = next.take()?;
+        // SAFETY: the caller keeps the subtree and links alive.
+        unsafe {
+            let first_element = |mut node: *mut RawNode| {
+                while !node.is_null() && (*node).r#type != EXI_ELEMENT_NODE {
+                    node = (*node).next;
+                }
+                (!node.is_null()).then_some(node)
+            };
+            next = first_element((*element).children);
+            let mut at = element;
+            while next.is_none() && at != root {
+                next = first_element((*at).next);
+                at = (*at).parent;
+            }
+        }
+        Some(element)
+    })
 }
 
 /// Takes `p` out of its parent's list.
@@ -3459,5 +3526,45 @@ pub(crate) unsafe fn append_attr_raw(el: *mut RawNode, a: *mut RawAttr) {
             (*a).prev = last;
         }
         (*a).parent = el;
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+    use crate::strings::GlobalConfig;
+
+    #[test]
+    fn deep_namespace_repair_and_removal_on_a_small_stack() {
+        std::thread::Builder::new()
+            .stack_size(96 * 1024)
+            .spawn(|| {
+                let strings = GlobalStrings::new(GlobalConfig::new()).unwrap();
+                let mut doc = Document::new(&strings);
+                let root = doc.new_element("root").unwrap();
+                let mut parent = root;
+                for _ in 0..4096 {
+                    let child = doc.new_element("child").unwrap();
+                    // SAFETY: link live nodes directly to construct a
+                    // deep fixture without repairing the tree at every
+                    // insertion.
+                    unsafe { append_raw(doc.p(parent), doc.p(child)) };
+                    parent = child;
+                }
+                let attr = doc.set_attribute(parent, "label", "leaf").unwrap();
+                doc.set_root(root).unwrap();
+                assert_eq!(
+                    doc.attribute(parent, "label").as_deref(),
+                    Some("leaf")
+                );
+                doc.remove(root);
+                assert!(doc.root().is_none());
+                assert!(!doc.contains(root));
+                assert!(!doc.contains(parent));
+                assert!(!doc.contains(attr));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

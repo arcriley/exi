@@ -453,6 +453,9 @@ const _: () = {
     use core::mem::offset_of;
     macro_rules! same {
         ($t:ty) => {
+            assert!(
+                offset_of!($t, _private) == offset_of!(RawCommon, _private)
+            );
             assert!(offset_of!($t, r#type) == offset_of!(RawCommon, r#type));
             assert!(offset_of!($t, name) == offset_of!(RawCommon, name));
             assert!(

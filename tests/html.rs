@@ -195,3 +195,58 @@ fn what_changes_on_the_way_in() {
     #[cfg(feature = "dom")]
     exi::dom::Document::parse_xml(&strings, x.as_bytes()).unwrap();
 }
+
+/// The default DOCTYPE comes before whatever is written first, an
+/// entity reference too.
+#[test]
+fn doctype_before_an_entity_reference() {
+    use exi::html::HtmlWriter;
+    use exi::{Event, EventSink};
+    let mut w = HtmlWriter::new(Vec::new());
+    w.event(&Event::EntityReference("amp")).unwrap();
+    w.start_element(("http://www.w3.org/1999/xhtml", "p")).unwrap();
+    w.end_element().unwrap();
+    w.event(&Event::EndDocument).unwrap();
+    assert_eq!(w.into_sink(), b"<!DOCTYPE html>&amp;<p></p>");
+}
+
+/// `xml` and `xmlns` name only their own namespaces (Namespaces in XML
+/// §3). A tree that gives one of them to another URI keeps the names
+/// and loses the prefix.
+#[test]
+fn reserved_prefixes_on_other_namespaces() {
+    use exi::html::HtmlSerializer;
+    use exi::{OwnedEvent, OwnedName, OwnedValue};
+    use markup5ever::serialize::Serializer;
+    use markup5ever::{LocalName, Namespace, Prefix, QualName};
+    let q = |prefix: &str, ns: &str, local: &str| {
+        QualName::new(
+            Some(Prefix::from(prefix)),
+            Namespace::from(ns),
+            LocalName::from(local),
+        )
+    };
+    let el = q("xml", "urn:e", "el");
+    let attrs = [
+        (q("xmlns", "urn:a", "a"), "1"),
+        (q("xml", "http://www.w3.org/XML/1998/namespace", "lang"), "en"),
+    ];
+    let mut events = Vec::<OwnedEvent>::new();
+    let mut s = HtmlSerializer::new(&mut events, HtmlOptions::new());
+    s.start_elem(el.clone(), attrs.iter().map(|(q, v)| (q, *v))).unwrap();
+    s.end_elem(el).unwrap();
+    s.finish().unwrap();
+    let str = |v: &str| OwnedValue::Str(v.into());
+    assert_eq!(
+        events[1..4],
+        [
+            OwnedEvent::StartElement(OwnedName::new("urn:e", "el")),
+            OwnedEvent::Attribute(OwnedName::new("urn:a", "a"), str("1")),
+            OwnedEvent::Attribute(
+                OwnedName::new("http://www.w3.org/XML/1998/namespace", "lang")
+                    .with_prefix("xml"),
+                str("en"),
+            ),
+        ]
+    );
+}

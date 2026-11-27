@@ -131,6 +131,11 @@ struct Open {
 /// Writes events as HTML text: void elements without end tags, `script`
 /// and `style` text unescaped, attributes escaped as HTML requires.
 ///
+/// As in the HTML standard, text in `script`, `style` and the other raw
+/// text elements is written as it is, so `</script>` in it ends the
+/// element. A stream from an untrusted source can add markup that way;
+/// do not insert its output into a page unchecked.
+///
 /// ```
 /// use exi::html::HtmlWriter;
 /// use exi::{EventSink, Value};
@@ -417,6 +422,7 @@ impl<S: Sink> EventSink for HtmlWriter<S> {
                     return Ok(());
                 }
                 self.close_tag()?;
+                self.doctype()?;
                 self.put("&")?;
                 self.put(name)?;
                 self.put(";")

@@ -160,11 +160,13 @@ impl HtmlOptions {
 }
 
 /// `name` as an XML NCName: each character that cannot be there becomes
-/// `U` and six uppercase hex digits. `None` when nothing changes.
+/// `U` and six uppercase hex digits. `None` when nothing changes. An
+/// empty name, which HTML parsers never give, becomes `U000000`.
 ///
 /// ```
 /// use exi::html::coerce_name;
 /// assert_eq!(coerce_name("@click").as_deref(), Some("U000040click"));
+/// assert_eq!(coerce_name("").as_deref(), Some("U000000"));
 /// assert_eq!(coerce_name(":href").as_deref(), Some("U00003Ahref"));
 /// assert_eq!(coerce_name("data-x"), None);
 /// assert_eq!(coerce_name("1st").as_deref(), Some("U000031st"));
@@ -355,9 +357,14 @@ impl<'s, S: EventSink> HtmlSerializer<'s, S> {
 }
 
 /// The event name of an element or attribute name from markup5ever.
+/// `xml` and `xmlns` name only their own namespaces (Namespaces in XML
+/// §3): given to another URI, the prefix is left out and the writer
+/// picks one.
 fn event_name<'n>(q: &'n QualName, local: &'n str) -> Name<'n> {
     let n = Name::new(&q.ns, local);
-    match &q.prefix {
+    match q.prefix.as_deref() {
+        None | Some("xmlns") => n,
+        Some("xml") if &*q.ns != XML_NS => n,
         Some(p) if !q.ns.is_empty() => n.with_prefix(p),
         _ => n,
     }

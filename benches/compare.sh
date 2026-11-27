@@ -43,7 +43,7 @@ cargo build --quiet --release --features infer,xhtml5,html5ever
 exi=$root/target/release/exi
 
 if [ ${#docs[@]} -eq 0 ]; then
-    cargo bench --quiet --features infer --bench exi -- --corpus "$work/corpus" >/dev/null
+    cargo bench --quiet --features infer --bench throughput -- --corpus "$work/corpus" >/dev/null
     docs=("$work"/corpus/*)
     for f in benches/data/*.xml benches/data/*.svg; do
         [ -e "$f" ] && docs+=("$f")

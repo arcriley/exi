@@ -18,7 +18,7 @@ use esp_hal::Blocking;
 use esp_hal::time::Instant;
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use exi::strings::{GlobalConfig, GlobalStrings};
-use exi_esp32c6::{MAX_DOCUMENT, decode, encode, grammar, options};
+use exi_esp32c6::{MAX_DOCUMENT, decode, encode, from_hex, grammar, options};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -61,24 +61,6 @@ impl Console {
             }
         }
     }
-}
-
-fn from_hex(text: &[u8], out: &mut [u8]) -> Option<usize> {
-    let pairs = text.chunks_exact(2);
-    if !pairs.remainder().is_empty() || pairs.len() > out.len() {
-        return None;
-    }
-    let digit = |b| match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    };
-    let len = pairs.len();
-    for (pair, slot) in pairs.zip(out) {
-        *slot = digit(pair[0])? << 4 | digit(pair[1])?;
-    }
-    Some(len)
 }
 
 #[esp_hal::main]

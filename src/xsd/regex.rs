@@ -236,3 +236,44 @@ impl P<'_> {
         self.escape()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::char_set;
+    use alloc::string::String;
+
+    fn set(pattern: &str) -> Option<String> {
+        char_set(pattern).map(|s| s.into_iter().collect())
+    }
+
+    #[test]
+    fn classes() {
+        assert_eq!(set(r"[\-\]\\]").as_deref(), Some("-\\]"));
+        assert_eq!(set(r"[\sa-c]").as_deref(), Some("\t\n\r abc"));
+        assert_eq!(set("[a-f-[c-d]]").as_deref(), Some("abef"));
+        assert_eq!(set("[ab-]").as_deref(), Some("-ab")); // a final - is itself
+        assert_eq!(set("[z-a]"), None); // a range backwards
+        assert_eq!(set(r"[a-\s]"), None); // a range to a set
+    }
+
+    #[test]
+    fn patterns() {
+        assert_eq!(set("(ab|c)+d{2,3}").as_deref(), Some("abcd"));
+        assert_eq!(set("a{x}"), None);
+        assert_eq!(set("(ab"), None);
+        // The empty pattern matches only the empty string: no characters to code.
+        assert_eq!(set(""), None);
+        assert_eq!(set("()"), None);
+    }
+
+    /// 255 characters are a set; 256 are not, in one range or several.
+    #[test]
+    fn the_cutoff() {
+        assert_eq!(char_set("[\u{100}-\u{1FE}]").map(|s| s.len()), Some(255));
+        assert_eq!(char_set("[\u{100}-\u{1FF}]"), None);
+        assert_eq!(char_set("[\u{100}-\u{17F}][\u{180}-\u{1FF}]"), None);
+        assert_eq!(char_set("[\u{100}-\u{17F}]|[\u{180}-\u{1FE}]").map(|s| s.len()), Some(255));
+        // Overlaps count once.
+        assert_eq!(char_set("[\u{100}-\u{1FE}][\u{100}-\u{110}]").map(|s| s.len()), Some(255));
+    }
+}

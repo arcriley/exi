@@ -269,3 +269,54 @@ fn as_an_event_sink() {
             .contains("<xs:element name=\"b\" type=\"xs:unsignedInt\"/>")
     );
 }
+
+/// Each value seen widens a slot's type just enough: from one document to the next, the
+/// type is the narrowest that fits every value so far.
+#[test]
+fn types_widen_across_documents() {
+    let declared = |values: &[&str]| -> String {
+        let mut l = SchemaInference::new();
+        for v in values {
+            l.document(format!("<r><a>{v}</a></r>").as_bytes()).unwrap();
+        }
+        let text = l.schemas()[0].text.clone();
+        let line = text.lines().find(|l| l.contains(r#"name="a""#)).unwrap();
+        let ty = line.split(r#"type="xs:"#).nth(1).unwrap();
+        ty[..ty.find('"').unwrap()].to_string()
+    };
+    for (values, ty) in [
+        (&["true", "false"][..], "boolean"),
+        (&["1", "0"], "unsignedInt"), // 0 and 1 are integers before they are booleans
+        (&["7", "-3"], "int"),
+        (&["7", "5000000000"], "unsignedLong"),
+        (&["7", "-5000000000"], "long"),
+        (&["7", "2.5"], "decimal"),
+        (&["7", "2.5", "1e3"], "double"),
+        (&["2026-11-27", "2026-11-28"], "date"),
+        (&["2026-11-27", "soon"], "string"),
+        (&["7", ""], "string"), // an empty element is the empty string
+    ] {
+        assert_eq!(declared(values), ty, "{values:?}");
+    }
+}
+
+/// A schema learned with `Fit::Exact` declares only what the examples showed, so a
+/// strict stream refuses values outside it; `Fit::General` takes them.
+#[test]
+fn exact_fits_refuse_what_was_not_seen() {
+    let examples = [br#"<log><e level="info" code="200"/><e level="warn" code="404"/><e level="info" code="200"/><e level="warn" code="301"/></log>"#.to_vec()];
+    let strings = GlobalStrings::new(GlobalConfig::new()).unwrap();
+    let exact = learn(Fit::Exact, &examples);
+    let general = learn(Fit::General, &examples);
+    let (ge, gg) = (exact.attach(&strings).unwrap(), general.attach(&strings).unwrap());
+    let doc = |level: &str, code: &str| {
+        format!(r#"<log><e level="{level}" code="{code}"/></log>"#).into_bytes()
+    };
+    encode(&ge, &examples[0]).unwrap();
+    encode(&ge, &doc("warn", "250")).unwrap(); // inside the range
+    for (level, code) in [("info", "500"), ("info", "199"), ("debug", "200")] {
+        let e = encode(&ge, &doc(level, code)).unwrap_err();
+        assert_eq!(e.kind(), exi::ErrorKind::Unencodable, "{level} {code}: {e}");
+        encode(&gg, &doc(level, code)).unwrap();
+    }
+}

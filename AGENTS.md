@@ -189,15 +189,15 @@ EXIficient bugs (fixtures left out):
 
 ```sh
 python3 benches/xmpp/gen_sessions.py          # regenerate the synthetic XMPP sessions
-cargo bench --features infer[,dom]            # general harness; dom adds tree cases
+cargo bench --bench throughput --features infer[,dom]  # main paths; dom adds tree cases
 cargo bench --bench codecs --features infer,xhtml5,html5ever [-- --quick | -- stanzas]
 cargo bench --bench xhtml5 --features xhtml5,html5ever [-- pages...]
 cargo bench --bench device --no-default-features --features std,bit-packed,exig [-- --server]
 benches/compare.sh [files...]                 # against xmllint, gzip, xz, zstd, EXIficient
 ```
 
-`codecs` writes `target/bench/codecs.csv`, `stanzas.csv` and `pages.csv`; `exi` and
-`xhtml5` write `exi.csv` and `xhtml5.csv`. Each also writes `<bench>.meta`: git commit,
+`codecs` writes `target/bench/codecs.csv`, `stanzas.csv` and `pages.csv`; `throughput` and
+`xhtml5` write `throughput.csv` and `xhtml5.csv`. Each also writes `<bench>.meta`: git commit,
 rustc, features, dependency versions, CPU, governor and boost (`benches/common`).
 `compare.sh` writes `target/compare/meta.txt`. Its times are whole processes; use the
 Rust benches for library times. HTML pages come from `target/html-corpus` or

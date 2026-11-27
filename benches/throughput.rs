@@ -1,4 +1,4 @@
-// benches/exi.rs
+// benches/throughput.rs
 //
 // EXI throughput benchmarks
 // Copyright © 2026 Arc Riley
@@ -8,20 +8,19 @@
 // are welcome only if this notice remains unchanged clearly
 // communicating that changes are made under these same conditions.
 //
-//! `cargo bench --features infer`: time the crate's main paths over two generated
-//! documents (an SVG drawing and a data feed, about 1 MB each) and any `.xml` or `.svg`
-//! files in `benches/data`.
+//! Time the crate's main paths over two generated documents (an SVG drawing and a data
+//! feed, about 1 MB each) and any `.xml` or `.svg` files in `benches/data`.
 //!
-//!     cargo bench --features infer                     # every case
-//!     cargo bench --features infer -- encode svg       # cases whose name has every word
-//!     cargo bench --features infer -- --corpus DIR     # write the generated documents
-//!     cargo bench --features infer,dom                 # and the document tree
+//!     cargo bench --bench throughput --features infer                 # every case
+//!     cargo bench --bench throughput --features infer -- encode svg   # cases with every word
+//!     cargo bench --bench throughput --features infer -- --corpus DIR # write the documents
+//!     cargo bench --bench throughput --features infer,dom             # and the document tree
 //!
 //! Each case runs for about a second after a warm-up. A sample is the mean time of the
 //! runs in about 100 ms; the figures are the median of ten samples, input megabytes per
 //! second at the median, and the spread (slowest over fastest sample). A spread above a
-//! few percent means the machine was busy or changed speed. `target/bench/exi.csv` holds
-//! every case and `target/bench/exi.meta` the build and machine. `benches/compare.sh`
+//! few percent means the machine was busy or changed speed. `target/bench/throughput.csv` holds
+//! every case and `target/bench/throughput.meta` the build and machine. `benches/compare.sh`
 //! times the `exi` tool against other XML and EXI tools with hyperfine.
 //!
 //! Schema-less and strict encoding and decoding run in every coding built, except
@@ -59,7 +58,7 @@ use exi::{
 struct Bench<'s> {
     words: Vec<String>,
     strings: &'s GlobalStrings,
-    /// `target/bench/exi.csv`: one line for each case run.
+    /// `target/bench/throughput.csv`: one line for each case run.
     csv: RefCell<String>,
 }
 
@@ -577,8 +576,8 @@ fn main() {
         case(&b, &name, &xml);
     }
     schemas(&b);
-    let path = common::out_dir().join("exi.csv");
+    let path = common::out_dir().join("throughput.csv");
     std::fs::write(&path, b.csv.into_inner()).unwrap();
     println!("wrote {}", path.display());
-    common::write_meta("exi");
+    common::write_meta("throughput");
 }

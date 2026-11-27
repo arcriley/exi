@@ -93,6 +93,27 @@ pub fn decode(
     Ok(reading)
 }
 
+/// Hex text (a serial line) into `out`: the number of octets, or `None`
+/// for an odd length, a character that is not a hex digit, or more
+/// octets than `out` holds.
+pub fn from_hex(text: &[u8], out: &mut [u8]) -> Option<usize> {
+    let pairs = text.chunks_exact(2);
+    if !pairs.remainder().is_empty() || pairs.len() > out.len() {
+        return None;
+    }
+    let digit = |b| match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    };
+    let len = pairs.len();
+    for (pair, slot) in pairs.zip(out) {
+        *slot = digit(pair[0])? << 4 | digit(pair[1])?;
+    }
+    Some(len)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,5 +135,42 @@ mod tests {
         assert!(decode(&g, &opts, &bytes[..len - 1]).is_err());
         assert!(decode(&g, &opts, &bytes[..len + 1]).is_err());
         Ok(())
+    }
+
+    /// A reading one past either end of i64 is an error, not a wrapped
+    /// value. Signed integers are a sign bit (a byte here), then the
+    /// magnitude (less one when negative) as an unsigned integer: 2^63
+    /// is nine octets of 0x80 and a final 0x01.
+    #[test]
+    fn readings_past_i64_are_errors() -> Result<()> {
+        let set = grammar()?;
+        let strings = GlobalStrings::new(GlobalConfig::device())?;
+        let g = set.attach(&strings)?;
+        let opts = options()?;
+        let two_63 = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01];
+        for sign in [0, 1] {
+            let mut stream = [0x80, 0, sign, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+            stream[3..].copy_from_slice(&two_63);
+            assert!(decode(&g, &opts, &stream).is_err(), "sign {sign}");
+        }
+        // One less is the largest positive reading.
+        let mut bytes = [0; MAX_DOCUMENT];
+        let len = encode(&g, &opts, i64::MAX, &mut bytes)?;
+        assert_eq!(&bytes[3..len], &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]);
+        Ok(())
+    }
+
+    #[test]
+    fn hex_lines() {
+        let mut out = [0; 4];
+        assert_eq!(from_hex(b"80001500", &mut out), Some(4));
+        assert_eq!(out, [0x80, 0, 0x15, 0]);
+        assert_eq!(from_hex(b"aBcD", &mut out), Some(2));
+        assert_eq!(&out[..2], &[0xAB, 0xCD]);
+        assert_eq!(from_hex(b"", &mut out), Some(0));
+        assert_eq!(from_hex(b"801", &mut out), None); // odd length
+        assert_eq!(from_hex(b"8g", &mut out), None); // not a hex digit
+        assert_eq!(from_hex(b" 80", &mut out), None);
+        assert_eq!(from_hex(b"0011223344", &mut out), None); // five octets
     }
 }

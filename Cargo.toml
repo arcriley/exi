@@ -66,8 +66,8 @@ doc = false
 bench = false
 
 [[bench]]
-# cargo bench --features infer (a std-only harness: no downloads needed)
-name = "exi"
+# cargo bench --bench throughput --features infer (a std-only harness: no downloads needed)
+name = "throughput"
 harness = false
 required-features = ["infer"]
 

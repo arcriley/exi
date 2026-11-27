@@ -254,8 +254,8 @@ Findings so far (synthetic XMPP data):
 - `exiNewNs(el, href, NULL)` refuses a default namespace on an element in no namespace,
   because it would move the element into that namespace. libxml2 allows it. Document it
   under "Where libexi differs" in `src/capi/dom.rs` and `include/exi_dom.h`.
-- The W3C EXI test suite: `tests/w3c.rs` runs 3,172 interoperability encodings. 385 of
-  them fail, and `tests/w3c-known.tsv` lists each with its reason; 284 of those are
+- The W3C EXI test suite: `tests/w3c.rs` runs 3,172 interoperability encodings. 349 of
+  them fail, and `tests/w3c-known.tsv` lists each with its reason; 248 of those are
   marked `investigate`.
 
 ### Performance

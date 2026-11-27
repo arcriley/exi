@@ -137,42 +137,6 @@ data/interop/datatypes/string/string_pattern001.exi%l%via%%%%%data@interop@datat
 data/interop/datatypes/string/string_pattern001.exi%l%vic%%%%%data@interop@datatypes@string@string_pattern001.xsd	preserve.datatype.string-pattern-00	investigate: decode EXIficient: Grammar: n-bit value out of range for its width
 data/interop/datatypes/string/string_pattern001.exi%l%vip%%%%%data@interop@datatypes@string@string_pattern001.xsd	preserve.datatype.string-pattern-00	investigate: decode EXIficient: Grammar: n-bit value out of range for its width
 data/interop/header/user-defined-metadata.noxsd.exi%%vo%%%%%	header.userDefinedMetadata-01	difference: the header names a preview version
-data/interop/preserve/element/element-07.exi%cpx%%%%%%	builtin.element.other-07	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-07.exi%cpx%a%%%%%	builtin.element.other-07	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-07.exi%cpx%c%%%%%	builtin.element.other-07	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-07.exi%cpx%p%%%%%	builtin.element.other-07	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-07.exi%px%%%%%%	builtin.element.other-07	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-07.exi%px%a%%%%%	builtin.element.other-07	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-07.exi%px%c%%%%%	builtin.element.other-07	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-07.exi%px%p%%%%%	builtin.element.other-07	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-07.exi%x%%%%%%	builtin.element.other-07	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-07.exi%x%a%%%%%	builtin.element.other-07	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-07.exi%x%c%%%%%	builtin.element.other-07	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-07.exi%x%p%%%%%	builtin.element.other-07	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-09.exi%cpx%%%%%%	builtin.element.other-08	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-09.exi%cpx%a%%%%%	builtin.element.other-08	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-09.exi%cpx%c%%%%%	builtin.element.other-08	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-09.exi%cpx%p%%%%%	builtin.element.other-08	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-09.exi%px%%%%%%	builtin.element.other-08	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-09.exi%px%a%%%%%	builtin.element.other-08	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-09.exi%px%c%%%%%	builtin.element.other-08	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-09.exi%px%p%%%%%	builtin.element.other-08	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-09.exi%x%%%%%%	builtin.element.other-08	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-09.exi%x%a%%%%%	builtin.element.other-08	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-09.exi%x%c%%%%%	builtin.element.other-08	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-09.exi%x%p%%%%%	builtin.element.other-08	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-10.exi%cpx%%%%%%	builtin.element.other-09	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-10.exi%cpx%a%%%%%	builtin.element.other-09	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-10.exi%cpx%c%%%%%	builtin.element.other-09	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-10.exi%cpx%p%%%%%	builtin.element.other-09	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-10.exi%px%%%%%%	builtin.element.other-09	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-10.exi%px%a%%%%%	builtin.element.other-09	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-10.exi%px%c%%%%%	builtin.element.other-09	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-10.exi%px%p%%%%%	builtin.element.other-09	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-10.exi%x%%%%%%	builtin.element.other-09	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-10.exi%x%a%%%%%	builtin.element.other-09	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-10.exi%x%c%%%%%	builtin.element.other-09	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
-data/interop/preserve/element/element-10.exi%x%p%%%%%	builtin.element.other-09	investigate: events differ: ours Some(StartElement, EXIficient Some(StartElement
 data/interop/schemaInformedGrammar/declaredProductions/complexType-04.exi%%i%%%%%data@interop@schemaInformedGrammar@acceptance.xsd	schemaInformed.declared.complexType-04	investigate: decode EXIficient: Grammar: local value number not assigned
 data/interop/schemaInformedGrammar/declaredProductions/complexType-04.exi%%vi%%%%%data@interop@schemaInformedGrammar@acceptance.xsd	schemaInformed.declared.complexType-04	investigate: events differ: ours Some(Attribute, EXIficient Some(Attribute
 data/interop/schemaInformedGrammar/declaredProductions/complexType-04.exi%%via%%%%%data@interop@schemaInformedGrammar@acceptance.xsd	schemaInformed.declared.complexType-04	investigate: decode EXIficient: Grammar: n-bit value out of range for its width

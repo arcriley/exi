@@ -10,21 +10,57 @@
 //
 //! Layer 2: trees from XML text and EXI, written back out unchanged, and edited the way
 //! libxml2 programs edit them.
-#![cfg(all(feature = "dom", feature = "xsd"))]
+//!
+//! The tests that compile schemas also need the `xsd` feature; the others run with `dom`
+//! and `xml` alone.
+#![cfg(all(feature = "dom", feature = "xml"))]
 
-use std::path::Path;
-
-use exi::dom::{Document, NodeKind};
+use exi::dom::{Document, NodeId, NodeKind};
 use exi::grammar::{GrammarSet, Grammars};
 use exi::strings::{GlobalConfig, GlobalStrings};
 use exi::xml::{PrefixPolicy, XmlConfig, XmlReader, XmlWriter, XmlWriterConfig};
 use exi::{
-    Coding, EventSink, Name, Options, OwnedEvent, OwnedValue, Reader, ReaderConfig, Status, Step,
-    Value, Writer, WriterConfig,
+    Coding, ErrorKind, EventSink, Name, Options, OwnedEvent, OwnedValue, Reader, ReaderConfig,
+    Step, Writer, WriterConfig,
 };
+#[cfg(feature = "xsd")]
+use exi::Value;
 
 fn strings() -> GlobalStrings {
     GlobalStrings::new(GlobalConfig::new()).unwrap()
+}
+
+/// Live strings in the pool's four tables: a tree that is dropped, or never finished,
+/// leaves none behind.
+fn live(s: &GlobalStrings) -> u32 {
+    s.uris().stats().strings
+        + s.prefixes().stats().strings
+        + s.locals().stats().strings
+        + s.values().stats().strings
+}
+
+/// A tree read from a complete EXI stream.
+fn read_exi<'g>(
+    s: &'g GlobalStrings,
+    g: &Grammars<'_>,
+    exi: &[u8],
+) -> exi::Result<Document<'g>> {
+    let mut r: Reader = Reader::new(ReaderConfig::new(g)).unwrap();
+    r.feed(exi);
+    r.end_input();
+    Document::read(s, &mut r)
+}
+
+/// A tree written as EXI with these options.
+fn write_exi(doc: &Document<'_>, g: &Grammars<'_>, strict: bool) -> exi::Result<Vec<u8>> {
+    let opts = Options::builder()
+        .coding(Coding::ByteAligned)
+        .strict(strict)
+        .build()
+        .unwrap();
+    let mut w = Writer::new(Vec::new(), WriterConfig::new(opts, g)).unwrap();
+    doc.write(&mut w)?;
+    Ok(w.into_sink())
 }
 
 fn xml_events(g: &Grammars<'_>, xml: &[u8]) -> Vec<OwnedEvent> {
@@ -120,6 +156,7 @@ fn xml_round_trips() {
     assert!(n >= 20, "{n} documents");
 }
 
+#[cfg(feature = "xsd")]
 fn compile(main: &str) -> GrammarSet {
     let mut c = exi::xsd::XsdCompiler::new();
     let docs: Vec<(String, Vec<u8>)> = std::fs::read_dir("fixtures/input")
@@ -139,6 +176,7 @@ fn compile(main: &str) -> GrammarSet {
     c.compile(main).unwrap()
 }
 
+#[cfg(feature = "xsd")]
 fn encode(g: &Grammars<'_>, xml: &[u8], strict: bool) -> Vec<u8> {
     let opts = Options::builder()
         .coding(Coding::ByteAligned)
@@ -154,7 +192,7 @@ fn encode(g: &Grammars<'_>, xml: &[u8], strict: bool) -> Vec<u8> {
         if rest.is_empty() {
             x.end_input();
         }
-        if exi::transcode(&mut x, &mut w).unwrap() == Status::End {
+        if exi::transcode(&mut x, &mut w).unwrap() == exi::Status::End {
             return w.into_sink();
         }
     }
@@ -162,6 +200,7 @@ fn encode(g: &Grammars<'_>, xml: &[u8], strict: bool) -> Vec<u8> {
 
 /// A strict stream with typed values: the tree keeps them typed, and writes the same
 /// stream back.
+#[cfg(feature = "xsd")]
 #[test]
 fn typed_values_survive() {
     let s = strings();
@@ -174,7 +213,7 @@ fn typed_values_survive() {
         let g = set.attach(&s).unwrap();
         let exi = encode(
             &g,
-            &std::fs::read(Path::new("fixtures/input").join(xml)).unwrap(),
+            &std::fs::read(std::path::Path::new("fixtures/input").join(xml)).unwrap(),
             true,
         );
         let mut r: Reader = Reader::new(ReaderConfig::new(&g)).unwrap();
@@ -209,6 +248,7 @@ fn typed_values_survive() {
     assert!(typed > 3, "{typed} typed values");
 }
 
+#[cfg(feature = "xsd")]
 fn descendants(doc: &Document<'_>, n: exi::dom::NodeId) -> Vec<exi::dom::NodeId> {
     let mut out = vec![n];
     for c in doc.children(n) {
@@ -486,4 +526,213 @@ fn adopt_between_string_tables() {
         r#"<z><b xmlns="urn:a" xmlns:x="urn:x" x:k="v" xml:lang="en"><c/></b></z>"#
     );
     assert_eq!(b.global_name(moved), b.lookup_name("urn:a", "b"));
+}
+
+/// A typed tree from a strict stream, edited and written to a strict writer again. Text
+/// set on a typed node is a string until the writer parses it for the node's type, so a
+/// good edit encodes and a bad one is `Unencodable`, never stale octets.
+#[cfg(feature = "xsd")]
+#[test]
+fn edited_typed_trees_write_strict_exi() {
+    let s = strings();
+    let set = compile("types.xsd");
+    let g = set.attach(&s).unwrap();
+    let exi = encode(&g, &std::fs::read("fixtures/input/types.xml").unwrap(), true);
+    let fresh = || read_exi(&s, &g, &exi).unwrap();
+    // <i> holds Int(-42); the attribute n is a small integer, 10 to 20.
+    let doc = fresh();
+    let root = doc.root().unwrap();
+    let i = doc.first_element_child(root).unwrap();
+    assert_eq!(doc.value(doc.first_child(i).unwrap()), Some(Value::Int(-42)));
+    assert_eq!(doc.attribute_value(root, "n"), Some(Value::Int(15)));
+    let i_back = |doc: &Document<'_>| {
+        let i = doc.first_element_child(doc.root().unwrap()).unwrap();
+        doc.value(doc.first_child(i).unwrap()).map(|v| v.to_owned())
+    };
+
+    // Content replaced or extended as text is typed again on the way out.
+    let mut doc = fresh();
+    doc.set_content(i, "7").unwrap();
+    let back = read_exi(&s, &g, &write_exi(&doc, &g, true).unwrap()).unwrap();
+    assert_eq!(i_back(&back), Some(OwnedValue::Int(7)));
+    let mut doc = fresh();
+    let t = doc.first_child(i).unwrap();
+    doc.add_content(t, "0").unwrap();
+    assert_eq!(doc.value(t), Some(Value::Str("-420")));
+    let back = read_exi(&s, &g, &write_exi(&doc, &g, true).unwrap()).unwrap();
+    assert_eq!(i_back(&back), Some(OwnedValue::Int(-420)));
+    let mut doc = fresh();
+    doc.set_content(i, "seven").unwrap();
+    let e = write_exi(&doc, &g, true).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::Unencodable, "{e}");
+
+    // An attribute set again keeps its node and place; out of range is refused.
+    let mut doc = fresh();
+    let n = doc.attribute_node(root, "n").unwrap();
+    let order: Vec<_> = doc.attributes(root).collect();
+    assert_eq!(doc.set_attribute(root, "n", "12").unwrap(), n);
+    assert_eq!(doc.attributes(root).collect::<Vec<_>>(), order);
+    let back = read_exi(&s, &g, &write_exi(&doc, &g, true).unwrap()).unwrap();
+    assert_eq!(back.attribute_value(back.root().unwrap(), "n"), Some(Value::Int(12)));
+    doc.set_attribute(root, "n", "99").unwrap();
+    let e = write_exi(&doc, &g, true).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::Unencodable, "{e}");
+    doc.set_attribute_value(root, "n", OwnedValue::Int(11)).unwrap();
+    write_exi(&doc, &g, true).unwrap();
+    // The attribute is optional: removed, the stream has no n.
+    assert!(doc.remove_attribute(root, "n"));
+    let back = read_exi(&s, &g, &write_exi(&doc, &g, true).unwrap()).unwrap();
+    assert_eq!(back.attribute(back.root().unwrap(), "n"), None);
+
+    // Copies keep typed values; another <s> fits the schema's repeat.
+    let mut doc = fresh();
+    let c = doc.copy(i, true).unwrap();
+    assert_eq!(doc.value(doc.first_child(c).unwrap()), Some(Value::Int(-42)));
+    let last = doc.last_element_child(root).unwrap();
+    let again = doc.copy(last, true).unwrap();
+    doc.append_child(root, again).unwrap();
+    let back = read_exi(&s, &g, &write_exi(&doc, &g, true).unwrap()).unwrap();
+    assert!(back.to_xml().unwrap().ends_with("<s>y</s><s>y</s></root>"));
+
+    // An element the schema does not declare cannot go into a strict stream.
+    let other = Document::parse_xml(&s, br#"<root xmlns="urn:t"><zzz/></root>"#).unwrap();
+    let e = write_exi(&other, &g, true).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::Unencodable, "{e}");
+}
+
+/// Both directions of the sibling links agree, and every child names `parent`.
+fn assert_linked(doc: &Document<'_>, parent: NodeId) {
+    let forward: Vec<_> = doc.children(parent).collect();
+    let mut backward = Vec::new();
+    let mut at = doc.last_child(parent);
+    while let Some(n) = at {
+        backward.push(n);
+        at = doc.prev_sibling(n);
+    }
+    backward.reverse();
+    assert_eq!(forward, backward);
+    assert_eq!(doc.first_child(parent), forward.first().copied());
+    for &n in &forward {
+        assert_eq!(doc.parent(n), Some(parent));
+    }
+    let elements: Vec<_> = forward
+        .iter()
+        .copied()
+        .filter(|&n| doc.kind(n) == NodeKind::Element)
+        .collect();
+    assert_eq!(doc.child_element_count(parent), elements.len());
+    assert_eq!(doc.first_element_child(parent), elements.first().copied());
+    assert_eq!(doc.last_element_child(parent), elements.last().copied());
+    for w in elements.windows(2) {
+        assert_eq!(doc.next_element_sibling(w[0]), Some(w[1]));
+        assert_eq!(doc.prev_element_sibling(w[1]), Some(w[0]));
+    }
+}
+
+/// A tree built from nothing, then nodes moved without unlinking them first: placing a
+/// node takes it from where it was, and both lists stay linked.
+#[test]
+fn moves_keep_both_lists_linked() {
+    let s = strings();
+    let mut doc = Document::new(&s);
+    let root = doc.new_element("root").unwrap();
+    doc.set_root(root).unwrap();
+    let [a, b, c, box_] = ["a", "b", "c", "box"].map(|n| doc.new_element(n).unwrap());
+    let text = doc.new_text("t");
+    doc.append_child(root, a).unwrap();
+    doc.append_child(root, c).unwrap();
+    doc.insert_after(a, b).unwrap(); // in the middle
+    doc.insert_after(c, text).unwrap(); // at the end: the last child changes
+    doc.append_child(root, box_).unwrap();
+    assert_eq!(doc.to_xml().unwrap(), "<root><a/><b/><c/>t<box/></root>");
+    assert_linked(&doc, root);
+    assert_eq!(doc.prev_element_sibling(box_), Some(c));
+
+    // Into another parent, and back between two siblings.
+    doc.append_child(box_, b).unwrap();
+    doc.insert_before(b, text).unwrap();
+    assert_eq!(doc.to_xml().unwrap(), "<root><a/><c/><box>t<b/></box></root>");
+    assert_linked(&doc, root);
+    assert_linked(&doc, box_);
+    doc.insert_after(a, b).unwrap();
+    doc.insert_before(a, c).unwrap();
+    assert_eq!(doc.to_xml().unwrap(), "<root><c/><a/><b/><box>t</box></root>");
+    assert_linked(&doc, root);
+    assert_linked(&doc, box_);
+    // Next to itself is no move; into its own subtree is refused.
+    doc.insert_after(b, b).unwrap();
+    assert!(doc.append_child(box_, root).is_err());
+    assert!(doc.insert_before(text, box_).is_err());
+    assert_eq!(doc.to_xml().unwrap(), "<root><c/><a/><b/><box>t</box></root>");
+}
+
+/// Attributes set again keep their node and place, in or out of a namespace, and the C
+/// list of attributes stays linked both ways after removals.
+#[test]
+fn attributes_edit_in_place() {
+    use exi::dom::raw::RawAttr;
+    let s = strings();
+    let mut doc =
+        Document::parse_xml(&s, br#"<e xmlns:p="urn:p" a="1" p:b="2" c="3" d="4"/>"#).unwrap();
+    let e = doc.root().unwrap();
+    let before: Vec<_> = doc.attributes(e).collect();
+    assert_eq!(doc.set_attribute(e, "a", "one").unwrap(), before[0]);
+    assert_eq!(doc.set_attribute(e, ("urn:p", "b"), "two").unwrap(), before[1]);
+    assert_eq!(doc.attributes(e).collect::<Vec<_>>(), before);
+    assert_eq!(doc.attribute(e, ("urn:p", "b")).as_deref(), Some("two"));
+    // The same local name in no namespace is another attribute.
+    assert_eq!(doc.attribute(e, "b"), None);
+    assert!(!doc.remove_attribute(e, "b"));
+
+    assert!(doc.remove_attribute(e, ("urn:p", "b"))); // from the middle
+    doc.remove(before[3]); // the last, by its node
+    assert!(!doc.contains(before[1]) && !doc.contains(before[3]));
+    assert_eq!(doc.attributes(e).collect::<Vec<_>>(), [before[0], before[2]]);
+    assert_eq!(doc.to_xml().unwrap(), r#"<e xmlns:p="urn:p" a="one" c="3"/>"#);
+    // SAFETY: walking the attribute list of a live element of a borrowed document.
+    unsafe {
+        let first = (*(doc.raw(e) as *const exi::dom::raw::RawNode)).properties;
+        let second = (*first).next;
+        assert_eq!(first as *const RawAttr, doc.raw(before[0]) as *const RawAttr);
+        assert_eq!(second as *const RawAttr, doc.raw(before[2]) as *const RawAttr);
+        assert!((*first).prev.is_null() && (*second).next.is_null());
+        assert_eq!((*second).prev, first);
+    }
+    let late = doc.set_attribute(e, "z", "26").unwrap();
+    assert_eq!(doc.attributes(e).last(), Some(late));
+}
+
+/// Bad input is an error, and the strings of the part-built tree go back to the pool.
+#[test]
+fn bad_input_is_an_error() {
+    let s = strings();
+    let set = GrammarSet::schemaless();
+    let g = set.attach(&s).unwrap();
+    let start = live(&s);
+    for (xml, detail) in [
+        (&b"<a><b></a>"[..], "does not match"),
+        (b"<a><b>text", "ends inside"),
+        (b"<a x='1' x='2'/>", ""),
+    ] {
+        let e = Document::parse_xml(&s, xml).err().expect("an error");
+        assert_eq!(e.kind(), ErrorKind::Xml, "{e}");
+        assert!(e.to_string().contains(detail), "{e}");
+        assert_eq!(live(&s), start, "{e}");
+    }
+
+    let doc = Document::parse_xml(&s, br#"<r><p k="v">some text</p><p k="w">more</p></r>"#)
+        .unwrap();
+    let exi = write_exi(&doc, &g, false).unwrap();
+    drop(doc);
+    assert_eq!(live(&s), start);
+    for cut in [exi.len() - 1, exi.len() / 2, 2] {
+        let e = read_exi(&s, &g, &exi[..cut]).err().expect("an error");
+        assert_eq!(e.kind(), ErrorKind::Truncated, "cut at {cut}: {e}");
+        assert_eq!(live(&s), start, "cut at {cut}");
+    }
+    // A distinguishing bit that is wrong: not a document, whatever the error is.
+    let mut bad = exi.clone();
+    bad[0] ^= 0x80;
+    assert!(read_exi(&s, &g, &bad).is_err());
+    assert_eq!(live(&s), start);
 }

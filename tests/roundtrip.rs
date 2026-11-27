@@ -18,21 +18,39 @@ use exi::strings::{GlobalConfig, GlobalStrings};
 use exi::xml::{PrefixPolicy, XmlConfig, XmlReader, XmlWriter, XmlWriterConfig};
 use exi::{
     Coding, EventSink, Header, Options, OwnedEvent, OwnedName, OwnedValue, Preserve, Reader,
-    ReaderConfig, Step, Writer, WriterConfig, transcode,
+    ReaderConfig, Status, Step, Writer, WriterConfig, transcode,
 };
 
-/// XML text to EXI with `opts`, then back to XML text, reading the EXI `chunk` octets at a
-/// time.
+/// XML text to EXI with `opts`, then back to XML text, reading both the XML and the EXI
+/// `chunk` octets at a time. Small chunks split names, references and multi-byte
+/// characters.
 fn xml_exi_xml(xml: &str, opts: Options, policy: PrefixPolicy, chunk: usize) -> (Vec<u8>, String) {
+    xml_exi_xml_with(&GrammarSet::schemaless(), xml, opts, policy, chunk)
+}
+
+fn xml_exi_xml_with(
+    set: &GrammarSet,
+    xml: &str,
+    opts: Options,
+    policy: PrefixPolicy,
+    chunk: usize,
+) -> (Vec<u8>, String) {
     let strings = GlobalStrings::new(GlobalConfig::new()).unwrap();
-    let set = GrammarSet::schemaless();
     let grammars = set.attach(&strings).unwrap();
     let cfg = XmlConfig::new().report_doctype(true);
     let mut x: XmlReader = XmlReader::new(cfg, &grammars);
-    x.feed(xml.as_bytes());
-    x.end_input();
     let mut w = Writer::new(Vec::new(), WriterConfig::new(opts, &grammars)).unwrap();
-    transcode(&mut x, &mut w).unwrap();
+    let mut rest = xml.as_bytes();
+    loop {
+        let n = rest.len().min(chunk);
+        rest = &rest[x.feed(&rest[..n])..];
+        if rest.is_empty() {
+            x.end_input();
+        }
+        if transcode(&mut x, &mut w).unwrap() == Status::End {
+            break;
+        }
+    }
     let exi = w.into_sink();
 
     let mut r: Reader = Reader::new(ReaderConfig::new(&grammars)).unwrap();
@@ -159,8 +177,10 @@ fn fragments_and_header_options() {
     assert_eq!(texts, ["0", "1", "2"]);
 }
 
-#[test]
-fn schema_informed_typed_values() {
+/// A schema with a typed value of each common kind: attributes `color` (enumeration),
+/// `n` (an integer from 10 to 20) and `ok` (boolean), then elements `i` (integer), `d`
+/// (decimal, nillable), `l` (list of integers) and `t` (date), all in `urn:t`.
+fn typed_set() -> GrammarSet {
     const NS: &str = "urn:t";
     let mut b = GrammarSet::builder();
     let int = b.simple_type(None, Representation::Integer(IntegerRep::Signed));
@@ -226,7 +246,12 @@ fn schema_informed_typed_values() {
     );
     let root = b.element(OwnedName::new(NS, "root"), root_t, false);
     b.global(root);
-    let set = b.build().unwrap();
+    b.build().unwrap()
+}
+
+#[test]
+fn schema_informed_typed_values() {
+    let set = typed_set();
     let strings = GlobalStrings::new(GlobalConfig::new()).unwrap();
     let grammars = set.attach(&strings).unwrap();
     let strict = byte().strict(true).build().unwrap();
@@ -364,5 +389,112 @@ fn self_contained_elements() {
             (EndElement(n("r")), 0),
             (EndDocument, 0),
         ]
+    );
+}
+
+/// The five predefined entities, character references, CDATA and line ends. Text that
+/// needs escaping is escaped once on the way out, and reading the output again gives
+/// the same output.
+#[test]
+fn escapes_cdata_and_line_ends() {
+    // In attributes, references keep their character and literal tab, LF and CR become
+    // spaces; in content, CR LF becomes LF and CDATA becomes text.
+    let xml = "<d a=\"&lt;&gt;&quot;&apos;&amp;&#10;&#9;&#13;\" b=\"t\tx\ny\"><![CDATA[<x>&]]>&#x1F600;&gt;\r\n]]&gt;</d>";
+    let want = "<d a=\"&lt;>&quot;'&amp;&#10;&#9;&#13;\" b=\"t x y\">&lt;x&gt;&amp;😀&gt;\n]]&gt;</d>";
+    for chunk in [1, 2, 3, 1000] {
+        let (_, back) = xml_exi_xml(xml, byte().build().unwrap(), PrefixPolicy::Generate, chunk);
+        assert_eq!(back, want, "chunk {chunk}");
+        let (_, again) = xml_exi_xml(&back, byte().build().unwrap(), PrefixPolicy::Generate, chunk);
+        assert_eq!(again, want, "chunk {chunk}, read again");
+    }
+}
+
+/// Multi-byte characters in names, values, text, comments and PIs, read one octet at a
+/// time and more.
+#[test]
+fn multibyte_characters_in_pieces() {
+    let xml = "<d é=\"é\"><日本>€😀</日本><!--ü--><?p ü?></d>";
+    let opts = byte().preserve(Preserve::COMMENTS | Preserve::PIS).build().unwrap();
+    for chunk in [1, 2, 3, 5, 1000] {
+        let (_, back) = xml_exi_xml(xml, opts.clone(), PrefixPolicy::Generate, chunk);
+        assert_eq!(back, xml, "chunk {chunk}");
+    }
+}
+
+/// A prefix bound again to another URI, and the default namespace undeclared. With
+/// prefixes kept, an element takes the prefix of its own NS event marked
+/// `local_element_ns`, also when its SE comes right after its parent's SE or NS events.
+#[test]
+fn rebound_prefixes_and_undeclared_defaults() {
+    let keep = byte().preserve(Preserve::PREFIXES).build().unwrap();
+    for xml in [
+        r#"<p:a xmlns:p="urn:1"><p:b xmlns:p="urn:2" p:x="1"/><p:c/></p:a>"#,
+        r#"<r><p:b xmlns:p="urn:2"/></r>"#,
+        r#"<p:a xmlns:p="urn:1" k="v"><p:c/><p:b xmlns:p="urn:2"><p:d/></p:b></p:a>"#,
+        r#"<a xmlns="urn:1"><b xmlns=""><c/></b><d/></a>"#,
+    ] {
+        for chunk in [1, 1000] {
+            let (_, back) = xml_exi_xml(xml, keep.clone(), PrefixPolicy::FromEvents, chunk);
+            assert_eq!(back, xml, "chunk {chunk}");
+        }
+    }
+    // Without prefixes, the writer makes its own declarations.
+    let plain = byte().build().unwrap();
+    let (_, back) = xml_exi_xml(
+        r#"<p:a xmlns:p="urn:1"><p:b xmlns:p="urn:2" p:x="1"/><p:c/></p:a>"#,
+        plain.clone(),
+        PrefixPolicy::Generate,
+        1000,
+    );
+    assert_eq!(
+        back,
+        r#"<a xmlns="urn:1"><b xmlns="urn:2" xmlns:ns1="urn:2" ns1:x="1"/><c/></a>"#
+    );
+    let xml = r#"<a xmlns="urn:1"><b xmlns=""><c/></b><d/></a>"#;
+    let (_, back) = xml_exi_xml(xml, plain, PrefixPolicy::Generate, 1000);
+    assert_eq!(back, xml);
+}
+
+/// References to entities the reader does not expand (an external entity, or an
+/// undeclared one when there is an external subset) are kept with `Preserve.dtd`, and
+/// dropped without it.
+#[test]
+fn entity_references() {
+    let dtd = byte().preserve(Preserve::DTD).build().unwrap();
+    for (xml, reference) in [
+        (r#"<!DOCTYPE doc [<!ENTITY e SYSTEM "e.xml">]><doc>a&e;b</doc>"#, "&e;"),
+        (r#"<!DOCTYPE doc SYSTEM "d.dtd"><doc>a&u;b</doc>"#, "&u;"),
+    ] {
+        for chunk in [1, 1000] {
+            let (_, back) = xml_exi_xml(xml, dtd.clone(), PrefixPolicy::Generate, chunk);
+            assert_eq!(back, xml, "chunk {chunk}");
+        }
+        let (_, back) = xml_exi_xml(xml, byte().build().unwrap(), PrefixPolicy::Generate, 7);
+        assert_eq!(back, "<doc>ab</doc>", "without {reference}");
+    }
+}
+
+/// With `Preserve.lexicalValues` typed values travel as their text, exactly as given;
+/// without it they come back in canonical form.
+#[test]
+fn lexical_values_survive() {
+    let set = typed_set();
+    let xml = r#"<root xmlns="urn:t" ok="1" n="+15" color="green"><i>-042</i><d>3.50</d><l> 1 2  3 </l><t>2026-11-22</t></root>"#;
+    // The schema's attribute order, the input's values.
+    let exact = r#"<root xmlns="urn:t" color="green" n="+15" ok="1"><i>-042</i><d>3.50</d><l> 1 2  3 </l><t>2026-11-22</t></root>"#;
+    for strict in [true, false] {
+        let opts = byte()
+            .strict(strict)
+            .preserve(Preserve::LEXICAL_VALUES)
+            .build()
+            .unwrap();
+        let (_, back) = xml_exi_xml_with(&set, xml, opts, PrefixPolicy::Generate, 3);
+        assert_eq!(back, exact, "strict {strict}");
+    }
+    let opts = byte().strict(true).build().unwrap();
+    let (_, back) = xml_exi_xml_with(&set, xml, opts, PrefixPolicy::Generate, 3);
+    assert_eq!(
+        back,
+        r#"<root xmlns="urn:t" color="green" n="15" ok="true"><i>-42</i><d>3.5</d><l>1 2 3</l><t>2026-11-22</t></root>"#
     );
 }

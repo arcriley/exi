@@ -1593,7 +1593,10 @@ impl<'g, const N: usize> Reader<'g, N> {
             if !matches!(out, Out::NS(..)) {
                 self.collecting = false;
             }
-        } else if prefixes && matches!(out, Out::SE(..)) {
+        }
+        // Also an SE right after its parent's SE or NS events, which
+        // ended the parent's wait above.
+        if !self.collecting && prefixes && matches!(out, Out::SE(..)) {
             self.collecting = true;
             self.collect_at = self.queue.len();
         }

@@ -87,3 +87,9 @@ required-features = ["std", "bit-packed", "exig"]
 name = "xhtml5"
 harness = false
 required-features = ["xhtml5", "html5ever"]
+
+[[bench]]
+# cargo bench --bench xml --features dom: XML text -> DOM speed and heap vs libxml2
+name = "xml"
+harness = false
+required-features = ["std", "xml", "dom"]

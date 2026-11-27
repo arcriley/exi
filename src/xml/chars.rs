@@ -52,6 +52,14 @@ pub(crate) fn is_ncname(s: &str) -> bool {
     is_name(s) && !s.contains(':')
 }
 
+/// `PubidChar`: `#x20 | #xD | #xA | [a-zA-Z0-9] |
+/// [-'()+,./:=?;!*#@$_%]`.
+pub(crate) fn is_pubid_char(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(c, ' ' | '\r' | '\n')
+        || "-'()+,./:=?;!*#@$_%".contains(c)
+}
+
 /// `S`.
 pub(crate) fn is_space(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\r')

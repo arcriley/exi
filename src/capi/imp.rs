@@ -1095,11 +1095,17 @@ pub(super) unsafe fn writer_new(c: &exi_writer_config) -> Option<WriterObj> {
         None => CSink::Buffer(Vec::new()),
     };
     let writer = if c.format == EXI_FORMAT_XML {
+        // Of the options, XML text uses only the fragment flag: several
+        // top-level elements.
+        // SAFETY: the caller guarantees the pointers.
+        let fragment = unsafe { read_sized(c.options) }
+            .is_some_and(|o| o.flags & EXI_OPT_FRAGMENT != 0);
         AnyWriter::Xml(XmlWriter::new(
             sink,
             XmlWriterConfig::new()
                 .declaration(c.flags & EXI_WR_XML_DECLARATION != 0)
-                .prefixes(PrefixPolicy::Generate),
+                .prefixes(PrefixPolicy::Generate)
+                .fragment(fragment),
         ))
     } else {
         // SAFETY: the caller guarantees the pointers.

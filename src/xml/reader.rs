@@ -409,6 +409,10 @@ impl Default for XmlConfig {
 /// assert_eq!(events(shallow, lol).unwrap_err().kind(), ErrorKind::Limit); // d → c → b → a is 4
 /// assert_eq!(ev(r#"<!DOCTYPE r [<!ENTITY a "&a;">]><r>&a;</r>"#).unwrap_err().kind(), ErrorKind::Xml);
 /// assert_eq!(ev(r#"<!DOCTYPE r [<!ENTITY a "<x>">]><r>&a;</r>"#).unwrap_err().kind(), ErrorKind::Xml); // unbalanced
+/// // Comments in the internal subset follow the same rules as in content.
+/// assert_eq!(ev("<!DOCTYPE r [<!-- a -- b -->]><r/>").unwrap_err().kind(), ErrorKind::Xml);
+/// assert_eq!(ev("<!DOCTYPE r [<!-- a --->]><r/>").unwrap_err().kind(), ErrorKind::Xml);
+/// assert!(ev("<!DOCTYPE r [<!-- a - b -->]><r/>").is_ok());
 ///
 /// let xxe = ev(r#"<!DOCTYPE r [<!ENTITY e SYSTEM "file:///etc/passwd">]><r>&e;</r>"#)?;
 /// assert!(has(&xxe, &OwnedEvent::EntityReference("e".into())));        // reported, never fetched
@@ -1154,6 +1158,24 @@ impl<'g, const N: usize> XmlReader<'g, N> {
         Ok(())
     }
 
+    /// [`add_chars`](Self::add_chars) for `from..to` of the text the
+    /// parser reads now, without copying it first.
+    fn add_input(&mut self, from: usize, to: usize) -> Result<()> {
+        if self.chars.is_empty() {
+            self.chars_pos = self.pos_now();
+        }
+        let s = match self.ents.last() {
+            Some(e) => &e.text[e.pos + from..e.pos + to],
+            None => &self.text[self.cur + from..self.cur + to],
+        };
+        self.chars_len += s.chars().count() as u64;
+        if self.chars_len > self.cfg.limits.get_max_value_chars() {
+            return Err(limit("character data longer than max_value_chars"));
+        }
+        self.chars.push_str(s);
+        Ok(())
+    }
+
     fn lookup(&self, prefix: &str) -> Option<&str> {
         if prefix == "xml" {
             return Some(XML_NS);
@@ -1338,8 +1360,7 @@ impl<'g, const N: usize> XmlReader<'g, N> {
                     Ok(e) => e,
                     Err(p) => return Ok(p),
                 };
-                let text: String = self.peek().0[CDATA.len()..end].into();
-                self.add_chars(&text)?;
+                self.add_input(CDATA.len(), end)?;
                 self.brackets = 0;
                 self.adv(end + 3);
                 return Ok(P::Again);
@@ -1374,19 +1395,20 @@ impl<'g, const N: usize> XmlReader<'g, N> {
         }
         // A run of text up to markup or a reference.
         let n = s.find(['<', '&']).unwrap_or(s.len());
-        let run: String = s[..n].into();
-        for ch in run.chars() {
+        let mut brackets = self.brackets;
+        for ch in s[..n].chars() {
             match ch {
-                ']' => self.brackets = self.brackets.saturating_add(1),
-                '>' if self.brackets >= 2 => {
+                ']' => brackets = brackets.saturating_add(1),
+                '>' if brackets >= 2 => {
                     return Err(
                         xml_err("]]> in character data").at(self.pos_now())
                     );
                 }
-                _ => self.brackets = 0,
+                _ => brackets = 0,
             }
         }
-        self.add_chars(&run)?;
+        self.brackets = brackets;
+        self.add_input(0, n)?;
         self.adv(n);
         Ok(P::Again)
     }
@@ -2044,7 +2066,10 @@ impl<'g, const N: usize> XmlReader<'g, N> {
                     _ => self.dtd.unread_pe = true,
                 }
             } else if c.eat("<!--") {
-                c.until("-->").ok_or_else(bad)?;
+                let text = c.until("-->").ok_or_else(bad)?;
+                if text.contains("--") || text.ends_with('-') {
+                    return Err(xml_err("-- inside a comment"));
+                }
             } else if c.eat("<?") {
                 c.until("?>").ok_or_else(bad)?;
             } else if c.eat("<!ENTITY") {

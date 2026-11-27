@@ -21,13 +21,22 @@
 //! | Attribute value | in `"`; `&`, `<`, `"` escaped as `&amp;`, `&lt;`, `&quot;`; tab, LF and CR as `&#9;`, `&#10;`, `&#13;`, so the value survives attribute normalization |
 //! | Comment | `<!--text-->` |
 //! | PI | `<?target data?>`, or `<?target?>` when the data is empty |
-//! | DOCTYPE | `<!DOCTYPE name PUBLIC "p" "s" [subset]>`, with each part present only when not empty (`SYSTEM "s"` when there is no public id) |
+//! | DOCTYPE | `<!DOCTYPE name PUBLIC "p" "s" [subset]>`, with each part present only when not empty (`SYSTEM "s"` when there is no public id); a system id holding `"` is written in `'` |
 //! | Entity reference | `&name;` |
 //!
-//! Errors (`ErrorKind::Xml`): text, attribute values, comments or PI
-//! data holding a character outside XML `Char`; a comment containing
-//! `--` or ending with `-`; PI data containing `?>`; a PI target `xml`
-//! in any case; names that are not QNames.
+//! Errors (`ErrorKind::Xml`): text, attribute values, comments, PI
+//! data or a DOCTYPE holding a character outside XML `Char`; a comment
+//! containing `--` or ending with `-`; PI data containing `?>`; a PI
+//! target `xml` in any case; element and attribute names that are not
+//! QNames; entity and DOCTYPE names that are not Names; a public id
+//! with a character outside `PubidChar`; a system id holding both `"`
+//! and `'`.
+//!
+//! Errors (`ErrorKind::State`): a second document element (unless
+//! [`XmlWriterConfig::fragment`]), a DOCTYPE once the document element
+//! has begun, and text or an entity reference outside the document
+//! element. `EndElement` closes the innermost open element whatever
+//! name the event carries: events from a reader are already paired.
 //!
 //! # Prefixes
 //!
@@ -45,7 +54,7 @@ use crate::engine::lexical_string;
 use crate::event::Event;
 use crate::name::{Name, OwnedName};
 use crate::stream::EventSink;
-use crate::xml::chars::{is_char, is_ncname};
+use crate::xml::chars::{is_char, is_name, is_ncname, is_pubid_char};
 use crate::{Error, ErrorKind, Result};
 
 const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
@@ -88,6 +97,7 @@ pub enum PrefixPolicy {
 pub struct XmlWriterConfig {
     declaration: bool,
     prefixes: PrefixPolicy,
+    fragment: bool,
 }
 
 impl XmlWriterConfig {
@@ -105,6 +115,7 @@ impl XmlWriterConfig {
         XmlWriterConfig {
             declaration: false,
             prefixes: PrefixPolicy::Generate,
+            fragment: false,
         }
     }
     /// Write the XML declaration first (default off).
@@ -135,6 +146,23 @@ impl XmlWriterConfig {
     /// ```
     pub fn prefixes(self, p: PrefixPolicy) -> Self {
         XmlWriterConfig { prefixes: p, ..self }
+    }
+    /// Allow any number of top-level elements, as an EXI fragment has
+    /// (default off: one document element). The output is then not an
+    /// XML document but a well-formed external parsed entity.
+    ///
+    /// ```
+    /// use exi::{EventSink, xml::{XmlWriter, XmlWriterConfig}};
+    /// let mut w = XmlWriter::new(Vec::new(), XmlWriterConfig::new().fragment(true));
+    /// w.start_element("a")?;
+    /// w.end_element()?;
+    /// w.start_element("a")?;
+    /// w.end_element()?;
+    /// assert_eq!(w.into_sink(), b"<a/><a/>");
+    /// # Ok::<(), exi::Error>(())
+    /// ```
+    pub fn fragment(self, on: bool) -> Self {
+        XmlWriterConfig { fragment: on, ..self }
     }
 }
 
@@ -192,7 +220,7 @@ impl XmlWriterConfig {
 ///
 /// ```
 /// use exi::xml::{XmlWriter, XmlWriterConfig};
-/// use exi::{EventSink, ErrorKind};
+/// use exi::{Doctype, Event, EventSink, ErrorKind};
 /// let fails = |f: &dyn Fn(&mut XmlWriter<Vec<u8>>) -> exi::Result<()>| {
 ///     let mut w = XmlWriter::new(Vec::new(), XmlWriterConfig::new());
 ///     w.start_element("r").unwrap();
@@ -204,6 +232,33 @@ impl XmlWriterConfig {
 /// assert_eq!(fails(&|w| w.processing_instruction("XML", "")), ErrorKind::Xml);
 /// assert_eq!(fails(&|w| w.text("\u{0}")), ErrorKind::Xml);
 /// assert_eq!(fails(&|w| w.start_element("not a name")), ErrorKind::Xml);
+/// assert_eq!(fails(&|w| w.event(&Event::EntityReference("not a name"))), ErrorKind::Xml);
+/// let doctype = |public_id, system_id| Event::Doctype(Doctype { name: "r", public_id, system_id, text: "" });
+/// assert_eq!(fails(&|w| w.event(&doctype("", ""))), ErrorKind::State); // after the root began
+/// let before = |e: &Event| XmlWriter::new(Vec::new(), XmlWriterConfig::new()).event(e).map_err(|e| e.kind());
+/// assert_eq!(before(&doctype("a\"b", "")), Err(ErrorKind::Xml));      // not a PubidChar
+/// assert_eq!(before(&doctype("", "a\"b'c")), Err(ErrorKind::Xml));    // both quotes
+/// assert_eq!(before(&Event::EntityReference("e")), Err(ErrorKind::State)); // outside the root
+/// # Ok::<(), exi::Error>(())
+/// ```
+///
+/// One document element, unless the config allows a fragment (EXI
+/// fragments have any number).
+///
+/// ```
+/// use exi::xml::{XmlWriter, XmlWriterConfig};
+/// use exi::{EventSink, ErrorKind};
+/// let two = |cfg| {
+///     let mut w = XmlWriter::new(Vec::new(), cfg);
+///     w.start_element("a")?;
+///     w.end_element()?;
+///     w.start_element("b")?;
+///     w.end_element()?;
+///     w.end_document()?;
+///     Ok::<_, exi::Error>(w.into_sink())
+/// };
+/// assert_eq!(two(XmlWriterConfig::new()).unwrap_err().kind(), ErrorKind::State);
+/// assert_eq!(two(XmlWriterConfig::new().fragment(true))?, b"<a/><b/>");
 /// # Ok::<(), exi::Error>(())
 /// ```
 pub struct XmlWriter<S: Sink> {
@@ -211,6 +266,8 @@ pub struct XmlWriter<S: Sink> {
     cfg: XmlWriterConfig,
     begun: bool,
     done: bool,
+    /// A top-level element has begun.
+    rooted: bool,
     /// Bindings in scope: prefix ("" for the default namespace) and
     /// URI.
     bindings: Vec<(String, String)>,
@@ -239,6 +296,7 @@ impl<S: Sink> XmlWriter<S> {
             cfg,
             begun: false,
             done: false,
+            rooted: false,
             bindings: Vec::new(),
             stack: Vec::new(),
             open: None,
@@ -276,6 +334,12 @@ impl<S: Sink> EventSink for XmlWriter<S> {
             Event::EndDocument => self.end_doc(),
             Event::StartElement(n) => {
                 check_qname(n)?;
+                if self.open.is_none() && self.stack.is_empty() {
+                    if self.rooted && !self.cfg.fragment {
+                        return Err(state("a second document element"));
+                    }
+                    self.rooted = true;
+                }
                 self.close_tag(false)?;
                 self.open = Some(OpenTag {
                     name: n.to_owned(),
@@ -365,15 +429,29 @@ impl<S: Sink> EventSink for XmlWriter<S> {
                 }
             }
             Event::Doctype(d) => {
-                self.close_tag(false)?;
+                if self.rooted {
+                    return Err(state("a DOCTYPE after the document element"));
+                }
+                if !is_name(d.name)
+                    || !d.public_id.chars().all(is_pubid_char)
+                    || (d.system_id.contains('"')
+                        && d.system_id.contains('\''))
+                {
+                    return Err(xml_err(
+                        "a DOCTYPE name, public id or system id that cannot be written",
+                    ));
+                }
+                check_chars(d.system_id)?;
+                check_chars(d.text)?;
+                let q = if d.system_id.contains('"') { '\'' } else { '"' };
                 let mut out = format!("<!DOCTYPE {}", d.name);
                 if !d.public_id.is_empty() {
                     out.push_str(&format!(
-                        " PUBLIC \"{}\" \"{}\"",
+                        " PUBLIC \"{}\" {q}{}{q}",
                         d.public_id, d.system_id
                     ));
                 } else if !d.system_id.is_empty() {
-                    out.push_str(&format!(" SYSTEM \"{}\"", d.system_id));
+                    out.push_str(&format!(" SYSTEM {q}{}{q}", d.system_id));
                 }
                 if !d.text.is_empty() {
                     out.push_str(&format!(" [{}]", d.text));
@@ -382,7 +460,15 @@ impl<S: Sink> EventSink for XmlWriter<S> {
                 self.put(&out)
             }
             Event::EntityReference(name) => {
+                if !is_name(name) {
+                    return Err(xml_err("an entity name that is not a Name"));
+                }
                 self.close_tag(false)?;
+                if self.stack.is_empty() {
+                    return Err(state(
+                        "an entity reference outside the document element",
+                    ));
+                }
                 self.put(&format!("&{name};"))
             }
         }

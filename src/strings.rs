@@ -335,7 +335,9 @@ impl<K: Kind> GlobalTable<K> {
     pub fn get(&self, s: &str) -> Option<StrId<K>> {
         let cfg = self.cfg;
         let h = hash::hash32(s.as_bytes());
-        self.inner().find(&cfg, s.as_bytes(), h).map(|i| StrId(i, PhantomData))
+        self.inner_ref()
+            .find(&cfg, s.as_bytes(), h)
+            .map(|i| StrId(i, PhantomData))
     }
 
     /// The string `s`, added if absent, with one more reference held by
@@ -493,7 +495,7 @@ impl<K: Kind> GlobalTable<K> {
     /// The number of references `id` has: 0 for a freed id or one never
     /// made.
     pub fn refs(&self, id: StrId<K>) -> u32 {
-        self.inner().entries.get(id.0 as usize).map_or(0, |e| e.refs)
+        self.inner_ref().entries.get(id.0 as usize).map_or(0, |e| e.refs)
     }
 
     /// Counts describing this table.
@@ -515,7 +517,7 @@ impl<K: Kind> GlobalTable<K> {
     /// # Ok::<(), exi::Error>(())
     /// ```
     pub fn stats(&self) -> TableStats {
-        self.inner().stats()
+        self.inner_ref().stats()
     }
 }
 
@@ -716,24 +718,16 @@ impl<'t, K: Kind> PendingStr<'t, K> {
         // Keep this copy: the reservation becomes the string's slot.
         inner.live_bytes -= cap as u64;
         inner.chunks[chunk as usize].as_mut().expect("chunk").live -= 1;
-        if let Err(e) = inner.check_new(&cfg, len as usize) {
-            inner.live_bytes += cap as u64;
-            inner.chunks[chunk as usize].as_mut().expect("chunk").live += 1;
-            give_back(inner, chunk, start, cap, 0);
-            return Err(e);
-        }
-        let id = match inner.slotless.pop() {
-            Some(id) => id,
-            None => {
-                inner.entries.push(Entry {
-                    chunk: NO_CHUNK,
-                    start: 0,
-                    len: 0,
-                    cap: 0,
-                    hash: 0,
-                    refs: 0,
-                });
-                (inner.entries.len() - 1) as u32
+        let id =
+            inner.check_new(&cfg, len as usize).and_then(|()| inner.new_id());
+        let id = match id {
+            Ok(id) => id,
+            Err(e) => {
+                inner.live_bytes += cap as u64;
+                inner.chunks[chunk as usize].as_mut().expect("chunk").live +=
+                    1;
+                give_back(inner, chunk, start, cap, 0);
+                return Err(e);
             }
         };
         // Shrink the slot when it is the last allocation of the current
@@ -1122,28 +1116,33 @@ impl Inner {
                 return Ok((id, e.chunk, e.start, e.cap));
             }
         }
-        let id = match self.slotless.pop() {
-            Some(id) => id,
-            None => {
-                if self.entries.len() as u64 >= u32::MAX as u64 {
-                    return Err(Error::new(
-                        ErrorKind::Limit,
-                        "global table: no id left",
-                    ));
-                }
-                self.entries.push(Entry {
-                    chunk: NO_CHUNK,
-                    start: 0,
-                    len: 0,
-                    cap: 0,
-                    hash: 0,
-                    refs: 0,
-                });
-                (self.entries.len() - 1) as u32
-            }
-        };
+        let id = self.new_id()?;
         let (chunk, start) = self.alloc(cfg, need);
         Ok((id, chunk, start, need))
+    }
+
+    /// An id with no slot: a freed one whose chunk is gone, or a new
+    /// one. `ErrorKind::Limit` when ids up to `u32::MAX − 1` are all in
+    /// use.
+    fn new_id(&mut self) -> Result<u32> {
+        if let Some(id) = self.slotless.pop() {
+            return Ok(id);
+        }
+        if self.entries.len() as u64 >= u32::MAX as u64 {
+            return Err(Error::new(
+                ErrorKind::Limit,
+                "global table: no id left",
+            ));
+        }
+        self.entries.push(Entry {
+            chunk: NO_CHUNK,
+            start: 0,
+            len: 0,
+            cap: 0,
+            hash: 0,
+            refs: 0,
+        });
+        Ok((self.entries.len() - 1) as u32)
     }
 
     fn write_bytes(&mut self, chunk: u32, start: u32, data: &[u8]) {
@@ -1246,12 +1245,21 @@ impl<K: Kind> GlobalTable<K> {
         }
     }
 
+    /// For methods that change the table.
     #[allow(clippy::mut_from_ref)]
     fn inner(&self) -> &mut Inner {
         // SAFETY: the table is not Sync, and no method keeps this
         // reference across a call that obtains it again; `&str`s point
         // into chunk memory, not into `Inner`.
         unsafe { &mut *self.inner.get() }
+    }
+
+    /// For methods that only read: no `&mut Inner` is made, so none can
+    /// overlap a shared one.
+    fn inner_ref(&self) -> &Inner {
+        // SAFETY: as for `inner`; this reference also ends before any
+        // call that obtains `inner` again.
+        unsafe { &*self.inner.get() }
     }
 
     /// Adds a reference to a live id. Crate-internal: sessions and
@@ -1269,7 +1277,7 @@ impl<K: Kind> GlobalTable<K> {
     /// The string of a live id. The caller must hold a reference for as
     /// long as it uses the result.
     pub(crate) fn resolve(&self, id: StrId<K>) -> &str {
-        let inner = self.inner();
+        let inner = self.inner_ref();
         let e = &inner.entries[id.0 as usize];
         debug_assert!(e.refs > 0, "resolve of a freed string id");
         // SAFETY: interned bytes always come from a &str or from

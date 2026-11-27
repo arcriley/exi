@@ -18,7 +18,7 @@
 //!
 //! | Build | `hash32` is | Cost |
 //! |---|---|---|
-//! | `target_feature = "sse4.2"` (x86, x86_64) or `"crc"` (AArch64) | [`crc32c`] | One instruction per 8 bytes |
+//! | `target_feature = "sse4.2"` (x86_64) or `"crc"` (AArch64) | [`crc32c`] | One instruction per 8 bytes |
 //! | anything else | [`xorshift32`] | A few shifts and XORs per 4 bytes, with no multiply, so it suits Cortex-M0 and RV32 cores without one |
 //!
 //! Both functions are always compiled, so tests check each against
@@ -137,8 +137,15 @@ pub fn crc32c(bytes: &[u8]) -> u32 {
 
 /// The table hash: [`crc32c`] where the hardware has it, otherwise
 /// [`xorshift32`]. Always computed over the string's UTF-8 bytes.
+///
+/// The condition is the one `crc32c` uses for its instructions: 32-bit
+/// x86 with SSE4.2, or 32-bit Arm with `crc`, would otherwise get its
+/// bitwise loop, eight steps a byte.
 pub fn hash32(bytes: &[u8]) -> u32 {
-    if cfg!(any(target_feature = "sse4.2", target_feature = "crc")) {
+    if cfg!(any(
+        all(target_arch = "x86_64", target_feature = "sse4.2"),
+        all(target_arch = "aarch64", target_feature = "crc")
+    )) {
         crc32c(bytes)
     } else {
         xorshift32(bytes)

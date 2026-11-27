@@ -74,6 +74,7 @@ use crate::{Error, ErrorKind, Result};
 /// | `ByteAligned` | every event-code part and value starts on an octet and takes whole octets |
 /// | `PreCompression` | byte-aligned, with values regrouped into channels |
 /// | `Compression` | pre-compression, then DEFLATE |
+#[repr(u8)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Coding {
     #[default]
@@ -87,10 +88,18 @@ pub enum Coding {
 ///
 /// ```
 /// use exi::Preserve;
-/// let p = Preserve::COMMENTS | Preserve::PIS;
+/// let mut p = Preserve::COMMENTS | Preserve::PIS;
 /// assert!(p.contains(Preserve::PIS) && !p.contains(Preserve::DTD));
 /// assert_eq!(Preserve::empty(), Preserve::default());
+/// assert!(Preserve::empty().is_empty());
 /// assert_eq!(Preserve::all().bits(), 0b1_1111);
+/// assert_eq!(Preserve::from_bits(p.bits()), Some(p));
+/// assert_eq!(Preserve::from_bits(0b10_0000), None);
+/// assert_eq!(Preserve::from_bits_truncate(0xFF), Preserve::all());
+/// p |= Preserve::DTD;
+/// assert_eq!(p & Preserve::COMMENTS, Preserve::COMMENTS);
+/// assert_eq!(!Preserve::empty(), Preserve::all());
+/// assert_eq!(p | !p, Preserve::all());
 /// ```
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Preserve(u8);
@@ -107,8 +116,36 @@ impl Preserve {
     pub const fn all() -> Self {
         Preserve(0b1_1111)
     }
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
     pub const fn bits(self) -> u8 {
         self.0
+    }
+    /// Returns `None` when `bits` sets any bit outside [`Preserve::all`].
+    ///
+    /// ```
+    /// use exi::Preserve;
+    /// assert_eq!(Preserve::from_bits(0), Some(Preserve::empty()));
+    /// assert_eq!(Preserve::from_bits(Preserve::all().bits()), Some(Preserve::all()));
+    /// assert_eq!(Preserve::from_bits(1 << 5), None);
+    /// ```
+    pub const fn from_bits(bits: u8) -> Option<Self> {
+        if bits & !Self::all().0 == 0 {
+            Some(Preserve(bits))
+        } else {
+            None
+        }
+    }
+    /// Drops any bit outside [`Preserve::all`].
+    ///
+    /// ```
+    /// use exi::Preserve;
+    /// assert_eq!(Preserve::from_bits_truncate(0xFF), Preserve::all());
+    /// assert_eq!(Preserve::from_bits_truncate(0b10_0001), Preserve::DTD);
+    /// ```
+    pub const fn from_bits_truncate(bits: u8) -> Self {
+        Preserve(bits & Self::all().0)
     }
     pub const fn contains(self, other: Preserve) -> bool {
         self.0 & other.0 == other.0
@@ -119,6 +156,32 @@ impl core::ops::BitOr for Preserve {
     type Output = Preserve;
     fn bitor(self, rhs: Preserve) -> Preserve {
         Preserve(self.0 | rhs.0)
+    }
+}
+
+impl core::ops::BitOrAssign for Preserve {
+    fn bitor_assign(&mut self, rhs: Preserve) {
+        self.0 |= rhs.0;
+    }
+}
+
+impl core::ops::BitAnd for Preserve {
+    type Output = Preserve;
+    fn bitand(self, rhs: Preserve) -> Preserve {
+        Preserve(self.0 & rhs.0)
+    }
+}
+
+impl core::ops::BitAndAssign for Preserve {
+    fn bitand_assign(&mut self, rhs: Preserve) {
+        self.0 &= rhs.0;
+    }
+}
+
+impl core::ops::Not for Preserve {
+    type Output = Preserve;
+    fn not(self) -> Preserve {
+        Preserve(!self.0 & Self::all().0)
     }
 }
 
@@ -169,31 +232,31 @@ impl Options {
     pub fn builder() -> OptionsBuilder {
         OptionsBuilder { options: Options::default() }
     }
-    pub fn coding(&self) -> Coding {
+    pub const fn coding(&self) -> Coding {
         self.coding
     }
-    pub fn strict(&self) -> bool {
+    pub const fn strict(&self) -> bool {
         self.strict
     }
-    pub fn fragment(&self) -> bool {
+    pub const fn fragment(&self) -> bool {
         self.fragment
     }
-    pub fn self_contained(&self) -> bool {
+    pub const fn self_contained(&self) -> bool {
         self.self_contained
     }
-    pub fn preserve(&self) -> Preserve {
+    pub const fn preserve(&self) -> Preserve {
         self.preserve
     }
-    pub fn block_size(&self) -> u32 {
+    pub const fn block_size(&self) -> u32 {
         self.block_size
     }
-    pub fn value_max_length(&self) -> Option<u32> {
+    pub const fn value_max_length(&self) -> Option<u32> {
         self.value_max_length
     }
-    pub fn value_partition_capacity(&self) -> Option<u32> {
+    pub const fn value_partition_capacity(&self) -> Option<u32> {
         self.value_partition_capacity
     }
-    pub fn schema_id(&self) -> &SchemaId {
+    pub const fn schema_id(&self) -> &SchemaId {
         &self.schema_id
     }
     /// True when every option has its default value: an options

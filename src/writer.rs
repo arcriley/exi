@@ -866,20 +866,20 @@ fn unencodable(detail: &'static str) -> crate::Error {
     err(ErrorKind::Unencodable, detail)
 }
 
-fn is_xmlns(n: Name<'_>) -> Option<String> {
+fn is_xmlns<'a>(n: Name<'a>) -> Option<&'a str> {
     if n.uri() == XMLNS_NS {
         return Some(if n.local_name() == "xmlns" {
-            String::new()
+            ""
         } else {
-            n.local_name().into()
+            n.local_name()
         });
     }
     if n.uri().is_empty() {
         if n.prefix() == Some("xmlns") {
-            return Some(n.local_name().into());
+            return Some(n.local_name());
         }
         if n.prefix().is_none() && n.local_name() == "xmlns" {
-            return Some(String::new());
+            return Some("");
         }
     }
     None
@@ -1158,6 +1158,81 @@ impl<'g, S: Sink> Writer<'g, S> {
             *d = Deviations::default();
         }
         old.into_sink().sink
+    }
+    /// Starts a new stream with `grammars` and `sink`, returning the
+    /// old sink. Clears learned grammars, session tables, deviation
+    /// counts, and any poisoned state.
+    ///
+    /// # Errors
+    ///
+    /// `ErrorKind::Schema` or `ErrorKind::Unsupported` when the
+    /// writer's options cannot be used with `grammars`; nothing is
+    /// changed on error.
+    ///
+    /// ```
+    /// use exi::{Coding, EventSink, Header, Options, OwnedName, Writer, WriterConfig};
+    /// use exi::grammar::{GrammarSet, informed::Prod};
+    /// # use exi::{strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let mut b1 = GrammarSet::builder();
+    /// let e1 = b1.complex_type(None, vec![vec![Prod::EE]]);
+    /// let a = b1.element(OwnedName::new("", "a"), e1, false);
+    /// b1.global(a);
+    /// let mut b2 = GrammarSet::builder();
+    /// let e2 = b2.complex_type(None, vec![vec![Prod::EE]]);
+    /// let b = b2.element(OwnedName::new("", "b"), e2, false);
+    /// b2.global(b);
+    /// let (s1, s2) = (b1.build()?, b2.build()?);
+    /// let (g1, g2) = (s1.attach(&strings)?, s2.attach(&strings)?);
+    ///
+    /// let strict = Options::builder().coding(Coding::ByteAligned).strict(true).build()?;
+    /// let cfg = WriterConfig::new(strict, &g1).header(Header::Bare { cookie: false });
+    /// let mut w = Writer::new(Vec::new(), cfg)?;
+    /// w.start_element("a")?;
+    /// w.end_element()?;
+    /// w.end_document()?;
+    /// let first = w.reset_with_grammars(Vec::new(), &g2)?;
+    /// w.start_element("b")?;
+    /// w.end_element()?;
+    /// w.end_document()?;
+    /// assert_eq!(first, [0x80, 0x00]);
+    /// assert_eq!(w.into_sink(), [0x80, 0x00]);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
+    pub fn reset_with_grammars(
+        &mut self,
+        sink: S,
+        grammars: &'g Grammars<'g>,
+    ) -> Result<S> {
+        check_options(&self.cfg.options, grammars)?;
+        self.cfg.grammars = grammars;
+        Ok(self.reset(sink))
+    }
+    /// The sink, for inspecting what has been written so far (for
+    /// example [`SliceSink::written`](crate::coding::SliceSink::written)
+    /// and [`SliceSink::remaining`](crate::coding::SliceSink::remaining))
+    /// without consuming the writer.
+    ///
+    /// ```
+    /// use exi::{Coding, EventSink, Header, Options, Writer, WriterConfig};
+    /// use exi::coding::SliceSink;
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let byte = Options::builder().coding(Coding::ByteAligned).build()?;
+    /// let mut buf = [0u8; 16];
+    /// let cfg = WriterConfig::new(byte, &grammars).header(Header::Bare { cookie: false });
+    /// let mut w = Writer::new(SliceSink::new(&mut buf), cfg)?;
+    /// w.start_element("a")?;
+    /// w.end_element()?;
+    /// w.end_document()?;
+    /// assert_eq!(w.sink().written(), [0x80, 0x01, 0x02, b'a', 0x00]);
+    /// assert_eq!(w.sink().remaining(), 11);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
+    pub fn sink(&self) -> &S {
+        &self.enc.sink().sink
     }
     /// The sink, with everything written to it.
     ///
@@ -1627,7 +1702,7 @@ impl<'g, S: Sink> Writer<'g, S> {
                 if let Some(prefix) = is_xmlns(n) {
                     let uri = engine::lexical_string(&v)?;
                     return self.body(&Event::Namespace(NsDecl {
-                        prefix: &prefix,
+                        prefix,
                         uri: &uri,
                         local_element_ns: false,
                     }));

@@ -850,3 +850,233 @@ fn canonical_whitespace_and_xml_space() -> exi::Result<()> {
     assert_eq!(canonical, expected);
     Ok(())
 }
+
+#[test]
+fn preserve_bitflags_and_repr_u8() {
+    assert_eq!(core::mem::size_of::<ErrorKind>(), 1);
+    assert_eq!(core::mem::size_of::<Coding>(), 1);
+
+    let mut p = Preserve::empty();
+    assert!(p.is_empty());
+    assert_eq!(!p, Preserve::all());
+    p |= Preserve::COMMENTS | Preserve::PIS;
+    assert!(!p.is_empty());
+    assert_eq!(p & Preserve::COMMENTS, Preserve::COMMENTS);
+    p &= Preserve::PIS;
+    assert_eq!(p, Preserve::PIS);
+    assert_eq!(Preserve::from_bits(p.bits()), Some(Preserve::PIS));
+    assert_eq!(Preserve::from_bits(0b10_0000), None);
+    assert_eq!(Preserve::from_bits_truncate(0xFF), Preserve::all());
+    assert_eq!(p | !p, Preserve::all());
+    assert_eq!(p & !p, Preserve::empty());
+}
+
+#[test]
+fn writer_sink_slice_inspection() -> exi::Result<()> {
+    let strings = GlobalStrings::new(GlobalConfig::new())?;
+    let set = GrammarSet::schemaless();
+    let grammars = set.attach(&strings)?;
+    let byte = Options::builder().coding(Coding::ByteAligned).build()?;
+    let cfg = WriterConfig::new(byte, &grammars)
+        .header(Header::Bare { cookie: false });
+
+    let mut buf = [0u8; 32];
+    let mut w = Writer::new(SliceSink::new(&mut buf), cfg)?;
+    assert_eq!(w.sink().written(), &[]);
+    assert_eq!(w.sink().remaining(), 32);
+    w.start_element("a")?;
+    w.flush()?;
+    assert_eq!(w.sink().written(), &[0x80, 0x01, 0x02, b'a']);
+    assert_eq!(w.sink().remaining(), 28);
+    w.end_element()?;
+    w.end_document()?;
+    assert_eq!(w.sink().written(), &[0x80, 0x01, 0x02, b'a', 0x00]);
+    assert_eq!(w.sink().remaining(), 27);
+    Ok(())
+}
+
+#[test]
+fn reader_decode_all_small_large_trailing_and_streams() -> exi::Result<()> {
+    let strings = GlobalStrings::new(GlobalConfig::new())?;
+    let set = GrammarSet::schemaless();
+    let grammars = set.attach(&strings)?;
+    let byte = Options::builder().coding(Coding::ByteAligned).build()?;
+    let wcfg = || {
+        WriterConfig::new(byte.clone(), &grammars)
+            .header(Header::Bare { cookie: false })
+    };
+
+    // Fits inside the 64-byte ring.
+    let small = [0x80, 0x01, 0x02, b'a', 0x00];
+    let mut r = Reader::<64>::new(
+        ReaderConfig::new(&grammars).options(byte.clone()),
+    )?;
+    let mut events = Vec::new();
+    r.decode_all(&small, &mut events)?;
+    assert_eq!(events.len(), 4);
+
+    // Larger than the 64-byte ring (triggers spill).
+    let long = "z".repeat(300);
+    let mut w = Writer::new(Vec::new(), wcfg())?;
+    w.start_element("big")?;
+    w.text(long.as_str())?;
+    w.end_element()?;
+    w.end_document()?;
+    let large = w.into_sink();
+    r.reset();
+    events.clear();
+    r.decode_all(&large, &mut events)?;
+    assert_eq!(
+        events[2],
+        OwnedEvent::Characters(OwnedValue::Str(long.into()))
+    );
+
+    // Trailing bytes beyond the ring size in Sequence::Single.
+    let mut with_trailing = small.to_vec();
+    with_trailing.extend_from_slice(&[0u8; 128]);
+    r.reset();
+    events.clear();
+    r.decode_all(&with_trailing, &mut events)?;
+    assert_eq!(events.len(), 4);
+
+    // Back-to-back streams with Sequence::Streams.
+    let mut two = small.to_vec();
+    two.extend_from_slice(&small);
+    let mut rs = Reader::<64>::new(
+        ReaderConfig::new(&grammars)
+            .options(byte.clone())
+            .sequence(Sequence::Streams),
+    )?;
+    events.clear();
+    rs.decode_all(&two, &mut events)?;
+    assert_eq!(events.len(), 8);
+
+    // Truncated stream returns Truncated.
+    r.reset();
+    events.clear();
+    let err = r.decode_all(&small[..3], &mut events).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Truncated);
+    Ok(())
+}
+
+#[test]
+fn reset_with_grammars_reader_and_writer() -> exi::Result<()> {
+    let strings = GlobalStrings::new(GlobalConfig::new())?;
+    let less = GrammarSet::schemaless();
+    let mut b1 = GrammarSet::builder();
+    let e1 = b1.complex_type(None, vec![vec![Prod::EE]]);
+    let a = b1.element(OwnedName::new("", "a"), e1, false);
+    b1.global(a);
+    let s1 = b1.build()?;
+    let mut b2 = GrammarSet::builder();
+    let e2 = b2.complex_type(None, vec![vec![Prod::EE]]);
+    let b = b2.element(OwnedName::new("", "b"), e2, false);
+    b2.global(b);
+    let s2 = b2.build()?;
+
+    let g_less = less.attach(&strings)?;
+    let g1 = s1.attach(&strings)?;
+    let g2 = s2.attach(&strings)?;
+
+    let strict = Options::builder()
+        .coding(Coding::ByteAligned)
+        .strict(true)
+        .build()?;
+    let cfg = WriterConfig::new(strict.clone(), &g1)
+        .header(Header::Bare { cookie: false });
+    let mut w = Writer::new(Vec::new(), cfg)?;
+    w.start_element("a")?;
+    w.end_element()?;
+    w.end_document()?;
+    let bytes_a = w.reset_with_grammars(Vec::new(), &g2)?;
+    w.start_element("b")?;
+    w.end_element()?;
+    w.end_document()?;
+    let bytes_b = w.into_sink();
+
+    // Writer refuses incompatible grammars without poisoning itself.
+    let nil_opts = Options::builder()
+        .coding(Coding::ByteAligned)
+        .schema_id(exi::SchemaId::Nil)
+        .build()?;
+    let mut w_nil = Writer::new(
+        Vec::new(),
+        WriterConfig::new(nil_opts, &g_less)
+            .header(Header::Bare { cookie: false }),
+    )?;
+    let err = w_nil.reset_with_grammars(Vec::new(), &g1).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Schema);
+    w_nil.start_element("ok")?;
+    w_nil.end_element()?;
+    w_nil.end_document()?;
+
+    // Reader switches grammars and clears poisoned state.
+    let mut r = Reader::<64>::new(
+        ReaderConfig::new(&g1).options(strict.clone()),
+    )?;
+    let mut events = Vec::new();
+    r.decode_all(&bytes_a, &mut events)?;
+    assert!(matches!(
+        &events[1],
+        OwnedEvent::StartElement(n) if n.as_name().local_name() == "a"
+    ));
+
+    // Poison reader, then recover via reset_with_grammars.
+    r.reset();
+    assert_eq!(
+        r.decode_all(&[0x00], &mut events).unwrap_err().kind(),
+        ErrorKind::Header
+    );
+    r.reset_with_grammars(&g2);
+    events.clear();
+    r.decode_all(&bytes_b, &mut events)?;
+    assert!(matches!(
+        &events[1],
+        OwnedEvent::StartElement(n) if n.as_name().local_name() == "b"
+    ));
+    Ok(())
+}
+
+#[test]
+fn xmlns_attribute_forms_without_allocation() -> exi::Result<()> {
+    let strings = GlobalStrings::new(GlobalConfig::new())?;
+    let set = GrammarSet::schemaless();
+    let grammars = set.attach(&strings)?;
+    let opts = Options::builder()
+        .coding(Coding::ByteAligned)
+        .preserve(Preserve::PREFIXES)
+        .build()?;
+    let mut w = Writer::new(
+        Vec::new(),
+        WriterConfig::new(opts.clone(), &grammars)
+            .header(Header::Bare { cookie: false }),
+    )?;
+    w.start_element(("urn:def", "root"))?;
+    w.attribute("xmlns", "urn:def")?;
+    w.attribute(
+        exi::Name::local("p").with_prefix("xmlns"),
+        "urn:p",
+    )?;
+    w.attribute(
+        ("http://www.w3.org/2000/xmlns/", "q"),
+        "urn:q",
+    )?;
+    w.end_element()?;
+    w.end_document()?;
+    let bytes = w.into_sink();
+
+    let mut r = Reader::<64>::new(ReaderConfig::new(&grammars).options(opts))?;
+    let mut events = Vec::new();
+    r.decode_all(&bytes, &mut events)?;
+    let ns: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            OwnedEvent::Namespace { prefix, uri, .. } => {
+                Some((&**prefix, &**uri))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ns, [("", "urn:def"), ("p", "urn:p"), ("q", "urn:q")]);
+    Ok(())
+}

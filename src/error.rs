@@ -53,6 +53,7 @@ pub type Result<T, E = Error> = core::result::Result<T, E>;
 /// | `Internal` | A bug: a caught panic or a broken invariant | `EXI_E_INTERNAL` (−13) |
 /// | `Unencodable` | Writer only: the event fits no production; nothing was written; not fatal | `EXI_E_UNENCODABLE` (−16) |
 #[non_exhaustive]
+#[repr(u8)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ErrorKind {
     Arg,

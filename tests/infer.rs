@@ -320,3 +320,50 @@ fn exact_fits_refuse_what_was_not_seen() {
         encode(&gg, &doc(level, code)).unwrap();
     }
 }
+
+#[test]
+fn xsi_nil_infers_nillable_without_widening_type() {
+    let xml = br#"<r xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><temp>21</temp><temp xsi:nil="true"/><box><item>1</item></box><box xsi:nil="true"/><keep xsi:nil="false">5</keep></r>"#;
+    let mut l = SchemaInference::new();
+    l.document(xml).unwrap();
+    let text = &l.schemas()[0].text;
+    assert!(
+        text.contains(r#"<xs:element name="temp" type="xs:unsignedInt" nillable="true"/>"#),
+        "{text}"
+    );
+    assert!(
+        text.contains("<xs:element name=\"box\" nillable=\"true\">"),
+        "{text}"
+    );
+    assert!(
+        text.contains("<xs:element ref=\"item\"/>"),
+        "{text}"
+    );
+    assert!(
+        text.contains(r#"<xs:element name="keep" type="xs:unsignedInt"/>"#),
+        "{text}"
+    );
+
+    // The inferred schema accepts the original document in strict mode.
+    let set = l.grammars().unwrap();
+    let strings = GlobalStrings::new(GlobalConfig::new()).unwrap();
+    let g = set.attach(&strings).unwrap();
+    let exi = encode(&g, xml).unwrap();
+    let decoded = exi_events(&g, &exi);
+    assert!(decoded.iter().any(|e| matches!(
+        e,
+        OwnedEvent::Attribute(n, OwnedValue::Bool(true))
+            if n.as_name().is("http://www.w3.org/2001/XMLSchema-instance", "nil")
+    )));
+}
+
+#[test]
+fn exact_fit_skips_untrimmed_and_zero_cap_enumerations() {
+    let mut zero = SchemaInference::new().fit(Fit::Exact).max_enumeration(0);
+    zero.document(b"<r><k>a</k><k>a</k></r>").unwrap();
+    assert!(zero.schemas()[0].text.contains(r#"name="k" type="xs:string""#));
+
+    let mut padded = SchemaInference::new().fit(Fit::Exact);
+    padded.document(b"<r><k> a </k><k> a </k><k>b</k><k>b</k></r>").unwrap();
+    assert!(padded.schemas()[0].text.contains(r#"name="k" type="xs:string""#));
+}

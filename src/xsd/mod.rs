@@ -107,6 +107,7 @@ pub mod regex;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
+use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -245,8 +246,9 @@ impl<'a> XsdCompiler<'a> {
         roots: impl IntoIterator<Item = &'m str>,
     ) -> Result<GrammarSet> {
         let mut schema = Schema::default();
+        let mut cache = BTreeMap::new();
         for root in roots {
-            schema.load(&self, &normalize_path(root), None)?;
+            schema.load(&self, &normalize_path(root), None, &mut cache)?;
         }
         schema.index()?;
         let mut c = Compiler::new(&schema, self.max_states);
@@ -266,7 +268,7 @@ struct Node {
     uri: String,
     local: String,
     attrs: Vec<(String, String)>,
-    ns: Vec<(String, String)>,
+    ns: Rc<Vec<(String, String)>>,
     children: Vec<Node>,
 }
 
@@ -350,7 +352,7 @@ fn parse(bytes: &[u8], limits: &Limits) -> Result<Node> {
                     Event::StartElement(n) => {
                         let ns = stack
                             .last()
-                            .map(|p| p.ns.clone())
+                            .map(|p| Rc::clone(&p.ns))
                             .unwrap_or_default();
                         stack.push(Node {
                             uri: n.uri().into(),
@@ -361,7 +363,8 @@ fn parse(bytes: &[u8], limits: &Limits) -> Result<Node> {
                     }
                     Event::Namespace(d) => {
                         if let Some(top) = stack.last_mut() {
-                            top.ns.push((d.prefix.into(), d.uri.into()));
+                            Rc::make_mut(&mut top.ns)
+                                .push((d.prefix.into(), d.uri.into()));
                         }
                     }
                     Event::Attribute(n, v) => {
@@ -461,6 +464,7 @@ impl Schema {
         src: &XsdCompiler<'_>,
         location: &str,
         tns: Option<&str>,
+        cache: &mut BTreeMap<String, Node>,
     ) -> Result<()> {
         if self
             .docs
@@ -469,8 +473,22 @@ impl Schema {
         {
             return Ok(());
         }
-        let bytes = src.docs.iter().find(|(l, _)| l == location).map(|(_, b)| *b).ok_or_else(|| schema_err("an included or imported document was not given to the compiler"))?;
-        let root = parse(bytes, &src.limits)?;
+        let root = match cache.remove(location) {
+            Some(root) => root,
+            None => {
+                let bytes = src
+                    .docs
+                    .iter()
+                    .find(|(l, _)| l == location)
+                    .map(|(_, b)| *b)
+                    .ok_or_else(|| {
+                        schema_err(
+                            "an included or imported document was not given to the compiler",
+                        )
+                    })?;
+                parse(bytes, &src.limits)?
+            }
+        };
         if !root.is("schema") {
             return Err(schema_err("a document whose root is not xs:schema"));
         }
@@ -514,29 +532,37 @@ impl Schema {
         self.docs.push(doc);
         for (loc, include_tns, import_ns) in refs {
             match import_ns {
-                None => self.load(src, &loc, include_tns.as_deref())?,
+                None => self.load(src, &loc, include_tns.as_deref(), cache)?,
                 Some(ns) => {
                     if src.docs.iter().any(|(l, _)| *l == loc) {
-                        self.load(src, &loc, None)?;
+                        self.load(src, &loc, None, cache)?;
                     } else if self.docs.iter().any(|d| d.tns == ns) {
                         // already read
                     } else {
                         // Any given document with that target
-                        // namespace.
-                        let found = src
-                            .docs
-                            .iter()
-                            .map(|(l, b)| (l.clone(), *b))
-                            .find(|(_, b)| {
-                                parse(b, &src.limits).ok().is_some_and(|r| {
-                                    r.attr("targetNamespace").unwrap_or("")
-                                        == ns
-                                })
-                            });
+                        // namespace; parsed documents are cached so
+                        // none is parsed twice.
+                        let mut found = None;
+                        for (l, b) in &src.docs {
+                            if self.docs.iter().any(|d| d.location == *l) {
+                                continue;
+                            }
+                            if !cache.contains_key(l.as_str()) {
+                                if let Ok(r) = parse(b, &src.limits) {
+                                    cache.insert(l.clone(), r);
+                                }
+                            }
+                            if cache.get(l.as_str()).is_some_and(|r| {
+                                r.attr("targetNamespace").unwrap_or("") == ns
+                            }) {
+                                found = Some(l.clone());
+                                break;
+                            }
+                        }
                         // An import nothing refers to is harmless:
                         // unresolved references fail later.
-                        if let Some((l, _)) = found {
-                            self.load(src, &l, None)?;
+                        if let Some(l) = found {
+                            self.load(src, &l, None, cache)?;
                         }
                     }
                 }
@@ -891,6 +917,11 @@ struct Compiler<'s> {
     parts: BTreeMap<TypeKey, Parts>,
     globals: BTreeMap<(String, String), ElementId>,
     locals: BTreeMap<usize, (ElementId, OwnedName)>,
+    visiting_simple: BTreeSet<(String, String)>,
+    visiting_parts: BTreeSet<TypeKey>,
+    visiting_attr_groups: BTreeSet<(String, String)>,
+    visiting_groups: BTreeSet<(String, String)>,
+    visiting_elem_type: BTreeSet<usize>,
     string: SimpleTypeId,
     any_type: Option<TypeId>,
 }
@@ -928,6 +959,11 @@ impl<'s> Compiler<'s> {
             parts: BTreeMap::new(),
             globals: BTreeMap::new(),
             locals: BTreeMap::new(),
+            visiting_simple: BTreeSet::new(),
+            visiting_parts: BTreeSet::new(),
+            visiting_attr_groups: BTreeSet::new(),
+            visiting_groups: BTreeSet::new(),
+            visiting_elem_type: BTreeSet::new(),
             string,
             any_type: None,
         }
@@ -1062,8 +1098,13 @@ impl<'s> Compiler<'s> {
                     "a complex type where a simple type is needed",
                 ));
             }
-            let info = self.simple_info(d, node)?;
-            self.push_simple(Some(OwnedName::new(uri, local)), info)
+            let key = (uri.to_string(), local.to_string());
+            if !self.visiting_simple.insert(key.clone()) {
+                return Err(schema_err("cyclic simple type definition"));
+            }
+            let info = self.simple_info(d, node);
+            self.visiting_simple.remove(&key);
+            self.push_simple(Some(OwnedName::new(uri, local)), info?)
         };
         self.simple_named.insert((uri.into(), local.into()), t);
         Ok(t)
@@ -1349,6 +1390,17 @@ impl<'s> Compiler<'s> {
                 "a simple type where a complex type is needed",
             ));
         }
+        if !self.visiting_parts.insert(k.clone()) {
+            return Err(schema_err("cyclic complex type derivation"));
+        }
+        let res = self.build_parts(d, node);
+        self.visiting_parts.remove(k);
+        let p = res?;
+        self.parts.insert(k.clone(), p.clone());
+        Ok(p)
+    }
+
+    fn build_parts(&mut self, d: usize, node: &Node) -> Result<Parts> {
         let mut mixed = node.attr("mixed") == Some("true");
         let p = if let Some(sc) = node.child("simpleContent") {
             let (x, ext) = match (
@@ -1456,7 +1508,6 @@ impl<'s> Compiler<'s> {
             self.attributes(d, node, &mut attrs, &mut wild, true)?;
             Parts { attrs, wild, content, mixed }
         };
-        self.parts.insert(k.clone(), p.clone());
         Ok(p)
     }
 
@@ -1497,7 +1548,15 @@ impl<'s> Compiler<'s> {
                                 "a reference to an undeclared attribute group",
                             )
                         })?;
-                    self.attributes(gd, g, attrs, wild, true)?;
+                    let key = (u, l);
+                    if !self.visiting_attr_groups.insert(key.clone()) {
+                        return Err(schema_err(
+                            "cyclic attributeGroup definition",
+                        ));
+                    }
+                    let res = self.attributes(gd, g, attrs, wild, true);
+                    self.visiting_attr_groups.remove(&key);
+                    res?;
                 }
                 "anyAttribute" => {
                     let w = self.wildcard(d, c);
@@ -1601,8 +1660,13 @@ impl<'s> Compiler<'s> {
                         schema_err("xs:group without a model group")
                     })?;
                 // The group's model with the reference's occurrences.
-                let p = self.particle(gd, inner)?;
-                return Ok(Particle { term: p.term, min, max });
+                let key = (u, l);
+                if !self.visiting_groups.insert(key.clone()) {
+                    return Err(schema_err("cyclic group definition"));
+                }
+                let p = self.particle(gd, inner);
+                self.visiting_groups.remove(&key);
+                return Ok(Particle { term: p?.term, min, max });
             }
             kind => {
                 let mut items = Vec::new();
@@ -1732,7 +1796,13 @@ impl<'s> Compiler<'s> {
                         "a substitution group head that is not declared",
                     )
                 })?;
-            return self.element_type(hd, head);
+            let key = key_of(node);
+            if !self.visiting_elem_type.insert(key) {
+                return Err(schema_err("cyclic substitutionGroup definition"));
+            }
+            let res = self.element_type(hd, head);
+            self.visiting_elem_type.remove(&key);
+            return res;
         }
         self.type_of(&TypeKey::Named(XS.into(), "anyType".into()))
     }
@@ -1840,11 +1910,7 @@ impl<'s> Compiler<'s> {
         if let Term::All(items) = &m.term {
             let mut s = Vec::new();
             for it in items {
-                if let Term::Elem(es) = &it.term {
-                    for (e, _) in es {
-                        s.push(Prod::Se { element: *e, next: 0 });
-                    }
-                }
+                collect_all_prods(&it.term, &mut s);
             }
             s.push(Prod::EE);
             ch(&mut s, 0);
@@ -1855,6 +1921,8 @@ impl<'s> Compiler<'s> {
         // Subset construction from the start position.
         const START: usize = usize::MAX;
         let mut sets: Vec<Vec<usize>> = alloc::vec![alloc::vec![START]];
+        let mut state_index: BTreeMap<Vec<usize>, usize> = BTreeMap::new();
+        state_index.insert(alloc::vec![START], 0);
         let mut out: Vec<Vec<Prod>> = Vec::new();
         let mut i = 0;
         while i < sets.len() {
@@ -1870,24 +1938,26 @@ impl<'s> Compiler<'s> {
                 }
                 v.into_iter().collect()
             };
-            // Group by what each position matches, in order of first
-            // appearance.
-            let mut groups: Vec<(TermKey, Vec<usize>)> = Vec::new();
+            // Group by what each position matches, ordered by rank
+            // then first appearance.
+            let mut groups: BTreeMap<(u8, usize), (TermKey, Vec<usize>)> =
+                BTreeMap::new();
             for &q in &follows {
                 for k in &g.keys[q] {
-                    match groups.iter_mut().find(|(gk, _)| gk.same(k)) {
-                        Some((_, v)) => v.push(q),
-                        None => groups.push((k.clone(), alloc::vec![q])),
-                    }
+                    let gk = (k.rank(), g.order(k));
+                    groups
+                        .entry(gk)
+                        .or_insert_with(|| (k.clone(), Vec::new()))
+                        .1
+                        .push(q);
                 }
             }
-            groups.sort_by_key(|(k, _)| (k.rank(), g.order(k)));
             let mut s = Vec::new();
-            for (k, mut target) in groups {
+            for (_, (k, mut target)) in groups {
                 target.sort();
                 target.dedup();
-                let next = match sets.iter().position(|x| *x == target) {
-                    Some(j) => j,
+                let next = match state_index.get(&target) {
+                    Some(&j) => j,
                     None => {
                         if sets.len() >= self.max_states {
                             return Err(Error::new(
@@ -1895,8 +1965,10 @@ impl<'s> Compiler<'s> {
                                 "a content model with more states than max_states",
                             ));
                         }
+                        let j = sets.len();
+                        state_index.insert(target.clone(), j);
                         sets.push(target);
-                        sets.len() - 1
+                        j
                     }
                 } as u32;
                 s.push(match k {
@@ -1919,6 +1991,27 @@ impl<'s> Compiler<'s> {
     }
 }
 
+fn collect_all_prods(term: &Term, out: &mut Vec<Prod>) {
+    match term {
+        Term::Elem(es) => {
+            for (e, _) in es {
+                out.push(Prod::Se { element: *e, next: 0 });
+            }
+        }
+        Term::Any(Wild::Any) => out.push(Prod::SeAny { next: 0 }),
+        Term::Any(Wild::List(us)) => {
+            for u in us {
+                out.push(Prod::SeUri { uri: u.as_str().into(), next: 0 });
+            }
+        }
+        Term::Seq(items) | Term::Choice(items) | Term::All(items) => {
+            for it in items {
+                collect_all_prods(&it.term, out);
+            }
+        }
+    }
+}
+
 /// What a position matches. Elements compare by name: two declarations
 /// of one name in one content model are one terminal.
 #[derive(Clone, Debug)]
@@ -1928,13 +2021,21 @@ enum TermKey {
     Any,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum OrderKey {
+    Elem(Box<str>, Box<str>),
+    Uri(String),
+    Any,
+}
+
 impl TermKey {
-    fn same(&self, o: &TermKey) -> bool {
-        match (self, o) {
-            (TermKey::Elem(_, a), TermKey::Elem(_, b)) => a == b,
-            (TermKey::Uri(a), TermKey::Uri(b)) => a == b,
-            (TermKey::Any, TermKey::Any) => true,
-            _ => false,
+    fn order_key(&self) -> OrderKey {
+        match self {
+            TermKey::Elem(_, n) => {
+                OrderKey::Elem(n.uri.clone(), n.local.clone())
+            }
+            TermKey::Uri(u) => OrderKey::Uri(u.clone()),
+            TermKey::Any => OrderKey::Any,
         }
     }
     fn rank(&self) -> u8 {
@@ -1953,9 +2054,9 @@ impl TermKey {
 struct Glushkov {
     keys: Vec<Vec<TermKey>>,
     follow: Vec<BTreeSet<usize>>,
-    /// Terminals in order of first appearance: schema order for SE
-    /// productions.
-    seen: Vec<TermKey>,
+    /// Terminals mapped to order of first appearance: schema order for
+    /// SE productions.
+    seen: BTreeMap<OrderKey, usize>,
 }
 
 struct Frag {
@@ -1966,7 +2067,7 @@ struct Frag {
 
 impl Glushkov {
     fn order(&self, k: &TermKey) -> usize {
-        self.seen.iter().position(|s| s.same(k)).unwrap_or(usize::MAX)
+        self.seen.get(&k.order_key()).copied().unwrap_or(usize::MAX)
     }
 
     fn empty() -> Frag {
@@ -2068,9 +2169,8 @@ impl Glushkov {
     fn position(&mut self, keys: Vec<TermKey>) -> Frag {
         let p = self.keys.len();
         for k in &keys {
-            if !self.seen.iter().any(|s| s.same(k)) {
-                self.seen.push(k.clone());
-            }
+            let next = self.seen.len();
+            self.seen.entry(k.order_key()).or_insert(next);
         }
         self.keys.push(keys);
         self.follow.push(BTreeSet::new());

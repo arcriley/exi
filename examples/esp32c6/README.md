@@ -3,8 +3,8 @@
 This Rust firmware uses EXI with a fixed schema and a USB Serial/JTAG console.
 The schema has one element, `<reading>`, with signed integer content. The
 device decodes an EXI document and returns a fresh document with the reading
-incremented. Both directions use strict, byte-aligned documents with bare
-headers. The schema and options are agreed out of band.
+incremented. By default both directions use strict, byte-aligned documents
+with bare headers. The schema and options are agreed out of band.
 
 ## Build and flash
 
@@ -40,12 +40,17 @@ and grammar construction, and includes per-document codec construction.
 Heap figures are the allocator's live and high-water estimates since boot,
 including grammar setup. The firmware reserves 32 KiB for the allocator.
 
-On a XIAO ESP32-C6 (chip revision 0.2), three runs took 2.527–2.530 s per
+On a XIAO ESP32-C6 (chip revision 0.2), three byte-aligned runs took 2.527–2.530 s per
 1,000 round trips, with 9,504 bytes live and a 10,236-byte heap high-water
 mark. The release application image was 201,488 bytes.
+
+Build with `--features bit-packed` at both ends to pack the event code and
+integer sign into bits. The same exchange then sends `800540` and receives
+`800580`. The bare header carries no coding options.
 
 To run the shared codec test from this directory on an x86-64 Linux host:
 
 ```sh
 cargo +nightly test --locked --lib --target x86_64-unknown-linux-gnu
+cargo +nightly test --locked --lib --target x86_64-unknown-linux-gnu --features bit-packed
 ```

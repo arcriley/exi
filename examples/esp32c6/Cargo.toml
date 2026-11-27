@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[features]
+bit-packed = ["exi/bit-packed"]
+
 [dependencies]
 exi = { path = "../..", default-features = false, features = ["bare-header-only"] }
 

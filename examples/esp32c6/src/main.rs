@@ -18,7 +18,9 @@ use esp_hal::Blocking;
 use esp_hal::time::Instant;
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use exi::strings::{GlobalConfig, GlobalStrings};
-use exi_esp32c6::{MAX_DOCUMENT, decode, encode, from_hex, grammar, options};
+use exi_esp32c6::{
+    MAX_DOCUMENT, decode, encode, from_hex, grammar, options, reply,
+};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -44,6 +46,8 @@ impl Write for Console {
 }
 
 impl Console {
+    // This polls until a host sends LF. Firmware with a watchdog must
+    // allow for an idle console when scheduling its watchdog service.
     fn line(&mut self, out: &mut [u8]) -> Option<usize> {
         let mut len = 0;
         let mut overflow = false;
@@ -109,17 +113,7 @@ fn main() -> ! {
             writeln!(usb, "ERR expected EXI hex or BENCH\r").unwrap();
             continue;
         };
-        let result =
-            decode(&attached, &opts, &input[..len]).and_then(|value| {
-                let next = value.checked_add(1).ok_or_else(|| {
-                    exi::Error::new(
-                        exi::ErrorKind::Value,
-                        "reading cannot be incremented",
-                    )
-                })?;
-                encode(&attached, &opts, next, &mut output)
-            });
-        match result {
+        match reply(&attached, &opts, &input[..len], &mut output) {
             Ok(len) => {
                 write!(usb, "EXI ").unwrap();
                 for byte in &output[..len] {

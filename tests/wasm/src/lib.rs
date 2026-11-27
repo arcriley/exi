@@ -13,12 +13,25 @@
 
 use std::cell::{Cell, RefCell};
 
+use exi::grammar::{GrammarSet, Grammars};
 use exi::strings::{GlobalConfig, GlobalStrings};
+use exi::{Options, Result};
 use exi_esp32c6::{MAX_DOCUMENT, decode, encode, grammar, options};
 
 thread_local! {
+    static CODEC: Result<(GlobalStrings, GrammarSet, Options)> =
+        Ok((GlobalStrings::new(GlobalConfig::device())?, grammar()?, options()?));
     static BYTES: RefCell<[u8; MAX_DOCUMENT]> = const { RefCell::new([0; MAX_DOCUMENT]) };
     static READING: Cell<i64> = const { Cell::new(0) };
+}
+
+fn with_codec<T>(
+    f: impl FnOnce(&Grammars<'_>, &Options) -> Result<T>,
+) -> Result<T> {
+    CODEC.with(|codec| {
+        let (strings, set, opts) = codec.as_ref().map_err(Clone::clone)?;
+        f(&set.attach(strings)?, opts)
+    })
 }
 
 /// Scratch space of `capacity()` bytes. The browser accesses it between
@@ -37,15 +50,10 @@ pub extern "C" fn capacity() -> usize {
 /// length.
 #[unsafe(no_mangle)]
 pub extern "C" fn encode_reading(value: i64) -> i32 {
-    let result = || -> exi::Result<usize> {
-        let strings = GlobalStrings::new(GlobalConfig::device())?;
-        let grammar = grammar()?;
-        let attached = grammar.attach(&strings)?;
-        BYTES.with(|bytes| {
-            encode(&attached, &options()?, value, &mut *bytes.borrow_mut())
-        })
-    };
-    result().map_or(-1, |len| len as i32)
+    with_codec(|g, opts| {
+        BYTES.with(|bytes| encode(g, opts, value, &mut *bytes.borrow_mut()))
+    })
+    .map_or(-1, |len| len as i32)
 }
 
 /// Reads an EXI document from the scratch buffer. A zero status
@@ -55,15 +63,10 @@ pub extern "C" fn decode_reading(len: usize) -> i32 {
     if len > MAX_DOCUMENT {
         return -1;
     }
-    let result = || -> exi::Result<i64> {
-        let strings = GlobalStrings::new(GlobalConfig::device())?;
-        let grammar = grammar()?;
-        let attached = grammar.attach(&strings)?;
-        BYTES.with(|bytes| {
-            decode(&attached, &options()?, &bytes.borrow()[..len])
-        })
-    };
-    match result() {
+    let result = with_codec(|g, opts| {
+        BYTES.with(|bytes| decode(g, opts, &bytes.borrow()[..len]))
+    });
+    match result {
         Ok(value) => {
             READING.set(value);
             0

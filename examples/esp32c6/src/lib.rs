@@ -34,7 +34,12 @@ pub fn grammar() -> Result<GrammarSet> {
 }
 
 pub fn options() -> Result<Options> {
-    Options::builder().coding(Coding::ByteAligned).strict(true).build()
+    let coding = if cfg!(feature = "bit-packed") {
+        Coding::BitPacked
+    } else {
+        Coding::ByteAligned
+    };
+    Options::builder().coding(coding).strict(true).build()
 }
 
 pub fn encode(
@@ -58,8 +63,6 @@ pub fn decode(
     opts: &Options,
     bytes: &[u8],
 ) -> Result<i64> {
-    let mut reader =
-        Reader::<64>::new(ReaderConfig::new(grammars).options(opts.clone()))?;
     if bytes.len() > MAX_DOCUMENT {
         return Err(Error::new(ErrorKind::Limit, "serial document too long"));
     }
@@ -69,6 +72,8 @@ pub fn decode(
             "expected a bare EXI header",
         ));
     }
+    let mut reader =
+        Reader::<64>::new(ReaderConfig::new(grammars).options(opts.clone()))?;
     reader.feed(bytes);
     reader.end_input();
     let bad =
@@ -91,6 +96,37 @@ pub fn decode(
         return Err(bad());
     }
     Ok(reading)
+}
+
+/// Returns the encoded length of the serial reply, or a value error
+/// if the reading cannot be incremented.
+///
+/// ```
+/// use exi::strings::{GlobalConfig, GlobalStrings};
+/// use exi_esp32c6::{MAX_DOCUMENT, decode, encode, grammar, options, reply};
+///
+/// let strings = GlobalStrings::new(GlobalConfig::device())?;
+/// let set = grammar()?;
+/// let g = set.attach(&strings)?;
+/// let opts = options()?;
+/// let mut request = [0; MAX_DOCUMENT];
+/// let mut response = [0; MAX_DOCUMENT];
+/// let len = encode(&g, &opts, 21, &mut request)?;
+/// let len = reply(&g, &opts, &request[..len], &mut response)?;
+/// assert_eq!(decode(&g, &opts, &response[..len])?, 22);
+/// # Ok::<(), exi::Error>(())
+/// ```
+pub fn reply(
+    grammars: &Grammars<'_>,
+    opts: &Options,
+    request: &[u8],
+    out: &mut [u8],
+) -> Result<usize> {
+    let value = decode(grammars, opts, request)?;
+    let next = value.checked_add(1).ok_or_else(|| {
+        Error::new(ErrorKind::Value, "reading cannot be incremented")
+    })?;
+    encode(grammars, opts, next, out)
 }
 
 /// Hex text (a serial line) into `out`: the number of octets, or `None`
@@ -131,9 +167,32 @@ mod tests {
             assert_eq!(decode(&g, &opts, &bytes[..len])?, reading);
         }
         let len = encode(&g, &opts, 21, &mut bytes)?;
-        assert_eq!(&bytes[..len], b"\x80\0\0\x15");
+        let expected: &[u8] = if cfg!(feature = "bit-packed") {
+            &[0x80, 0x05, 0x40]
+        } else {
+            &[0x80, 0, 0, 0x15]
+        };
+        assert_eq!(&bytes[..len], expected);
         assert!(decode(&g, &opts, &bytes[..len - 1]).is_err());
         assert!(decode(&g, &opts, &bytes[..len + 1]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn reply_at_integer_limit() -> Result<()> {
+        let set = grammar()?;
+        let strings = GlobalStrings::new(GlobalConfig::device())?;
+        let g = set.attach(&strings)?;
+        let opts = options()?;
+        let mut request = [0; MAX_DOCUMENT];
+        let mut response = [0; MAX_DOCUMENT];
+        let len = encode(&g, &opts, i64::MAX, &mut request)?;
+        let err =
+            reply(&g, &opts, &request[..len], &mut response).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::Value);
+        let len = encode(&g, &opts, i64::MAX - 1, &mut request)?;
+        let len = reply(&g, &opts, &request[..len], &mut response)?;
+        assert_eq!(decode(&g, &opts, &response[..len])?, i64::MAX);
         Ok(())
     }
 
@@ -146,8 +205,12 @@ mod tests {
         let set = grammar()?;
         let strings = GlobalStrings::new(GlobalConfig::device())?;
         let g = set.attach(&strings)?;
-        let opts = options()?;
-        let two_63 = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01];
+        let opts = Options::builder()
+            .coding(Coding::ByteAligned)
+            .strict(true)
+            .build()?;
+        let two_63 =
+            [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01];
         for sign in [0, 1] {
             let mut stream = [0x80, 0, sign, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
             stream[3..].copy_from_slice(&two_63);
@@ -156,7 +219,10 @@ mod tests {
         // One less is the largest positive reading.
         let mut bytes = [0; MAX_DOCUMENT];
         let len = encode(&g, &opts, i64::MAX, &mut bytes)?;
-        assert_eq!(&bytes[3..len], &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]);
+        assert_eq!(
+            &bytes[3..len],
+            &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]
+        );
         Ok(())
     }
 

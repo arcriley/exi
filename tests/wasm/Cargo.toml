@@ -7,6 +7,9 @@ publish = false
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+bit-packed = ["exi-esp32c6/bit-packed"]
+
 [dependencies]
 exi = { path = "../..", default-features = false, features = ["bare-header-only"] }
 exi-esp32c6 = { path = "../../examples/esp32c6" }

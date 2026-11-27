@@ -384,3 +384,151 @@ fn compiled_schemas_have_an_xml_form() {
     assert!(text.starts_with("<grammars "), "{text}");
     assert!(text.contains(r#"<uri value="urn:t"><local>e</local></uri>"#), "{text}");
 }
+
+#[test]
+fn schema_errors() {
+    let compile = |body: &str| GrammarSet::from_xsd(&schema("", body));
+    let not_schema = br#"<xs:element xmlns:xs="http://www.w3.org/2001/XMLSchema" name="a"/>"#;
+    assert_eq!(GrammarSet::from_xsd(not_schema).unwrap_err().kind(), ErrorKind::Schema);
+    assert_eq!(GrammarSet::from_xsd(b"<xs:schema").unwrap_err().kind(), ErrorKind::Xml);
+    for body in [
+        r#"<xs:element type="xs:int"/>"#,           // a global without a name
+        r#"<xs:complexType/>"#,
+        r#"<xs:element name="a" type="nope:T"/>"#, // an undeclared prefix
+        r#"<xs:element name="a" type="Missing"/>"#,
+        r#"<xs:element name="a"><xs:complexType><xs:sequence><xs:element ref="b"/></xs:sequence></xs:complexType></xs:element>"#,
+        // A complex type where a simple type is needed.
+        r#"<xs:complexType name="C"/><xs:element name="e"><xs:complexType><xs:attribute name="a" type="C"/></xs:complexType></xs:element>"#,
+        r#"<xs:complexType name="C"/><xs:simpleType name="S"><xs:restriction base="C"/></xs:simpleType>"#,
+    ] {
+        let e = compile(body).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::Schema, "{body}: {e}");
+    }
+}
+
+/// `xsi:type` selects a type derived from the declared one.
+#[test]
+fn xsi_type_names_a_derived_type() {
+    let set = GrammarSet::from_xsd(&schema(
+        "",
+        r#"<xs:complexType name="Base"><xs:sequence><xs:element name="a"/></xs:sequence></xs:complexType>
+           <xs:complexType name="Derived"><xs:complexContent><xs:extension base="Base">
+             <xs:sequence><xs:element name="b"/></xs:sequence>
+           </xs:extension></xs:complexContent></xs:complexType>
+           <xs:element name="e" type="Base"/>"#,
+    ))
+    .unwrap();
+    let xsi = r#"xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance""#;
+    assert!(fits(&set, &format!(r#"<e {xsi} xsi:type="Derived"><a/><b/></e>"#)));
+    assert!(!fits(&set, "<e><a/><b/></e>"));
+}
+
+/// A member of a substitution group without a type takes the head's.
+#[test]
+fn substitution_members_inherit_the_head_type() {
+    let set = GrammarSet::from_xsd(&schema(
+        "",
+        r#"<xs:complexType name="T"><xs:attribute name="v" use="required"/></xs:complexType>
+           <xs:element name="head" type="T"/>
+           <xs:element name="mid" substitutionGroup="head"/>
+           <xs:element name="leaf" substitutionGroup="mid"/>
+           <xs:element name="r"><xs:complexType><xs:sequence>
+             <xs:element ref="head" maxOccurs="unbounded"/>
+           </xs:sequence></xs:complexType></xs:element>"#,
+    ))
+    .unwrap();
+    assert!(fits(&set, r#"<r><head v="1"/><leaf v="3"/></r>"#));
+    assert!(!fits(&set, "<r><leaf/></r>")); // T needs v
+}
+
+#[test]
+fn element_and_attribute_forms() {
+    let set = GrammarSet::from_xsd(&schema(
+        r#"targetNamespace="urn:f""#,
+        r#"<xs:element name="r"><xs:complexType><xs:sequence>
+             <xs:element name="u"/><xs:element name="q" form="qualified"/>
+           </xs:sequence>
+           <xs:attribute name="a"/><xs:attribute name="b" form="qualified"/>
+           </xs:complexType></xs:element>"#,
+    ))
+    .unwrap();
+    assert!(set.name_id("", "u").is_some() && set.name_id("urn:f", "u").is_none());
+    assert!(set.name_id("urn:f", "q").is_some());
+    assert!(set.name_id("", "a").is_some() && set.name_id("urn:f", "b").is_some());
+    assert!(fits(&set, r#"<f:r xmlns:f="urn:f" a="1" f:b="2"><u/><f:q/></f:r>"#));
+    assert!(!fits(&set, r#"<f:r xmlns:f="urn:f"><f:u/><f:q/></f:r>"#));
+
+    let qualified = GrammarSet::from_xsd(&schema(
+        r#"targetNamespace="urn:f" elementFormDefault="qualified" attributeFormDefault="qualified""#,
+        r#"<xs:element name="r"><xs:complexType><xs:sequence><xs:element name="u"/></xs:sequence>
+           <xs:attribute name="a"/></xs:complexType></xs:element>"#,
+    ))
+    .unwrap();
+    assert!(qualified.name_id("urn:f", "u").is_some());
+    assert!(qualified.name_id("urn:f", "a").is_some());
+}
+
+#[test]
+fn enumerations_on_special_bases() {
+    let set = GrammarSet::from_xsd(&schema(
+        r#"targetNamespace="urn:t" xmlns:t="urn:t""#,
+        r#"<xs:simpleType name="U"><xs:union memberTypes="xs:int xs:date"/></xs:simpleType>
+           <xs:simpleType name="L"><xs:list itemType="xs:int"/></xs:simpleType>
+           <xs:simpleType name="onInt"><xs:restriction base="xs:int">
+             <xs:enumeration value="1"/><xs:enumeration value="2"/></xs:restriction></xs:simpleType>
+           <xs:simpleType name="onUnion"><xs:restriction base="t:U">
+             <xs:enumeration value="1"/><xs:enumeration value="2"/></xs:restriction></xs:simpleType>
+           <xs:simpleType name="onQName"><xs:restriction base="xs:QName">
+             <xs:enumeration value="t:a"/></xs:restriction></xs:simpleType>
+           <xs:simpleType name="onList"><xs:restriction base="t:L">
+             <xs:enumeration value="1 2"/></xs:restriction></xs:simpleType>"#,
+    ))
+    .unwrap();
+    for (name, want) in [
+        ("onInt", "enumeration"),
+        ("onUnion", "string"),
+        ("onQName", "string"),
+        ("onList", "list"),
+    ] {
+        assert_eq!(rep(&set, name), want, "{name}");
+    }
+}
+
+/// An enumeration restricted again has only its own values.
+#[test]
+fn enumeration_restricted_again() {
+    let set = GrammarSet::from_xsd(&schema(
+        r#"targetNamespace="urn:t" xmlns:t="urn:t""#,
+        r#"<xs:simpleType name="A"><xs:restriction base="xs:string">
+             <xs:enumeration value="x"/><xs:enumeration value="y"/><xs:enumeration value="z"/>
+           </xs:restriction></xs:simpleType>
+           <xs:simpleType name="B"><xs:restriction base="t:A">
+             <xs:enumeration value="x"/><xs:enumeration value="z"/>
+           </xs:restriction></xs:simpleType>
+           <xs:element name="b" type="t:B"/>"#,
+    ))
+    .unwrap();
+    let text = exig_text(&set);
+    assert!(text.contains("<value>x</value><value>z</value></enumeration>"), "{text}");
+    assert!(fits(&set, r#"<t:b xmlns:t="urn:t">z</t:b>"#));
+    assert!(!fits(&set, r#"<t:b xmlns:t="urn:t">y</t:b>"#));
+}
+
+/// A pattern that allows few characters gives the string a restricted character set.
+#[test]
+fn patterns_give_restricted_character_sets() {
+    let with = |pattern: &str| {
+        exig_text(
+            &GrammarSet::from_xsd(&schema(
+                r#"targetNamespace="urn:t""#,
+                &format!(
+                    r#"<xs:simpleType name="S"><xs:restriction base="xs:string">
+                         <xs:pattern value="{pattern}"/></xs:restriction></xs:simpleType>"#
+                ),
+            ))
+            .unwrap(),
+        )
+    };
+    assert!(with("[0-9]{3}").contains("0123456789"));
+    assert!(!with(".*").contains("0123456789"));
+}

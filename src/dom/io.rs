@@ -44,11 +44,16 @@ use crate::{Error, ErrorKind, Event, EventMeta, Name, NsDecl, Result, Value};
 pub struct DocumentBuilder<'g> {
     doc: Document<'g>,
     stack: Vec<NodeId>,
+    /// Last attribute appended to the open element (NULL when unknown or
+    /// invalidated by `document_mut`), for O(1) attribute appends.
+    last_attr: *mut RawAttr,
     /// The open element's namespace is chosen after its NS events.
     pending: bool,
     text: String,
     line: u32,
     ignore_blanks: bool,
+    /// True when incoming `Name::global()` ids come from `doc.strings()`.
+    same_strings: bool,
     ended: bool,
 }
 
@@ -66,10 +71,12 @@ impl<'g> DocumentBuilder<'g> {
         DocumentBuilder {
             doc: Document::new(strings),
             stack: Vec::new(),
+            last_attr: ptr::null_mut(),
             pending: false,
             text: String::new(),
             line: 0,
             ignore_blanks: false,
+            same_strings: false,
             ended: false,
         }
     }
@@ -133,6 +140,7 @@ impl<'g> DocumentBuilder<'g> {
     /// # Ok::<(), exi::Error>(())
     /// ```
     pub fn document_mut(&mut self) -> &mut Document<'g> {
+        self.last_attr = ptr::null_mut();
         &mut self.doc
     }
 
@@ -238,13 +246,6 @@ impl<'g> DocumentBuilder<'g> {
             .transpose()
     }
 
-    fn parent(&self) -> Result<*mut RawCommon> {
-        Ok(self
-            .open_element()?
-            .unwrap_or_else(|| self.doc.doc_ptr().cast())
-            as *mut RawCommon)
-    }
-
     /// Chooses the open element's namespace, once its declarations are
     /// in.
     fn settle(&mut self) -> Result<()> {
@@ -257,53 +258,90 @@ impl<'g> DocumentBuilder<'g> {
         Ok(())
     }
 
-    fn flush(&mut self) -> Result<()> {
-        if self.text.is_empty() {
-            return Ok(());
+    #[inline]
+    fn settle_el(&mut self, open: Option<*mut RawNode>) -> Result<()> {
+        if self.pending {
+            self.pending = false;
+            if let Some(el) = open {
+                self.doc.fix_ns(el, super::Declare::Here)?;
+            }
         }
-        let text = core::mem::take(&mut self.text);
-        if self.stack.is_empty()
-            || (self.ignore_blanks
-                && text
-                    .bytes()
-                    .all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r')))
-        {
-            return Ok(());
-        }
-        let mut text = text.into_bytes();
-        text.push(0);
-        let n = self.doc.new_text_buffer(text.into_boxed_slice());
-        self.place(n)
-    }
-
-    fn place(&mut self, n: NodeId) -> Result<()> {
-        let p = self.doc.p(n);
-        // SAFETY: a new node appended to the open element or the
-        // document.
-        unsafe { append_raw(self.parent()?, p) };
         Ok(())
     }
 
-    fn start_ev(&mut self, name: Name<'_>) -> Result<()> {
-        self.flush()?;
-        self.settle()?;
+    fn flush(&mut self) -> Result<()> {
+        let open = self.open_element()?;
+        self.flush_to(open)
+    }
+
+    #[inline]
+    fn flush_to(&mut self, open: Option<*mut RawNode>) -> Result<()> {
+        if self.text.is_empty() {
+            return Ok(());
+        }
+        let drop_it = open.is_none()
+            || (self.ignore_blanks
+                && self
+                    .text
+                    .bytes()
+                    .all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r')));
+        if drop_it {
+            self.text.clear();
+            return Ok(());
+        }
+        let tp = self.doc.alloc_text_raw(&self.text);
+        self.text.clear();
+        // SAFETY: `tp` is a new text node appended to the live open element.
+        unsafe { append_raw(open.unwrap() as *mut RawCommon, tp) };
+        Ok(())
+    }
+
+    fn place_to(&mut self, open: Option<*mut RawNode>, n: NodeId) {
+        let parent =
+            open.unwrap_or_else(|| self.doc.doc_ptr().cast()) as *mut RawCommon;
+        let p = self.doc.p(n);
+        // SAFETY: a new node appended to the open element or the
+        // document.
+        unsafe { append_raw(parent, p) };
+    }
+
+    fn start_ev(
+        &mut self,
+        open: Option<*mut RawNode>,
+        name: Name<'_>,
+    ) -> Result<()> {
+        self.flush_to(open)?;
+        self.settle_el(open)?;
         let p = self.doc.alloc_node(EXI_ELEMENT_NODE);
-        self.doc.set_name(p, name)?;
-        self.doc.want_prefix(p, name.prefix());
+        if self.same_strings {
+            self.doc.set_name_trusted(p, name)?;
+        } else {
+            self.doc.set_name(p, name)?;
+        }
+        if name.prefix().is_some() {
+            self.doc.want_prefix(p, name.prefix())?;
+        }
+        let parent =
+            open.unwrap_or_else(|| self.doc.doc_ptr().cast()) as *mut RawCommon;
         // SAFETY: a new element appended to the open element or the
         // document.
         unsafe {
             (*(p as *mut RawNode)).line =
                 self.line.min(u16::MAX as u32) as u16;
-            append_raw(self.parent()?, p);
+            append_raw(parent, p);
         }
         self.stack.push(self.doc.id(p));
+        self.last_attr = ptr::null_mut();
         self.pending = true;
         Ok(())
     }
 
-    fn ns_ev(&mut self, d: &NsDecl<'_>) -> Result<()> {
-        let el = self.open_element()?.ok_or_else(|| {
+    fn ns_ev(
+        &mut self,
+        open: Option<*mut RawNode>,
+        d: &NsDecl<'_>,
+    ) -> Result<()> {
+        let el = open.ok_or_else(|| {
             Error::new(ErrorKind::State, "a namespace outside an element")
         })?;
         let prefix = (!d.prefix.is_empty()).then_some(d.prefix);
@@ -318,41 +356,97 @@ impl<'g> DocumentBuilder<'g> {
         Ok(())
     }
 
-    fn attribute_ev(&mut self, name: Name<'_>, v: &Value<'_>) -> Result<()> {
+    fn attribute_ev(
+        &mut self,
+        open: Option<*mut RawNode>,
+        name: Name<'_>,
+        v: &Value<'_>,
+    ) -> Result<()> {
         super::check_attribute_name(name)?;
-        self.settle()?;
-        let el = self.open_element()?.ok_or_else(|| {
+        self.settle_el(open)?;
+        let el = open.ok_or_else(|| {
             Error::new(ErrorKind::State, "an attribute outside an element")
         })?;
         let a = self.doc.alloc_attr();
-        self.doc.set_name(a, name)?;
-        self.doc.want_prefix(a, name.prefix());
-        // SAFETY: a new attribute on the open element.
-        unsafe { super::append_attr_raw(el, a as *mut RawAttr) };
-        self.doc.fix_attr_ns(a as *mut RawAttr, super::Declare::Here)?;
-        let t = match v {
-            Value::Str(text) => self.doc.new_text(text),
-            _ => self.doc.new_value(v.to_owned()),
+        if self.same_strings {
+            self.doc.set_name_trusted(a, name)?;
+        } else {
+            self.doc.set_name(a, name)?;
+        }
+        if name.prefix().is_some() {
+            self.doc.want_prefix(a, name.prefix())?;
+        }
+        let attr_ptr = a as *mut RawAttr;
+        // SAFETY: a new attribute on the open element. `last_attr` is
+        // invalidated on `document_mut` and element changes.
+        unsafe {
+            if !self.last_attr.is_null() {
+                (*self.last_attr).next = attr_ptr;
+                (*attr_ptr).prev = self.last_attr;
+                (*attr_ptr).parent = el;
+            } else {
+                super::append_attr_raw(el, attr_ptr);
+            }
+        }
+        self.last_attr = attr_ptr;
+        self.doc.fix_attr_ns(attr_ptr, super::Declare::Here)?;
+        let tp = match v {
+            Value::Str(text) => self.doc.alloc_text_raw(text),
+            _ => self.doc.alloc_value_raw(v.to_owned()),
         };
-        let tp = self.doc.p(t);
         // SAFETY: a new text node under the new attribute.
         unsafe { append_raw(a, tp) };
         Ok(())
     }
 
-    fn characters(&mut self, v: &Value<'_>) -> Result<()> {
-        if self.stack.is_empty() {
+    fn characters(
+        &mut self,
+        open: Option<*mut RawNode>,
+        v: &Value<'_>,
+    ) -> Result<()> {
+        if open.is_none() {
             return Ok(()); // whitespace around the root element
         }
-        self.settle()?;
+        self.settle_el(open)?;
         match v {
             Value::Str(s) => self.text.push_str(s),
             v => {
-                self.flush()?;
-                let n = self.doc.new_value(v.to_owned());
-                self.place(n)?;
+                self.flush_to(open)?;
+                let tp = self.doc.alloc_value_raw(v.to_owned());
+                // SAFETY: a new text node appended to the live open element.
+                unsafe { append_raw(open.unwrap() as *mut RawCommon, tp) };
             }
         }
+        Ok(())
+    }
+
+    /// Direct character append for sources (like `XmlReader` with comments
+    /// and PIs reported) that already coalesce contiguous text runs.
+    #[cfg(feature = "xml")]
+    fn characters_whole(&mut self, s: &str) -> Result<()> {
+        if self.ended {
+            return Err(Error::new(
+                ErrorKind::State,
+                "an event after the end of the document",
+            ));
+        }
+        let open = self.open_element()?;
+        if open.is_none() {
+            return Ok(());
+        }
+        self.settle_el(open)?;
+        if !self.text.is_empty() {
+            self.text.push_str(s);
+            return Ok(());
+        }
+        if self.ignore_blanks
+            && s.bytes().all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+        {
+            return Ok(());
+        }
+        let tp = self.doc.alloc_text_raw(s);
+        // SAFETY: `tp` is a new text node appended to the live open element.
+        unsafe { append_raw(open.unwrap() as *mut RawCommon, tp) };
         Ok(())
     }
 }
@@ -365,52 +459,64 @@ impl EventSink for DocumentBuilder<'_> {
                 "an event after the end of the document",
             ));
         }
-        self.open_element()?;
+        let open = self.open_element()?;
         match ev {
             Event::StartDocument | Event::SelfContained => Ok(()),
-            Event::StartElement(n) => self.start_ev(*n),
-            Event::Namespace(d) => self.ns_ev(d),
-            Event::Attribute(n, v) => self.attribute_ev(*n, v),
-            Event::Characters(v) => self.characters(v),
+            Event::StartElement(n) => self.start_ev(open, *n),
+            Event::Namespace(d) => self.ns_ev(open, d),
+            Event::Attribute(n, v) => self.attribute_ev(open, *n, v),
+            Event::Characters(v) => self.characters(open, v),
             Event::EndElement(name) => {
-                let open = self.current().ok_or_else(|| {
+                let el = open.ok_or_else(|| {
                     Error::new(ErrorKind::State, "an end with no element open")
                 })?;
-                if !name.is("", "")
-                    && !self
-                        .doc
-                        .name(open)
-                        .is_some_and(|n| n.is(name.uri(), name.local_name()))
-                {
-                    return Err(Error::new(
-                        ErrorKind::State,
-                        "end element name does not match",
-                    ));
+                if !name.is("", "") {
+                    let matched = if self.same_strings
+                        && let Some(g) = name.global()
+                    {
+                        // SAFETY: `el` is a live open element.
+                        unsafe {
+                            (*el).uriId == g.uri.index()
+                                && (*el).localId == g.local.index()
+                        }
+                    } else {
+                        let id = *self.stack.last().expect("open element");
+                        self.doc
+                            .name(id)
+                            .is_some_and(|n| n.is(name.uri(), name.local_name()))
+                    };
+                    if !matched {
+                        return Err(Error::new(
+                            ErrorKind::State,
+                            "end element name does not match",
+                        ));
+                    }
                 }
-                self.flush()?;
-                self.settle()?;
+                self.flush_to(open)?;
+                self.settle_el(open)?;
                 self.stack.pop();
+                self.last_attr = ptr::null_mut();
                 Ok(())
             }
             Event::Comment(t) => {
-                self.flush()?;
-                self.settle()?;
+                self.flush_to(open)?;
+                self.settle_el(open)?;
                 let n = self.doc.new_comment(t);
-                self.place(n)?;
+                self.place_to(open, n);
                 Ok(())
             }
             Event::ProcessingInstruction { target, data } => {
-                self.flush()?;
-                self.settle()?;
+                self.flush_to(open)?;
+                self.settle_el(open)?;
                 let n = self.doc.new_pi(target, data);
-                self.place(n)?;
+                self.place_to(open, n);
                 Ok(())
             }
             Event::EntityReference(name) => {
-                self.flush()?;
-                self.settle()?;
+                self.flush_to(open)?;
+                self.settle_el(open)?;
                 let n = self.doc.new_entity_ref(name);
-                self.place(n)?;
+                self.place_to(open, n);
                 Ok(())
             }
             Event::Doctype(d) => {
@@ -418,7 +524,7 @@ impl EventSink for DocumentBuilder<'_> {
                 Ok(())
             }
             Event::EndDocument => {
-                self.flush()?;
+                self.flush_to(open)?;
                 if !self.stack.is_empty() {
                     return Err(Error::new(
                         ErrorKind::State,
@@ -529,6 +635,8 @@ impl<'g> Document<'g> {
         use crate::xml::{XmlConfig, XmlReader};
         let set = GrammarSet::schemaless();
         let g = set.attach(strings)?;
+        b.same_strings = core::ptr::eq(b.doc.strings(), strings);
+        b.doc.reserve_nodes((xml.len() / 32).min(8192));
         let mut x: XmlReader = XmlReader::new(
             XmlConfig::new()
                 .report_comments(true)
@@ -544,6 +652,9 @@ impl<'g> Document<'g> {
             }
             loop {
                 match x.next()? {
+                    Step::Event(Event::Characters(Value::Str(s)), _) => {
+                        b.characters_whole(s)?
+                    }
                     Step::Event(e, meta) => b.event_at(&e, Some(&meta))?,
                     Step::NeedInput => break,
                     Step::End => return b.finish(),
@@ -841,14 +952,14 @@ impl EventSource for DocEvents<'_, '_> {
                             self.state = self.after(p);
                             let x = extra(p);
                             return Ok(Step::Event(
-                                Event::Comment(x.content.text()),
+                                Event::Comment(x.text()),
                                 meta,
                             ));
                         }
                         EXI_PI_NODE => {
                             self.state = self.after(p);
                             let x = extra(p);
-                            let data = x.content.text();
+                            let data = x.text();
                             return Ok(Step::Event(
                                 Event::ProcessingInstruction {
                                     target: str_at((*p).name),

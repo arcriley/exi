@@ -181,6 +181,10 @@ impl<K: Kind> StrId<K> {
     pub const fn index(self) -> u32 {
         self.0
     }
+    #[cfg(feature = "dom")]
+    pub(crate) const fn from_raw(index: u32) -> Self {
+        StrId(index, PhantomData)
+    }
 }
 
 pub type UriId = StrId<Uri>;

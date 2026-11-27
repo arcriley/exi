@@ -85,6 +85,7 @@
 //! `column` (1-based, columns in characters) of the token that failed.
 //! After any error the reader is poisoned.
 
+use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -97,7 +98,9 @@ use crate::name::{GlobalName, Name};
 use crate::stream::{EventSource, Step};
 use crate::tables::{SessionTables, ValueRules};
 use crate::value::{Value, ValueFlags};
-use crate::xml::chars::{is_char, is_name, is_name_char, is_ncname, is_space};
+use crate::xml::chars::{
+    is_char, is_name, is_name_char, is_name_start, is_ncname, is_space,
+};
 use crate::{Error, ErrorKind, Limits, NameId, Result};
 
 /// How entity references are treated (module documentation).
@@ -511,8 +514,22 @@ pub struct XmlReader<'g, const N: usize = 4096> {
     chars: String,
     chars_len: u64,
     chars_pos: Position,
+    chars_ready: bool,
     /// `]` characters just before the current point of a text run.
     brackets: u8,
+    /// String arena for queued events, cleared when `queue` empties.
+    ev_buf: String,
+    /// Scratch buffers reused across start tags.
+    tag_buf: String,
+    raw_attrs: Vec<(Span, Span)>,
+    plain_attrs: Vec<(Span, Span)>,
+    resolved_attrs: Vec<(NameId, Span, Span)>,
+    ns_decls: Vec<(Span, Span)>,
+    norm_open: Vec<String>,
+    /// Direct-mapped cache from `(uri_num, local)` to `(NameId, LocalId)`
+    /// and the most recently looked-up non-empty URI partition number.
+    last_uri: u32,
+    name_cache: [Option<(u32, NameId, crate::strings::LocalId)>; 64],
     queue: VecDeque<(XEv, EventMeta)>,
     current: Option<XEv>,
     poisoned: bool,
@@ -567,7 +584,17 @@ impl<'g, const N: usize> XmlReader<'g, N> {
             chars: String::new(),
             chars_len: 0,
             chars_pos: Position::default(),
+            chars_ready: false,
             brackets: 0,
+            ev_buf: String::new(),
+            tag_buf: String::new(),
+            raw_attrs: Vec::new(),
+            plain_attrs: Vec::new(),
+            resolved_attrs: Vec::new(),
+            ns_decls: Vec::new(),
+            norm_open: Vec::new(),
+            last_uri: 0,
+            name_cache: [None; 64],
             queue: VecDeque::new(),
             current: None,
             poisoned: false,
@@ -782,10 +809,11 @@ impl Dtd {
     }
 }
 
+type Span = (usize, usize);
+
 struct Open {
-    qname: String,
     id: NameId,
-    prefix: String,
+    prefix: Option<Box<str>>,
     ns_mark: usize,
 }
 
@@ -793,15 +821,15 @@ struct Open {
 enum XEv {
     SD,
     ED,
-    SE(NameId, String),
-    EE(NameId, String),
-    AT(NameId, String, String),
-    NS(String, String, bool),
-    CH(String),
-    CM(String),
-    PI(String, String),
-    DT(String, String, String, String),
-    ER(String),
+    SE(NameId, Span),
+    EE(NameId, Span),
+    AT(NameId, Span, Span),
+    NS(Span, Span, bool),
+    CH,
+    CM(Span),
+    PI(Span, Span),
+    DT(Span, Span, Span, Span),
+    ER(Span),
 }
 
 /// What one parsing step did.
@@ -825,8 +853,13 @@ impl<'a> Cur<'a> {
         self.i >= self.s.len()
     }
     fn ws(&mut self) -> bool {
-        let r = self.rest();
-        let n = r.len() - r.trim_start_matches(is_space).len();
+        let bytes = self.rest().as_bytes();
+        let mut n = 0;
+        while n < bytes.len()
+            && matches!(bytes[n], b' ' | b'\t' | b'\n' | b'\r')
+        {
+            n += 1;
+        }
         self.i += n;
         n > 0
     }
@@ -838,23 +871,60 @@ impl<'a> Cur<'a> {
             false
         }
     }
-    fn name(&mut self) -> Option<&'a str> {
+    fn name_span(&mut self) -> Option<Span> {
+        let start = self.i;
         let r = self.rest();
-        let n = r.find(|c: char| !is_name_char(c)).unwrap_or(r.len());
+        let bytes = r.as_bytes();
+        let Some(&first) = bytes.first() else { return None };
+        let n = if first.is_ascii_alphabetic() || first == b'_' || first == b':'
+        {
+            let mut k = 1;
+            while k < bytes.len() {
+                let b = bytes[k];
+                if b.is_ascii_alphanumeric()
+                    || matches!(b, b'-' | b'.' | b'_' | b':')
+                {
+                    k += 1;
+                } else if b >= 0x80 {
+                    k += r[k..]
+                        .find(|c: char| !is_name_char(c))
+                        .unwrap_or(r.len() - k);
+                    break;
+                } else {
+                    break;
+                }
+            }
+            self.i += k;
+            return Some((start, start + k));
+        } else if first >= 0x80 {
+            r.find(|c: char| !is_name_char(c)).unwrap_or(r.len())
+        } else {
+            return None;
+        };
         let name = &r[..n];
         if is_name(name) {
             self.i += n;
-            Some(name)
+            Some((start, start + n))
         } else {
             None
         }
     }
-    fn quoted(&mut self) -> Option<&'a str> {
+    fn name(&mut self) -> Option<&'a str> {
+        let (a, b) = self.name_span()?;
+        Some(&self.s[a..b])
+    }
+    fn quoted_span(&mut self) -> Option<Span> {
         let r = self.rest();
-        let q = r.chars().next().filter(|c| *c == '"' || *c == '\'')?;
-        let end = r[1..].find(q)?;
+        let bytes = r.as_bytes();
+        let q = *bytes.first().filter(|&&b| b == b'"' || b == b'\'')?;
+        let end = bytes[1..].iter().position(|&b| b == q)?;
+        let start = self.i + 1;
         self.i += end + 2;
-        Some(&r[1..1 + end])
+        Some((start, start + end))
+    }
+    fn quoted(&mut self) -> Option<&'a str> {
+        let (a, b) = self.quoted_span()?;
+        Some(&self.s[a..b])
     }
     fn until(&mut self, lit: &str) -> Option<&'a str> {
         let r = self.rest();
@@ -927,11 +997,51 @@ fn predefined(name: &str) -> Option<char> {
     })
 }
 
+fn lookup_ns<'a, S: AsRef<str>>(
+    ns: &'a [(S, S)],
+    prefix: &str,
+) -> Option<&'a str> {
+    if prefix == "xml" {
+        return Some(XML_NS);
+    }
+    match ns.iter().rev().find(|(p, _)| p.as_ref() == prefix) {
+        Some((_, u)) => Some(u.as_ref()),
+        None if prefix.is_empty() => Some(""),
+        None => None,
+    }
+}
+
+#[inline]
+fn name_cache_slot(uri: u32, b: &[u8]) -> usize {
+    let len = b.len();
+    let mut h = uri.wrapping_mul(0x9E37_79B9) ^ (len as u32);
+    if len > 0 {
+        h = h.wrapping_mul(0x517C_C1B7) ^ (b[0] as u32);
+        h = h.wrapping_mul(0x517C_C1B7) ^ (b[len - 1] as u32);
+        h = h.wrapping_mul(0x517C_C1B7) ^ (b[len >> 1] as u32);
+    }
+    ((h ^ (h >> 16)) as usize) & 63
+}
+
+/// Splits a name already validated by `Cur::name_span` (or `is_name`) into
+/// `(prefix, local)`.
+#[inline]
 fn split_qname(q: &str) -> Result<(&str, &str)> {
-    match q.split_once(':') {
-        Some((p, l)) if is_ncname(p) && is_ncname(l) => Ok((p, l)),
-        None if is_ncname(q) => Ok(("", q)),
-        _ => Err(xml_err("a name that is not a QName")),
+    match q.as_bytes().iter().position(|&b| b == b':') {
+        None => Ok(("", q)),
+        Some(i) => {
+            let p = &q[..i];
+            let l = &q[i + 1..];
+            if !p.is_empty()
+                && !l.is_empty()
+                && !l.as_bytes().contains(&b':')
+                && l.chars().next().is_some_and(is_name_start)
+            {
+                Ok((p, l))
+            } else {
+                Err(xml_err("a name that is not a QName"))
+            }
+        }
     }
 }
 
@@ -948,50 +1058,71 @@ impl<'g, const N: usize> XmlReader<'g, N> {
 
     // ----- Input: bytes to characters -----
 
-    fn push_char(&mut self, c: char) {
-        if self.pending_cr {
-            self.pending_cr = false;
-            self.text.push('\n');
-            if c == '\n' {
-                return;
-            }
+    fn push_ev_str(&mut self, s: &str) -> Span {
+        if s.is_empty() {
+            return (0, 0);
         }
-        if c == '\r' {
-            self.pending_cr = true;
-        } else {
-            self.text.push(c);
-        }
+        let start = self.ev_buf.len();
+        self.ev_buf.push_str(s);
+        (start, self.ev_buf.len())
     }
 
     /// Decodes the ring into `text`, stopping at a malformed or
     /// forbidden character (kept in `decode_err` until the parser
     /// reaches it).
     fn decode_input(&mut self) {
+        #[inline]
+        fn push_char(text: &mut String, pending_cr: &mut bool, c: char) {
+            if *pending_cr {
+                *pending_cr = false;
+                text.push('\n');
+                if c == '\n' {
+                    return;
+                }
+            }
+            if c == '\r' {
+                *pending_cr = true;
+            } else {
+                text.push(c);
+            }
+        }
         if self.decode_err.is_some() {
             return;
         }
+        if self.ring.is_empty() {
+            if self.ended && self.pending_cr {
+                self.pending_cr = false;
+                self.text.push('\n');
+            }
+            return;
+        }
         let (a, b) = self.ring.filled();
-        let mut bytes = Vec::with_capacity(a.len() + b.len());
-        bytes.extend_from_slice(a);
-        bytes.extend_from_slice(b);
+        let total = a.len() + b.len();
+        let byte_at = |idx: usize| -> u8 {
+            if idx < a.len() { a[idx] } else { b[idx - a.len()] }
+        };
         let mut i = 0;
         if self.enc == Enc::Unknown {
-            let bom_prefix = |p: &[u8]| {
-                [&[0xEF, 0xBB, 0xBF][..], &[0xFF, 0xFE], &[0xFE, 0xFF]]
-                    .iter()
-                    .any(|bom| bom.starts_with(p) || p.starts_with(bom))
-            };
-            if !self.ended && bytes.len() < 3 && bom_prefix(&bytes) {
+            let mut head = [0u8; 3];
+            let hlen = total.min(3);
+            for (k, slot) in head[..hlen].iter_mut().enumerate() {
+                *slot = byte_at(k);
+            }
+            let p = &head[..hlen];
+            let bom_prefix = [&[0xEF, 0xBB, 0xBF][..], &[0xFF, 0xFE], &[0xFE, 0xFF]]
+                .iter()
+                .any(|bom| bom.starts_with(p) || p.starts_with(bom));
+            if !self.ended && total < 3 && bom_prefix {
                 return;
             }
-            if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            if p.starts_with(&[0xEF, 0xBB, 0xBF]) {
                 self.enc = Enc::Utf8;
                 i = 3;
-            } else if bytes.starts_with(&[0xFF, 0xFE]) {
+            } else if p.starts_with(&[0xFF, 0xFE]) {
                 self.enc = Enc::Utf16Le;
                 self.bom16 = true;
                 i = 2;
-            } else if bytes.starts_with(&[0xFE, 0xFF]) {
+            } else if p.starts_with(&[0xFE, 0xFF]) {
                 self.enc = Enc::Utf16Be;
                 self.bom16 = true;
                 i = 2;
@@ -999,10 +1130,38 @@ impl<'g, const N: usize> XmlReader<'g, N> {
                 self.enc = Enc::Utf8;
             }
         }
-        while i < bytes.len() {
-            let (c, n) = match self.enc {
+        self.text.reserve(total - i);
+        while i < total {
+            match self.enc {
                 Enc::Utf8 | Enc::Unknown => {
-                    let b0 = bytes[i];
+                    if !self.pending_cr {
+                        let slice = if i < a.len() {
+                            &a[i..]
+                        } else {
+                            &b[i - a.len()..]
+                        };
+                        let mut run = 0;
+                        while run < slice.len() {
+                            let c = slice[run];
+                            if (0x20..0x80).contains(&c)
+                                || c == b'\t'
+                                || c == b'\n'
+                            {
+                                run += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        if run > 0 {
+                            // SAFETY: every byte in `slice[..run]` is 7-bit ASCII.
+                            self.text.push_str(unsafe {
+                                core::str::from_utf8_unchecked(&slice[..run])
+                            });
+                            i += run;
+                            continue;
+                        }
+                    }
+                    let b0 = byte_at(i);
                     let n = match b0 {
                         0x00..=0x7F => 1,
                         0xC2..=0xDF => 2,
@@ -1014,7 +1173,7 @@ impl<'g, const N: usize> XmlReader<'g, N> {
                         self.decode_err = Some(xml_err("malformed UTF-8"));
                         break;
                     }
-                    if i + n > bytes.len() {
+                    if i + n > total {
                         if self.ended {
                             self.decode_err = Some(xml_err(
                                 "malformed UTF-8 at the end of the input",
@@ -1022,21 +1181,40 @@ impl<'g, const N: usize> XmlReader<'g, N> {
                         }
                         break;
                     }
-                    match core::str::from_utf8(&bytes[i..i + n]) {
-                        Ok(s) => (s.chars().next().expect("one character"), n),
-                        Err(_) => {
-                            self.decode_err = Some(xml_err("malformed UTF-8"));
-                            break;
+                    let c = if n == 1 {
+                        b0 as char
+                    } else {
+                        let mut buf = [0u8; 4];
+                        for (k, slot) in buf[..n].iter_mut().enumerate() {
+                            *slot = byte_at(i + k);
                         }
+                        match core::str::from_utf8(&buf[..n]) {
+                            Ok(s) => s.chars().next().expect("one character"),
+                            Err(_) => {
+                                self.decode_err =
+                                    Some(xml_err("malformed UTF-8"));
+                                break;
+                            }
+                        }
+                    };
+                    if !is_char(c) {
+                        self.decode_err =
+                            Some(xml_err("a character outside XML Char"));
+                        break;
                     }
+                    push_char(&mut self.text, &mut self.pending_cr, c);
+                    i += n;
                 }
                 Enc::Utf16Le | Enc::Utf16Be => {
                     let unit = |j: usize| -> Option<u16> {
-                        let p = bytes.get(j..j + 2)?;
+                        if j + 2 > total {
+                            return None;
+                        }
+                        let (p0, p1) = (byte_at(j), byte_at(j + 1));
                         Some(if self.enc == Enc::Utf16Le {
-                            u16::from_le_bytes([p[0], p[1]])
+                            u16::from_le_bytes([p0, p1])
                         } else {
-                            u16::from_be_bytes([p[0], p[1]])
+                            u16::from_be_bytes([p0, p1])
                         })
                     };
                     let Some(u) = unit(i) else {
@@ -1047,7 +1225,7 @@ impl<'g, const N: usize> XmlReader<'g, N> {
                         }
                         break;
                     };
-                    if (0xD800..0xDC00).contains(&u) {
+                    let (c, n) = if (0xD800..0xDC00).contains(&u) {
                         let Some(l) = unit(i + 2) else {
                             if self.ended {
                                 self.decode_err = Some(xml_err(
@@ -1075,16 +1253,16 @@ impl<'g, const N: usize> XmlReader<'g, N> {
                                 break;
                             }
                         }
+                    };
+                    if !is_char(c) {
+                        self.decode_err =
+                            Some(xml_err("a character outside XML Char"));
+                        break;
                     }
+                    push_char(&mut self.text, &mut self.pending_cr, c);
+                    i += n;
                 }
-            };
-            if !is_char(c) {
-                self.decode_err =
-                    Some(xml_err("a character outside XML Char"));
-                break;
             }
-            self.push_char(c);
-            i += n;
         }
         self.ring.consume(i);
         self.bytes += i as u64;
@@ -1113,13 +1291,36 @@ impl<'g, const N: usize> XmlReader<'g, N> {
         match self.ents.last_mut() {
             Some(e) => e.pos += n,
             None => {
-                for c in self.text[self.cur..self.cur + n].chars() {
-                    if c == '\n' {
-                        self.line += 1;
-                        self.col = 1;
-                    } else {
-                        self.col += 1;
+                let bytes = &self.text.as_bytes()[self.cur..self.cur + n];
+                let mut lines = 0u32;
+                let mut last_nl = None;
+                for (i, &b) in bytes.iter().enumerate() {
+                    if b == b'\n' {
+                        lines += 1;
+                        last_nl = Some(i);
                     }
+                }
+                if let Some(pos) = last_nl {
+                    self.line += lines;
+                    let tail = &bytes[pos + 1..];
+                    self.col = 1
+                        + if tail.iter().all(|&b| b < 0x80) {
+                            tail.len() as u32
+                        } else {
+                            tail.iter()
+                                .filter(|&&b| (b & 0xC0) != 0x80)
+                                .count() as u32
+                        };
+                } else {
+                    let cols = if bytes.iter().all(|&b| b < 0x80) {
+                        bytes.len() as u32
+                    } else {
+                        bytes
+                            .iter()
+                            .filter(|&&b| (b & 0xC0) != 0x80)
+                            .count() as u32
+                    };
+                    self.col += cols;
                 }
                 self.cur += n;
                 if self.cur > 4096 && self.cur * 2 > self.text.len() {
@@ -1139,10 +1340,10 @@ impl<'g, const N: usize> XmlReader<'g, N> {
 
     fn flush_chars(&mut self) {
         if !self.chars.is_empty() {
-            let s = core::mem::take(&mut self.chars);
             let pos = self.chars_pos;
             self.chars_len = 0;
-            self.queue(XEv::CH(s), self.stack.len() as u32, pos);
+            self.chars_ready = true;
+            self.queue(XEv::CH, self.stack.len() as u32, pos);
         }
     }
 
@@ -1174,17 +1375,6 @@ impl<'g, const N: usize> XmlReader<'g, N> {
         }
         self.chars.push_str(s);
         Ok(())
-    }
-
-    fn lookup(&self, prefix: &str) -> Option<&str> {
-        if prefix == "xml" {
-            return Some(XML_NS);
-        }
-        match self.ns.iter().rev().find(|(p, _)| p == prefix) {
-            Some((_, u)) => Some(u),
-            None if prefix.is_empty() => Some(""),
-            None => None,
-        }
     }
 
     /// Enters an internal entity, checking recursion and the expansion
@@ -1394,21 +1584,39 @@ impl<'g, const N: usize> XmlReader<'g, N> {
             return self.reference();
         }
         // A run of text up to markup or a reference.
-        let n = s.find(['<', '&']).unwrap_or(s.len());
+        let bytes = s.as_bytes();
+        let mut n = 0;
         let mut brackets = self.brackets;
-        for ch in s[..n].chars() {
-            match ch {
-                ']' => brackets = brackets.saturating_add(1),
-                '>' if brackets >= 2 => {
-                    return Err(
-                        xml_err("]]> in character data").at(self.pos_now())
-                    );
-                }
-                _ => brackets = 0,
+        let mut char_count = 0u64;
+        while n < bytes.len() {
+            let byte = bytes[n];
+            if byte == b'<' || byte == b'&' {
+                break;
             }
+            if byte == b']' {
+                brackets = brackets.saturating_add(1);
+            } else if byte == b'>' && brackets >= 2 {
+                return Err(xml_err("]]> in character data").at(self.pos_now()));
+            } else {
+                brackets = 0;
+            }
+            if (byte & 0xC0) != 0x80 {
+                char_count += 1;
+            }
+            n += 1;
         }
         self.brackets = brackets;
-        self.add_input(0, n)?;
+        if self.chars.is_empty() {
+            self.chars_pos = self.pos_now();
+        }
+        self.chars_len += char_count;
+        if self.chars_len > self.cfg.limits.get_max_value_chars() {
+            return Err(limit("character data longer than max_value_chars"));
+        }
+        match self.ents.last() {
+            Some(e) => self.chars.push_str(&e.text[e.pos..e.pos + n]),
+            None => self.chars.push_str(&self.text[self.cur..self.cur + n]),
+        }
         self.adv(n);
         Ok(P::Again)
     }
@@ -1472,7 +1680,8 @@ impl<'g, const N: usize> XmlReader<'g, N> {
             return Ok(P::Produced);
         }
         self.adv(end + 1);
-        self.queue(XEv::ER(name.into()), self.stack.len() as u32, pos);
+        let span = self.push_ev_str(name);
+        self.queue(XEv::ER(span), self.stack.len() as u32, pos);
         Ok(P::Produced)
     }
 
@@ -1494,11 +1703,20 @@ impl<'g, const N: usize> XmlReader<'g, N> {
             }
             None => return Ok(P::Need),
         }
-        let text: String = s[4..i].into();
+        let span = if self.cfg.report_comments {
+            let start = self.ev_buf.len();
+            match self.ents.last() {
+                Some(e) => self.ev_buf.push_str(&e.text[e.pos + 4..e.pos + i]),
+                None => self.ev_buf.push_str(&self.text[self.cur + 4..self.cur + i]),
+            }
+            Some((start, self.ev_buf.len()))
+        } else {
+            None
+        };
         self.at_start = false;
         self.adv(i + 3);
-        if self.cfg.report_comments {
-            self.queue(XEv::CM(text), self.stack.len() as u32, pos);
+        if let Some(span) = span {
+            self.queue(XEv::CM(span), self.stack.len() as u32, pos);
             return Ok(P::Produced);
         }
         Ok(P::Again)
@@ -1531,11 +1749,17 @@ impl<'g, const N: usize> XmlReader<'g, N> {
             }
             return Err(xml_err("a PI with the target xml").at(pos));
         }
-        let (target, data) = (target.to_string(), data.to_string());
+        let spans = if self.cfg.report_pis {
+            let ts = self.push_ev_str(target);
+            let ds = self.push_ev_str(data);
+            Some((ts, ds))
+        } else {
+            None
+        };
         self.at_start = false;
         self.adv(end + 2);
-        if self.cfg.report_pis {
-            self.queue(XEv::PI(target, data), self.stack.len() as u32, pos);
+        if let Some((ts, ds)) = spans {
+            self.queue(XEv::PI(ts, ds), self.stack.len() as u32, pos);
             return Ok(P::Produced);
         }
         Ok(P::Again)
@@ -1603,15 +1827,22 @@ impl<'g, const N: usize> XmlReader<'g, N> {
     /// The end of a tag: the `>` outside quoted values.
     fn tag_end(&self) -> Result<core::result::Result<usize, P>> {
         let (s, fin) = self.peek();
-        let mut quote = None;
-        for (i, c) in s.char_indices().skip(1) {
-            match (quote, c) {
-                (None, '"' | '\'') => quote = Some(c),
-                (Some(q), c) if c == q => quote = None,
-                (None, '>') => return Ok(Ok(i)),
-                (None, '<') => return Err(xml_err("< inside a tag")),
-                _ => {}
+        let bytes = s.as_bytes();
+        let mut quote = 0u8;
+        let mut i = 1;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if quote == 0 {
+                match b {
+                    b'>' => return Ok(Ok(i)),
+                    b'"' | b'\'' => quote = b,
+                    b'<' => return Err(xml_err("< inside a tag")),
+                    _ => {}
+                }
+            } else if b == quote {
+                quote = 0;
             }
+            i += 1;
         }
         if fin {
             Err(xml_err("a tag that does not end"))
@@ -1626,46 +1857,58 @@ impl<'g, const N: usize> XmlReader<'g, N> {
             Ok(e) => e,
             Err(p) => return Ok(p),
         };
-        let (s, _) = self.peek();
-        let token: String = s[1..end].into();
-        let (body, empty) = match token.strip_suffix('/') {
-            Some(b) => (b, true),
-            None => (token.as_str(), false),
-        };
-        let mut c = Cur { s: body, i: 0 };
-        let qname = c
-            .name()
-            .ok_or_else(|| xml_err("a start tag without a name").at(pos))?;
-        let mut raw: Vec<(&str, &str)> = Vec::new();
-        loop {
-            let had_space = c.ws();
-            if c.done() {
-                break;
-            }
-            if !had_space {
-                return Err(xml_err(
-                    "attributes must be separated by white space",
-                )
-                .at(pos));
-            }
-            let name = c
-                .name()
-                .ok_or_else(|| xml_err("a malformed attribute").at(pos))?;
-            c.ws();
-            if !c.eat("=") {
-                return Err(xml_err("an attribute without a value").at(pos));
-            }
-            c.ws();
-            let v = c.quoted().ok_or_else(|| {
-                xml_err("an attribute value without quotes").at(pos)
-            })?;
-            if raw.iter().any(|(n, _)| *n == name) {
-                return Err(xml_err("an attribute given twice").at(pos));
-            }
-            raw.push((name, v));
+        self.tag_buf.clear();
+        match self.ents.last() {
+            Some(e) => self.tag_buf.push_str(&e.text[e.pos + 1..e.pos + end]),
+            None => self.tag_buf.push_str(&self.text[self.cur + 1..self.cur + end]),
         }
+        let (body_len, empty) = if self.tag_buf.ends_with('/') {
+            (self.tag_buf.len() - 1, true)
+        } else {
+            (self.tag_buf.len(), false)
+        };
+        self.raw_attrs.clear();
+        let qname_span = {
+            let mut c = Cur { s: &self.tag_buf[..body_len], i: 0 };
+            let qname = c
+                .name_span()
+                .ok_or_else(|| xml_err("a start tag without a name").at(pos))?;
+            loop {
+                let had_space = c.ws();
+                if c.done() {
+                    break;
+                }
+                if !had_space {
+                    return Err(xml_err(
+                        "attributes must be separated by white space",
+                    )
+                    .at(pos));
+                }
+                let name = c
+                    .name_span()
+                    .ok_or_else(|| xml_err("a malformed attribute").at(pos))?;
+                c.ws();
+                if !c.eat("=") {
+                    return Err(xml_err("an attribute without a value").at(pos));
+                }
+                c.ws();
+                let v = c.quoted_span().ok_or_else(|| {
+                    xml_err("an attribute value without quotes").at(pos)
+                })?;
+                let name_str = &self.tag_buf[name.0..name.1];
+                if self
+                    .raw_attrs
+                    .iter()
+                    .any(|&(ns, _)| &self.tag_buf[ns.0..ns.1] == name_str)
+                {
+                    return Err(xml_err("an attribute given twice").at(pos));
+                }
+                self.raw_attrs.push((name, v));
+            }
+            qname
+        };
         self.adv(end + 1);
-        self.element(qname, raw, empty, pos).map_err(|e| {
+        self.element(qname_span, empty, pos).map_err(|e| {
             if e.position() == Position::default() { e.at(pos) } else { e }
         })?;
         Ok(P::Produced)
@@ -1673,13 +1916,22 @@ impl<'g, const N: usize> XmlReader<'g, N> {
 
     /// Attribute value normalization (XML 1.0 §3.3.3), with references
     /// expanded.
-    fn normalize(
-        &mut self,
+    fn normalize_into(
+        dtd: &Dtd,
+        limits: &Limits,
+        expanded: &mut u64,
         raw: &str,
         out: &mut String,
         depth: u32,
         open: &mut Vec<String>,
     ) -> Result<()> {
+        if !raw
+            .bytes()
+            .any(|b| matches!(b, b'&' | b'<' | b'\t' | b'\n' | b'\r'))
+        {
+            out.push_str(raw);
+            return Ok(());
+        }
         let mut rest = raw;
         while !rest.is_empty() {
             let i =
@@ -1703,30 +1955,34 @@ impl<'g, const N: usize> XmlReader<'g, N> {
                     } else if let Some(c) = predefined(body) {
                         out.push(c);
                     } else {
-                        match self.dtd.entity(body).cloned() {
+                        match dtd.entity(body) {
                             Some(Entity::Internal(text)) => {
                                 if open.iter().any(|n| n == body) {
                                     return Err(xml_err(
                                         "an entity that refers to itself",
                                     ));
                                 }
-                                if depth + 1
-                                    > self.cfg.limits.get_max_entity_depth()
-                                {
+                                if depth + 1 > limits.get_max_entity_depth() {
                                     return Err(limit(
                                         "entities nested deeper than max_entity_depth",
                                     ));
                                 }
-                                self.expanded += text.len() as u64;
-                                if self.expanded
-                                    > self.cfg.limits.get_max_expanded_bytes()
-                                {
+                                *expanded += text.len() as u64;
+                                if *expanded > limits.get_max_expanded_bytes() {
                                     return Err(limit(
                                         "entity expansion beyond max_expanded_bytes",
                                     ));
                                 }
                                 open.push(body.into());
-                                self.normalize(&text, out, depth + 1, open)?;
+                                Self::normalize_into(
+                                    dtd,
+                                    limits,
+                                    expanded,
+                                    text,
+                                    out,
+                                    depth + 1,
+                                    open,
+                                )?;
                                 open.pop();
                             }
                             Some(_) => {
@@ -1748,8 +2004,7 @@ impl<'g, const N: usize> XmlReader<'g, N> {
 
     fn element(
         &mut self,
-        qname: &str,
-        raw: Vec<(&str, &str)>,
+        qname_span: Span,
         empty: bool,
         pos: Position,
     ) -> Result<()> {
@@ -1757,137 +2012,278 @@ impl<'g, const N: usize> XmlReader<'g, N> {
         if self.stack.len() as u32 + 1 > limits.get_max_depth() {
             return Err(limit("elements nested deeper than max_depth"));
         }
-        // Values, then defaults from the internal subset.
-        let defs: Vec<AttDef> = self.dtd.attdefs(qname).to_vec();
-        let mut attrs = Vec::with_capacity(raw.len());
-        for (n, v) in raw {
-            let mut out = String::new();
-            self.normalize(v, &mut out, 0, &mut Vec::new())?;
-            attrs.push((n, out));
-        }
+        let max_value_chars = limits.get_max_value_chars();
+        // Fast path: most documents have no ATTLIST declarations.
+        let has_defs = !self.dtd.attlists.is_empty()
+            && !self
+                .dtd
+                .attdefs(&self.tag_buf[qname_span.0..qname_span.1])
+                .is_empty();
+        let defs: Vec<AttDef> = if has_defs {
+            self.dtd
+                .attdefs(&self.tag_buf[qname_span.0..qname_span.1])
+                .to_vec()
+        } else {
+            Vec::new()
+        };
+
+        let ns_mark = self.ns.len();
+        self.ns_decls.clear();
+        self.plain_attrs.clear();
+        self.norm_open.clear();
+
+        // Append default attribute names to `tag_buf` if needed, so every
+        // attribute name is a Span in `tag_buf` and every normalized
+        // value is a Span in `ev_buf`.
         for d in &defs {
             if let Some(dv) = &d.default {
-                if !attrs.iter().any(|(n, _)| *n == d.name) {
-                    let mut out = String::new();
-                    self.normalize(dv, &mut out, 0, &mut Vec::new())?;
-                    attrs.push((d.name.as_str(), out));
+                let present = self.raw_attrs.iter().any(|&(ns, _)| {
+                    &self.tag_buf[ns.0..ns.1] == d.name.as_str()
+                });
+                if !present {
+                    let ns_start = self.tag_buf.len();
+                    self.tag_buf.push_str(&d.name);
+                    let ns = (ns_start, self.tag_buf.len());
+                    let vs_start = self.tag_buf.len();
+                    self.tag_buf.push_str(dv);
+                    let vs = (vs_start, self.tag_buf.len());
+                    self.raw_attrs.push((ns, vs));
                 }
             }
         }
-        for (n, v) in &mut attrs {
-            if defs.iter().any(|d| d.name == *n && !d.cdata) {
-                *v = v
+
+        for idx in 0..self.raw_attrs.len() {
+            let (ns, vs) = self.raw_attrs[idx];
+            let v_start = self.ev_buf.len();
+            Self::normalize_into(
+                &self.dtd,
+                &limits,
+                &mut self.expanded,
+                &self.tag_buf[vs.0..vs.1],
+                &mut self.ev_buf,
+                0,
+                &mut self.norm_open,
+            )?;
+            let name_str = &self.tag_buf[ns.0..ns.1];
+            if has_defs && defs.iter().any(|d| d.name == name_str && !d.cdata) {
+                let collapsed = self.ev_buf[v_start..]
                     .split(' ')
                     .filter(|x| !x.is_empty())
                     .collect::<Vec<_>>()
                     .join(" ");
+                self.ev_buf.truncate(v_start);
+                self.ev_buf.push_str(&collapsed);
             }
-            if v.chars().count() as u64 > limits.get_max_value_chars() {
+            let v_end = self.ev_buf.len();
+            let v_bytes = &self.ev_buf.as_bytes()[v_start..v_end];
+            let v_chars = if v_bytes.len() as u64 <= max_value_chars {
+                v_bytes.len() as u64
+            } else {
+                v_bytes.iter().filter(|&&b| (b & 0xC0) != 0x80).count() as u64
+            };
+            if v_chars > max_value_chars {
                 return Err(limit(
                     "an attribute value longer than max_value_chars",
                 ));
             }
-        }
-        // Namespace declarations.
-        let ns_mark = self.ns.len();
-        let mut decls: Vec<(String, String)> = Vec::new();
-        let mut plain = Vec::new();
-        for (n, v) in attrs {
-            let prefix = if n == "xmlns" {
-                Some(String::new())
-            } else {
-                n.strip_prefix("xmlns:").map(String::from)
-            };
-            match prefix {
-                Some(p) => {
-                    if !p.is_empty() && !is_ncname(&p) {
-                        return Err(xml_err(
-                            "a namespace prefix that is not an NCName",
-                        ));
-                    }
-                    if p == "xmlns" {
-                        return Err(xml_err(
-                            "the xmlns prefix cannot be declared",
-                        ));
-                    }
-                    if v == XMLNS_NS {
-                        return Err(xml_err(
-                            "the xmlns namespace cannot be bound",
-                        ));
-                    }
-                    if (p == "xml") != (v == XML_NS) {
-                        return Err(xml_err(
-                            "the xml prefix and its namespace go only with each other",
-                        ));
-                    }
-                    if !p.is_empty() && v.is_empty() {
-                        return Err(xml_err(
-                            "a prefix cannot be bound to the empty URI",
-                        ));
-                    }
-                    decls.push((p, v));
+            let val_span = (v_start, v_end);
+            if name_str == "xmlns" || name_str.starts_with("xmlns:") {
+                let p = if name_str.len() == 5 { "" } else { &name_str[6..] };
+                if !p.is_empty() && !is_ncname(p) {
+                    return Err(xml_err(
+                        "a namespace prefix that is not an NCName",
+                    ));
                 }
-                None => plain.push((n, v)),
+                if p == "xmlns" {
+                    return Err(xml_err("the xmlns prefix cannot be declared"));
+                }
+                let v = &self.ev_buf[val_span.0..val_span.1];
+                if v == XMLNS_NS {
+                    return Err(xml_err("the xmlns namespace cannot be bound"));
+                }
+                if (p == "xml") != (v == XML_NS) {
+                    return Err(xml_err(
+                        "the xml prefix and its namespace go only with each other",
+                    ));
+                }
+                if !p.is_empty() && v.is_empty() {
+                    return Err(xml_err(
+                        "a prefix cannot be bound to the empty URI",
+                    ));
+                }
+                let p_span = if p.is_empty() {
+                    (0, 0)
+                } else {
+                    let ps = self.ev_buf.len();
+                    self.ev_buf.push_str(p);
+                    (ps, self.ev_buf.len())
+                };
+                self.ns_decls.push((p_span, val_span));
+            } else {
+                self.plain_attrs.push((ns, val_span));
             }
         }
-        if plain.len() as u32 > limits.get_max_attributes() {
+        if self.plain_attrs.len() as u32 > limits.get_max_attributes() {
             return Err(limit("more attributes than max_attributes"));
         }
-        for (p, u) in &decls {
-            self.ns.push((p.clone(), u.clone()));
+        for &(ps, us) in &self.ns_decls {
+            let p = &self.ev_buf[ps.0..ps.1];
+            let u = &self.ev_buf[us.0..us.1];
+            self.ns.push((p.into(), u.into()));
         }
-        let (eprefix, elocal) = split_qname(qname)?;
-        let euri = self
-            .lookup(eprefix)
-            .ok_or_else(|| xml_err("an undeclared prefix"))?
-            .to_string();
-        let mut resolved: Vec<(String, String, String, String)> =
-            Vec::with_capacity(plain.len());
-        for (n, v) in plain {
-            let (p, l) = split_qname(n)?;
-            let uri = if p.is_empty() {
-                String::new()
+
+        let (eprefix_str, elocal_str) =
+            split_qname(&self.tag_buf[qname_span.0..qname_span.1])?;
+        let eprefix_span = if eprefix_str.is_empty() {
+            (0, 0)
+        } else {
+            let s = self.ev_buf.len();
+            self.ev_buf.push_str(eprefix_str);
+            (s, self.ev_buf.len())
+        };
+        let euri_span = {
+            let euri_str = lookup_ns(&self.ns, eprefix_str)
+                .ok_or_else(|| xml_err("an undeclared prefix"))?;
+            if euri_str.is_empty() {
+                (0, 0)
             } else {
-                self.lookup(p)
-                    .ok_or_else(|| xml_err("an undeclared prefix"))?
-                    .to_string()
+                let s = self.ev_buf.len();
+                self.ev_buf.push_str(euri_str);
+                (s, self.ev_buf.len())
+            }
+        };
+        let id = {
+            let euri_str = if euri_span == (0, 0) {
+                ""
+            } else {
+                &self.ev_buf[euri_span.0..euri_span.1]
             };
-            if resolved.iter().any(|(u, l2, _, _)| *u == uri && l2 == l) {
+            // Local name lives in `tag_buf`; copy via stack or resolve via
+            // index since `add_name_cached` only touches `tables`, `last_uri`,
+            // `name_cache`.
+            let u = if euri_str.is_empty() {
+                0
+            } else if self.last_uri != 0
+                && self.tables.uri_str(self.last_uri) == Some(euri_str)
+            {
+                self.last_uri
+            } else {
+                let u = match self.tables.find_uri_str(euri_str) {
+                    Some(u) => u,
+                    None => self.tables.add_uri(euri_str)?,
+                };
+                self.last_uri = u;
+                u
+            };
+            let slot = name_cache_slot(u, elocal_str.as_bytes());
+            if let Some((cu, cid, clid)) = self.name_cache[slot]
+                && cu == u
+                && self.tables.local_str_by_id(clid) == elocal_str
+            {
+                cid
+            } else {
+                let l = match self
+                    .tables
+                    .global_strings_local(elocal_str)
+                    .and_then(|id| self.tables.find_local(u, id))
+                {
+                    Some(l) => l,
+                    None => self.tables.add_local(u, elocal_str)?,
+                };
+                let nid = NameId { uri: u, local: l };
+                if let Some(lid) = self.tables.local(u, l) {
+                    self.name_cache[slot] = Some((u, nid, lid));
+                }
+                nid
+            }
+        };
+
+        self.resolved_attrs.clear();
+        for idx in 0..self.plain_attrs.len() {
+            let (ns, vs) = self.plain_attrs[idx];
+            let (p, l) = split_qname(&self.tag_buf[ns.0..ns.1])?;
+            let (p_span, u) = if p.is_empty() {
+                ((0, 0), 0)
+            } else {
+                let ps = self.ev_buf.len();
+                self.ev_buf.push_str(p);
+                let p_span = (ps, self.ev_buf.len());
+                let uri = lookup_ns(&self.ns, p)
+                    .ok_or_else(|| xml_err("an undeclared prefix"))?;
+                let u = if self.last_uri != 0
+                    && self.tables.uri_str(self.last_uri) == Some(uri)
+                {
+                    self.last_uri
+                } else {
+                    let u = match self.tables.find_uri_str(uri) {
+                        Some(u) => u,
+                        None => self.tables.add_uri(uri)?,
+                    };
+                    self.last_uri = u;
+                    u
+                };
+                (p_span, u)
+            };
+            let slot = name_cache_slot(u, l.as_bytes());
+            let aid = if let Some((cu, cid, clid)) = self.name_cache[slot]
+                && cu == u
+                && self.tables.local_str_by_id(clid) == l
+            {
+                cid
+            } else {
+                let loc = match self
+                    .tables
+                    .global_strings_local(l)
+                    .and_then(|id| self.tables.find_local(u, id))
+                {
+                    Some(loc) => loc,
+                    None => self.tables.add_local(u, l)?,
+                };
+                let nid = NameId { uri: u, local: loc };
+                if let Some(lid) = self.tables.local(u, loc) {
+                    self.name_cache[slot] = Some((u, nid, lid));
+                }
+                nid
+            };
+            if self.resolved_attrs.iter().any(|&(other, _, _)| other == aid) {
                 return Err(xml_err(
                     "two attributes with the same expanded name",
                 ));
             }
-            resolved.push((uri, l.to_string(), p.to_string(), v));
+            self.resolved_attrs.push((aid, p_span, vs));
         }
-        let id = self.tables.add_name(&euri, elocal)?;
+
         let depth = self.stack.len() as u32 + 1;
-        let eprefix = eprefix.to_string();
-        self.queue(XEv::SE(id, eprefix.clone()), depth, pos);
-        let mut marked = false;
-        for (p, u) in decls {
-            let local = !marked && p == eprefix && u == euri;
-            marked |= local;
-            self.queue(XEv::NS(p, u, local), depth, pos);
+        self.queue(XEv::SE(id, eprefix_span), depth, pos);
+        if !self.ns_decls.is_empty() {
+            let mut marked = false;
+            for idx in 0..self.ns_decls.len() {
+                let (ps, us) = self.ns_decls[idx];
+                let local = !marked
+                    && &self.ev_buf[ps.0..ps.1]
+                        == &self.ev_buf[eprefix_span.0..eprefix_span.1]
+                    && &self.ev_buf[us.0..us.1]
+                        == &self.ev_buf[euri_span.0..euri_span.1];
+                marked |= local;
+                self.queue(XEv::NS(ps, us, local), depth, pos);
+            }
         }
-        for (uri, l, p, v) in resolved {
-            let aid = self.tables.add_name(&uri, &l)?;
-            self.queue(XEv::AT(aid, p, v), depth, pos);
+        for idx in 0..self.resolved_attrs.len() {
+            let (aid, ps, vs) = self.resolved_attrs[idx];
+            self.queue(XEv::AT(aid, ps, vs), depth, pos);
         }
         if empty {
             self.ns.truncate(ns_mark);
-            self.queue(XEv::EE(id, eprefix), depth - 1, pos);
+            self.queue(XEv::EE(id, eprefix_span), depth - 1, pos);
             if self.stack.is_empty() {
                 self.phase = XPhase::Epilog;
             } else {
                 self.phase = XPhase::Content;
             }
         } else {
-            self.stack.push(Open {
-                qname: qname.into(),
-                id,
-                prefix: eprefix,
-                ns_mark,
-            });
+            let ep = &self.ev_buf[eprefix_span.0..eprefix_span.1];
+            let prefix = (!ep.is_empty()).then(|| ep.into());
+            self.stack.push(Open { id, prefix, ns_mark });
             self.phase = XPhase::Content;
         }
         Ok(())
@@ -1899,12 +2295,22 @@ impl<'g, const N: usize> XmlReader<'g, N> {
             Ok(e) => e,
             Err(p) => return Ok(p),
         };
-        let (s, _) = self.peek();
-        let name = s[2..end].trim_end_matches(is_space).to_string();
         let open = self.stack.last().ok_or_else(|| {
             xml_err("an end tag with no element open").at(pos)
         })?;
-        if open.qname != name {
+        let (s, _) = self.peek();
+        let name = s[2..end].trim_end_matches(is_space);
+        let local = self
+            .tables
+            .local_str(open.id.uri, open.id.local)
+            .unwrap_or("");
+        let matches = match &open.prefix {
+            None => name == local,
+            Some(p) => {
+                name.split_once(':') == Some((p.as_ref(), local))
+            }
+        };
+        if !matches {
             return Err(xml_err(
                 "an end tag that does not match the start tag",
             )
@@ -1921,8 +2327,12 @@ impl<'g, const N: usize> XmlReader<'g, N> {
         self.adv(end + 1);
         let open = self.stack.pop().expect("checked above");
         self.ns.truncate(open.ns_mark);
+        let p_span = match &open.prefix {
+            Some(p) => self.push_ev_str(p),
+            None => (0, 0),
+        };
         self.queue(
-            XEv::EE(open.id, open.prefix),
+            XEv::EE(open.id, p_span),
             self.stack.len() as u32,
             pos,
         );
@@ -2021,7 +2431,11 @@ impl<'g, const N: usize> XmlReader<'g, N> {
             if e.position() == Position::default() { e.at(pos) } else { e }
         })?;
         if self.cfg.report_doctype {
-            self.queue(XEv::DT(name, public, system, text), 0, pos);
+            let ns = self.push_ev_str(&name);
+            let ps = self.push_ev_str(&public);
+            let ss = self.push_ev_str(&system);
+            let ts = self.push_ev_str(&text);
+            self.queue(XEv::DT(ns, ps, ss, ts), 0, pos);
             return Ok(P::Produced);
         }
         Ok(P::Again)
@@ -2194,6 +2608,11 @@ impl<'g, const N: usize> XmlReader<'g, N> {
             ));
         }
         if self.queue.is_empty() {
+            if self.chars_ready {
+                self.chars.clear();
+                self.chars_ready = false;
+            }
+            self.ev_buf.clear();
             if self.phase == XPhase::Done {
                 if self.ended {
                     self.current = None;
@@ -2232,32 +2651,36 @@ impl<'g, const N: usize> XmlReader<'g, N> {
         self.current = Some(ev);
         self.events += 1;
         let this: &Self = self;
-        let name = |id: NameId, prefix: &'g2 str| -> Name<'g2> {
-            xname(&this.tables, id, prefix)
+        let ev_str = |s: Span| -> &'g2 str { &this.ev_buf[s.0..s.1] };
+        let name = |id: NameId, prefix: Span| -> Name<'g2> {
+            xname(&this.tables, id, ev_str(prefix))
         };
         let ev = match this.current.as_ref().expect("set above") {
             XEv::SD => Event::StartDocument,
             XEv::ED => Event::EndDocument,
-            XEv::SE(id, p) => Event::StartElement(name(*id, p)),
-            XEv::EE(id, p) => Event::EndElement(name(*id, p)),
-            XEv::AT(id, p, v) => Event::Attribute(name(*id, p), Value::Str(v)),
+            XEv::SE(id, p) => Event::StartElement(name(*id, *p)),
+            XEv::EE(id, p) => Event::EndElement(name(*id, *p)),
+            XEv::AT(id, p, v) => {
+                Event::Attribute(name(*id, *p), Value::Str(ev_str(*v)))
+            }
             XEv::NS(p, u, l) => Event::Namespace(NsDecl {
-                prefix: p,
-                uri: u,
+                prefix: ev_str(*p),
+                uri: ev_str(*u),
                 local_element_ns: *l,
             }),
-            XEv::CH(s) => Event::Characters(Value::Str(s)),
-            XEv::CM(s) => Event::Comment(s),
-            XEv::PI(t, d) => {
-                Event::ProcessingInstruction { target: t, data: d }
-            }
+            XEv::CH => Event::Characters(Value::Str(&this.chars)),
+            XEv::CM(s) => Event::Comment(ev_str(*s)),
+            XEv::PI(t, d) => Event::ProcessingInstruction {
+                target: ev_str(*t),
+                data: ev_str(*d),
+            },
             XEv::DT(n, p, s, t) => Event::Doctype(Doctype {
-                name: n,
-                public_id: p,
-                system_id: s,
-                text: t,
+                name: ev_str(*n),
+                public_id: ev_str(*p),
+                system_id: ev_str(*s),
+                text: ev_str(*t),
             }),
-            XEv::ER(n) => Event::EntityReference(n),
+            XEv::ER(n) => Event::EntityReference(ev_str(*n)),
         };
         Ok(Step::Event(ev, meta))
     }
@@ -2268,12 +2691,10 @@ fn xname<'a>(
     id: NameId,
     prefix: &'a str,
 ) -> Name<'a> {
-    let n = Name::new(
-        t.uri_str(id.uri).unwrap_or(""),
-        t.local_str(id.uri, id.local).unwrap_or(""),
-    );
+    let (uid, u, lid, l) = t.resolve_name(id);
+    let n = Name::new(u, l);
     let n = if prefix.is_empty() { n } else { n.with_prefix(prefix) };
-    let global = match (t.uri(id.uri), t.local(id.uri, id.local)) {
+    let global = match (uid, lid) {
         (Some(uri), Some(local)) => Some(GlobalName { uri, local }),
         _ => None,
     };

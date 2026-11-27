@@ -613,10 +613,6 @@ impl<'a> SessionTables<'a> {
     pub(crate) fn uri_at(&self, outer: bool, n: u32) -> Option<UriId> {
         lookup(&self.initial.uris, Some(&self.active(outer).uris), n)
     }
-    #[cfg(feature = "xml")]
-    pub fn uri(&self, n: u32) -> Option<UriId> {
-        self.uri_at(false, n)
-    }
     pub(crate) fn uri_str_at(&self, outer: bool, n: u32) -> Option<&str> {
         self.uri_at(outer, n).map(|id| self.global().uris().resolve(id))
     }
@@ -628,6 +624,15 @@ impl<'a> SessionTables<'a> {
         find(Some(&self.initial.uri_rev), Some(&self.cur.uris), id)
     }
     pub fn find_uri_str(&self, s: &str) -> Option<u32> {
+        if s.is_empty() && !self.initial.uris.is_empty() {
+            if self.cur.uris.added.is_empty() {
+                return Some(0);
+            }
+            let empty_id = self.initial.uris[0];
+            return Some(
+                self.cur.uris.rev.get(&empty_id).copied().unwrap_or(0),
+            );
+        }
         self.global().uris().get(s).and_then(|id| self.find_uri(id))
     }
 
@@ -656,8 +661,10 @@ impl<'a> SessionTables<'a> {
     /// range.
     pub fn prefix_count(&self, uri: u32) -> u32 {
         let init = self.initial.prefixes.get(uri as usize).map_or(0, Vec::len);
-        let added =
-            self.cur.per_uri.get(&uri).map_or(0, |p| p.prefixes.added.len());
+        let added = self
+            .cur
+            .uri_part(uri)
+            .map_or(0, |p| p.prefixes.added.len());
         (init + added) as u32
     }
     pub(crate) fn prefix_at(
@@ -666,7 +673,7 @@ impl<'a> SessionTables<'a> {
         uri: u32,
         n: u32,
     ) -> Option<PrefixId> {
-        let part = self.active(outer).per_uri.get(&uri).map(|p| &p.prefixes);
+        let part = self.active(outer).uri_part(uri).map(|p| &p.prefixes);
         lookup(
             self.initial.prefixes.get(uri as usize).map_or(&[][..], |v| v),
             part,
@@ -692,7 +699,7 @@ impl<'a> SessionTables<'a> {
     pub fn find_prefix(&self, uri: u32, id: PrefixId) -> Option<u32> {
         find(
             self.initial.prefix_rev.get(uri as usize),
-            self.cur.per_uri.get(&uri).map(|p| &p.prefixes),
+            self.cur.uri_part(uri).map(|p| &p.prefixes),
             id,
         )
     }
@@ -707,12 +714,7 @@ impl<'a> SessionTables<'a> {
         self.check_name(s.len(), self.prefix_count(uri) as usize)?;
         let id = self.global().prefixes().intern_id(s)?;
         let n = self.prefix_count(uri);
-        let part = &mut self
-            .cur
-            .per_uri
-            .entry(uri)
-            .or_insert_with(UriPart::new)
-            .prefixes;
+        let part = &mut self.cur.uri_part_mut(uri).prefixes;
         part.added.push(id);
         part.rev.insert(id, n);
         self.count_name(s.len());
@@ -723,8 +725,10 @@ impl<'a> SessionTables<'a> {
     /// range.
     pub fn local_count(&self, uri: u32) -> u32 {
         let init = self.initial.locals.get(uri as usize).map_or(0, Vec::len);
-        let added =
-            self.cur.per_uri.get(&uri).map_or(0, |p| p.locals.added.len());
+        let added = self
+            .cur
+            .uri_part(uri)
+            .map_or(0, |p| p.locals.added.len());
         (init + added) as u32
     }
     pub(crate) fn local_at(
@@ -733,7 +737,7 @@ impl<'a> SessionTables<'a> {
         uri: u32,
         n: u32,
     ) -> Option<LocalId> {
-        let part = self.active(outer).per_uri.get(&uri).map(|p| &p.locals);
+        let part = self.active(outer).uri_part(uri).map(|p| &p.locals);
         lookup(
             self.initial.locals.get(uri as usize).map_or(&[][..], |v| v),
             part,
@@ -756,10 +760,26 @@ impl<'a> SessionTables<'a> {
     pub fn local_str(&self, uri: u32, n: u32) -> Option<&str> {
         self.local_str_at(false, uri, n)
     }
+    #[cfg(feature = "xml")]
+    pub(crate) fn local_str_by_id(&self, id: LocalId) -> &str {
+        self.global().locals().resolve(id)
+    }
+    #[cfg(feature = "xml")]
+    pub(crate) fn resolve_name(
+        &self,
+        id: NameId,
+    ) -> (Option<UriId>, &str, Option<LocalId>, &str) {
+        let g = self.global();
+        let uid = self.uri_at(false, id.uri);
+        let u = uid.map_or("", |id| g.uris().resolve(id));
+        let lid = self.local_at(false, id.uri, id.local);
+        let l = lid.map_or("", |id| g.locals().resolve(id));
+        (uid, u, lid, l)
+    }
     pub fn find_local(&self, uri: u32, id: LocalId) -> Option<u32> {
         find(
             self.initial.local_rev.get(uri as usize),
-            self.cur.per_uri.get(&uri).map(|p| &p.locals),
+            self.cur.uri_part(uri).map(|p| &p.locals),
             id,
         )
     }
@@ -774,12 +794,7 @@ impl<'a> SessionTables<'a> {
         self.check_name(s.len(), self.local_count(uri) as usize)?;
         let id = self.global().locals().intern_id(s)?;
         let n = self.local_count(uri);
-        let part = &mut self
-            .cur
-            .per_uri
-            .entry(uri)
-            .or_insert_with(UriPart::new)
-            .locals;
+        let part = &mut self.cur.uri_part_mut(uri).locals;
         part.added.push(id);
         part.rev.insert(id, n);
         self.count_name(s.len());
@@ -800,7 +815,7 @@ impl<'a> SessionTables<'a> {
     /// The numbers of a name, adding its URI and local name when
     /// absent: what a writer does. A reader adds with `add_uri` and
     /// `add_local`, as the stream says.
-    #[cfg(any(feature = "xml", test))]
+    #[cfg(test)]
     pub fn add_name(&mut self, uri: &str, local: &str) -> Result<NameId> {
         let u = match self.find_uri_str(uri) {
             Some(u) => u,
@@ -1045,8 +1060,9 @@ struct LocalPart {
 /// The partitions of one stream, or of one self-contained element.
 struct Partitions {
     uris: NamePart<crate::strings::Uri>,
-    /// Only URI numbers with a session-added prefix or local name.
-    per_uri: Map<u32, UriPart>,
+    /// Indexed by URI number; only populated for URIs with a
+    /// session-added prefix or local name.
+    per_uri: Vec<Option<Box<UriPart>>>,
     slots: Vec<Slot>,
     next_slot: u32,
     global_rev: Map<ValueId, u32>,
@@ -1059,7 +1075,7 @@ impl Partitions {
     fn new() -> Self {
         Partitions {
             uris: NamePart::new(),
-            per_uri: map(),
+            per_uri: Vec::new(),
             slots: Vec::new(),
             next_slot: 0,
             global_rev: map(),
@@ -1069,9 +1085,22 @@ impl Partitions {
         }
     }
 
+    #[inline]
+    fn uri_part(&self, uri: u32) -> Option<&UriPart> {
+        self.per_uri.get(uri as usize).and_then(|p| p.as_deref())
+    }
+
+    fn uri_part_mut(&mut self, uri: u32) -> &mut UriPart {
+        let idx = uri as usize;
+        if idx >= self.per_uri.len() {
+            self.per_uri.resize_with(idx + 1, || None);
+        }
+        self.per_uri[idx].get_or_insert_with(|| Box::new(UriPart::new()))
+    }
+
     fn release(&mut self, g: &GlobalStrings) {
         self.uris.release(g.uris());
-        for p in self.per_uri.values_mut() {
+        for p in self.per_uri.iter_mut().flatten() {
             p.prefixes.release(g.prefixes());
             p.locals.release(g.locals());
         }

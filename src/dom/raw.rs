@@ -31,7 +31,7 @@ use core::ffi::{c_int, c_void};
 use core::ptr;
 
 use crate::OwnedValue;
-use crate::strings::{Held, Local, Prefix, Uri};
+use crate::strings::{GlobalStrings, Held, Prefix, StrId, Uri};
 
 /// `xmlElementType`: the `type` field. The numbers are libxml2's.
 pub type ExiElementType = c_int;
@@ -194,62 +194,86 @@ pub(crate) static COMMENT_NAME: &[u8] = b"comment\0";
 pub(crate) static VERSION: &[u8] = b"1.0\0";
 pub(crate) static UTF8: &[u8] = b"UTF-8\0";
 
-/// What Rust keeps beside each node: the references that keep its
-/// strings alive.
-pub(crate) struct Extra<'g> {
+/// Longest UTF-8 text (excluding the NUL byte) stored inline in a node box.
+pub(crate) const INLINE_MAX: usize = 21;
+
+/// What Rust keeps beside each text, comment, PI or entity-ref node:
+/// its slot and owned payload.
+pub(crate) struct Extra {
     /// The node's slot in the document's table.
     pub slot: u32,
-    pub uri: Option<Held<'g, Uri>>,
-    pub local: Option<Held<'g, Local>>,
-    /// The backing buffer of a PI or entity name, or a wanted prefix.
-    pub name_buf: Option<Box<[u8]>>,
-    pub content: Content,
+    pub payload: Payload,
 }
 
-/// Text backing the C pointer, or a boxed typed value used by EXI.
-pub(crate) enum Content {
+/// Inline short text, a heap text buffer, a typed EXI value, an
+/// entity-ref name, or a PI `(target, data)` pair.
+pub(crate) enum Payload {
     None,
+    /// Short NUL-terminated UTF-8 text stored inline in the node box
+    /// (`len as usize <= INLINE_MAX`, `buf[len as usize] == 0`).
+    Inline { len: u8, buf: [u8; INLINE_MAX + 1] },
     Text(Box<[u8]>),
     Typed(Box<OwnedValue>),
+    /// Backing buffer for an entity-ref name (keeps `RawNode::name` alive).
+    Name(#[allow(dead_code)] Box<[u8]>),
+    /// Processing instruction `(target, data)`, both NUL-terminated.
+    Pi(Box<(Box<[u8]>, Box<[u8]>)>),
 }
 
-impl Content {
+impl Extra {
+    pub fn new(slot: u32) -> Self {
+        Extra { slot, payload: Payload::None }
+    }
+
     pub fn text(&self) -> &str {
-        match self {
-            Self::Text(text) => text_of(text),
+        match &self.payload {
+            Payload::Inline { len, buf } => {
+                // SAFETY: written from a `&str` in `set_text`.
+                unsafe { core::str::from_utf8_unchecked(&buf[..*len as usize]) }
+            }
+            Payload::Text(text) => text_of(text),
+            Payload::Pi(pair) => text_of(&pair.1),
             _ => "",
         }
     }
-}
 
-impl Extra<'_> {
-    pub fn new(slot: u32) -> Self {
-        Extra {
-            slot,
-            uri: None,
-            local: None,
-            name_buf: None,
-            content: Content::None,
+    pub fn typed(&self) -> Option<&OwnedValue> {
+        match &self.payload {
+            Payload::Typed(v) => Some(v),
+            _ => None,
         }
     }
 }
 
+/// Element box: `RawNode` plus slot and optional wanted `PrefixId`
+/// (`NO_ID` when none). Names are held as reference-counted ids in
+/// `raw.uriId` and `raw.localId`.
 #[repr(C)]
-pub(crate) struct NodeBox<'g> {
+pub(crate) struct ElemBox {
     pub raw: RawNode,
-    pub x: Extra<'g>,
+    pub slot: u32,
+    pub want_prefix: u32,
 }
 
 #[repr(C)]
-pub(crate) struct AttrBox<'g> {
+pub(crate) struct NodeBox {
+    pub raw: RawNode,
+    pub x: Extra,
+}
+
+/// Attribute box: `RawAttr` plus slot and optional wanted `PrefixId`.
+#[repr(C)]
+pub(crate) struct AttrBox {
     pub raw: RawAttr,
-    pub x: Extra<'g>,
+    pub slot: u32,
+    pub want_prefix: u32,
 }
 
 #[repr(C)]
-pub(crate) struct DtdBox<'g> {
+pub(crate) struct DtdBox {
     pub raw: RawDtd,
-    pub x: Extra<'g>,
+    pub slot: u32,
+    pub name: Box<[u8]>,
     /// Public ID, system ID and internal subset, NUL-terminated.
     pub ids: [Box<[u8]>; 3],
 }
@@ -393,59 +417,154 @@ impl RawDoc {
     }
 }
 
-/// The Rust side of a node of any kind but the document.
+/// The slot number of any non-document node.
 ///
 /// # Safety
 ///
-/// `p` is a live node of a document with strings `'g`, not the document
-/// itself.
-pub(crate) unsafe fn extra<'a, 'g>(p: *mut RawCommon) -> &'a Extra<'g> {
-    // SAFETY: the caller keeps the node alive for the borrow.
-    unsafe { &*extra_ptr(p) }
-}
-
-/// Mutable metadata of a node.
-///
-/// # Safety
-///
-/// As `extra`, with exclusive access to the metadata for the borrow.
-pub(crate) unsafe fn extra_mut<'a, 'g>(
-    p: *mut RawCommon,
-) -> &'a mut Extra<'g> {
-    // SAFETY: the caller keeps the node alive and exclusively borrowed.
-    unsafe { &mut *extra_ptr(p) }
-}
-
-/// # Safety
-///
-/// `p` is a live node of the indicated box type, excluding the
-/// document.
-unsafe fn extra_ptr<'g>(p: *mut RawCommon) -> *mut Extra<'g> {
+/// `p` is a live node of a document, not the document itself.
+pub(crate) unsafe fn node_slot(p: *mut RawCommon) -> u32 {
     // SAFETY: each box is repr(C) with its public C struct first.
     unsafe {
         match (*p).r#type {
-            EXI_ATTRIBUTE_NODE => &raw mut (*(p as *mut AttrBox<'g>)).x,
-            EXI_DTD_NODE => &raw mut (*(p as *mut DtdBox<'g>)).x,
-            _ => &raw mut (*(p as *mut NodeBox<'g>)).x,
+            EXI_ELEMENT_NODE => (*(p as *const ElemBox)).slot,
+            EXI_ATTRIBUTE_NODE => (*(p as *const AttrBox)).slot,
+            EXI_DTD_NODE => (*(p as *const DtdBox)).slot,
+            _ => (*(p as *const NodeBox)).x.slot,
         }
     }
 }
 
-/// Frees the box behind `p` (not its children).
+/// Sets the slot number of any non-document node.
 ///
 /// # Safety
 ///
-/// `p` is a live node, unlinked, never used again.
-pub(crate) unsafe fn drop_box(p: *mut RawCommon) {
-    // SAFETY: as `extra`; the box was made with `Box::into_raw`.
+/// As [`node_slot`], with exclusive access to the node.
+pub(crate) unsafe fn set_node_slot(p: *mut RawCommon, slot: u32) {
+    // SAFETY: each box is repr(C) with its public C struct first.
     unsafe {
         match (*p).r#type {
-            EXI_ATTRIBUTE_NODE => drop(Box::from_raw(p as *mut AttrBox<'_>)),
-            EXI_DTD_NODE => drop(Box::from_raw(p as *mut DtdBox<'_>)),
-            _ => drop(Box::from_raw(p as *mut NodeBox<'_>)),
+            EXI_ELEMENT_NODE => (*(p as *mut ElemBox)).slot = slot,
+            EXI_ATTRIBUTE_NODE => (*(p as *mut AttrBox)).slot = slot,
+            EXI_DTD_NODE => (*(p as *mut DtdBox)).slot = slot,
+            _ => (*(p as *mut NodeBox)).x.slot = slot,
         }
     }
 }
+
+/// The wanted prefix id (`NO_ID` when none) of an element or attribute.
+///
+/// # Safety
+///
+/// `p` is a live element or attribute node.
+pub(crate) unsafe fn want_prefix_id(p: *mut RawCommon) -> u32 {
+    // SAFETY: the caller's contract.
+    unsafe {
+        match (*p).r#type {
+            EXI_ELEMENT_NODE => (*(p as *const ElemBox)).want_prefix,
+            EXI_ATTRIBUTE_NODE => (*(p as *const AttrBox)).want_prefix,
+            _ => NO_ID,
+        }
+    }
+}
+
+/// Sets the wanted prefix id of an element or attribute, returning the
+/// previous id (`NO_ID` when none).
+///
+/// # Safety
+///
+/// `p` is a live element or attribute node, exclusively borrowed.
+pub(crate) unsafe fn swap_want_prefix_id(p: *mut RawCommon, id: u32) -> u32 {
+    // SAFETY: the caller's contract.
+    unsafe {
+        match (*p).r#type {
+            EXI_ELEMENT_NODE => {
+                core::mem::replace(&mut (*(p as *mut ElemBox)).want_prefix, id)
+            }
+            EXI_ATTRIBUTE_NODE => {
+                core::mem::replace(&mut (*(p as *mut AttrBox)).want_prefix, id)
+            }
+            _ => NO_ID,
+        }
+    }
+}
+
+/// The Rust side of a text, comment, PI or entity-ref node (`NodeBox`).
+///
+/// # Safety
+///
+/// `p` is a live `NodeBox` (not a document, element, attribute or DTD).
+pub(crate) unsafe fn extra<'a>(p: *mut RawCommon) -> &'a Extra {
+    // SAFETY: the caller keeps the node alive for the borrow.
+    unsafe { &(*(p as *const NodeBox)).x }
+}
+
+/// Mutable metadata of a `NodeBox`.
+///
+/// # Safety
+///
+/// As [`extra`], with exclusive access to the metadata for the borrow.
+pub(crate) unsafe fn extra_mut<'a>(p: *mut RawCommon) -> &'a mut Extra {
+    // SAFETY: the caller keeps the node alive and exclusively borrowed.
+    unsafe { &mut (*(p as *mut NodeBox)).x }
+}
+
+/// Releases any interned name and prefix ids held by `p` and frees its
+/// box (not its children).
+///
+/// # Safety
+///
+/// `p` is a live node owned by a document using `strings`, unlinked,
+/// never used again.
+pub(crate) unsafe fn drop_box(p: *mut RawCommon, strings: &GlobalStrings) {
+    // SAFETY: the box was made with `Box::into_raw` matching its `type`.
+    unsafe {
+        match (*p).r#type {
+            EXI_ELEMENT_NODE => {
+                let n = p as *mut ElemBox;
+                let (u, l, w) =
+                    ((*n).raw.uriId, (*n).raw.localId, (*n).want_prefix);
+                if u != NO_ID {
+                    strings.uris().release(StrId::from_raw(u));
+                }
+                if l != NO_ID {
+                    strings.locals().release(StrId::from_raw(l));
+                }
+                if w != NO_ID {
+                    strings.prefixes().release(StrId::from_raw(w));
+                }
+                drop(Box::from_raw(n));
+            }
+            EXI_ATTRIBUTE_NODE => {
+                let a = p as *mut AttrBox;
+                let (u, l, w) =
+                    ((*a).raw.uriId, (*a).raw.localId, (*a).want_prefix);
+                if u != NO_ID {
+                    strings.uris().release(StrId::from_raw(u));
+                }
+                if l != NO_ID {
+                    strings.locals().release(StrId::from_raw(l));
+                }
+                if w != NO_ID {
+                    strings.prefixes().release(StrId::from_raw(w));
+                }
+                drop(Box::from_raw(a));
+            }
+            EXI_DTD_NODE => drop(Box::from_raw(p as *mut DtdBox)),
+            _ => drop(Box::from_raw(p as *mut NodeBox)),
+        }
+    }
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<Payload>() == 24);
+    assert!(core::mem::size_of::<Extra>() == 32);
+    assert!(
+        core::mem::size_of::<ElemBox>() == core::mem::size_of::<RawNode>() + 8
+    );
+    assert!(
+        core::mem::size_of::<AttrBox>() == core::mem::size_of::<RawAttr>() + 8
+    );
+};
 
 // Layout checks: the common part is at the same offsets in every
 // struct.

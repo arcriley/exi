@@ -83,7 +83,7 @@ use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::ptr::{self, NonNull};
 
-use crate::strings::{GlobalStrings, Held, Local, Uri};
+use crate::strings::{GlobalStrings, Local, Prefix, StrId, Uri};
 use crate::{
     AsName, Doctype, Error, ErrorKind, GlobalName, Name, OwnedValue, Result,
     Value,
@@ -154,21 +154,22 @@ enum Declare {
     No,
 }
 
-struct Slot {
-    ptr: *mut RawCommon,
-    generation: u32,
-}
-
 /// The document's heap block. `raw` is first, so a `*mut RawDoc` is a
 /// `*mut DocInner`.
 #[repr(C)]
 pub(crate) struct DocInner<'g> {
     pub raw: RawDoc,
     pub strings: &'g GlobalStrings,
-    slots: Vec<Slot>,
+    /// Slot pointers (null when freed), parallel to `gens`.
+    ptrs: Vec<*mut RawCommon>,
+    gens: Vec<u32>,
     free: Vec<u32>,
     /// The number of the next generated prefix (`ns1`, `ns2`, …).
     ns_count: u32,
+    /// True once any non-empty default namespace (`xmlns="..."`) has been
+    /// declared or adopted in this document. When false, elements in no
+    /// namespace cannot inherit a default namespace.
+    has_default_ns: bool,
     url: Option<Box<[u8]>>,
     /// Storage the C API keeps per document (typed value views).
     pub(crate) c_scratch: Option<Box<dyn core::any::Any>>,
@@ -191,14 +192,13 @@ impl Drop for Document<'_> {
         // once here. Nodes are freed without unlinking: the whole tree
         // goes.
         unsafe {
-            let slots = &(*d).slots;
-            for slot in slots.iter().skip(1) {
-                let p = slot.ptr;
+            let strings = (*d).strings;
+            for &p in (*d).ptrs.iter().skip(1) {
                 if !p.is_null() {
                     if (*p).r#type == EXI_ELEMENT_NODE {
                         free_ns_list((*(p as *mut RawNode)).nsDef);
                     }
-                    drop_box(p);
+                    drop_box(p, strings);
                 }
             }
             free_ns_list((*d).raw.oldNs);
@@ -243,9 +243,11 @@ impl<'g> Document<'g> {
         let inner = Box::new(DocInner {
             raw: RawDoc::blank(),
             strings,
-            slots: Vec::new(),
+            ptrs: Vec::new(),
+            gens: Vec::new(),
             free: Vec::new(),
             ns_count: 0,
+            has_default_ns: false,
             url: None,
             c_scratch: None,
         });
@@ -253,7 +255,8 @@ impl<'g> Document<'g> {
         // SAFETY: `p` is the new block; slot 0 is the document itself.
         unsafe {
             (*p).raw.doc = p as *mut RawDoc;
-            (*p).slots.push(Slot { ptr: p as *mut RawCommon, generation: 0 });
+            (*p).ptrs.push(p as *mut RawCommon);
+            (*p).gens.push(0);
         }
         Document {
             inner: NonNull::new(p).expect("Box is not null"),
@@ -369,9 +372,10 @@ impl<'g> Document<'g> {
     // ----- ids and pointers -----
 
     fn live_ptr(&self, n: NodeId) -> Option<*mut RawCommon> {
-        let slot = self.d().slots.get(n.index as usize)?;
-        (slot.generation == n.generation && !slot.ptr.is_null())
-            .then_some(slot.ptr)
+        let d = self.d();
+        let idx = n.index as usize;
+        let ptr = *d.ptrs.get(idx)?;
+        (d.gens[idx] == n.generation && !ptr.is_null()).then_some(ptr)
     }
 
     fn p(&self, n: NodeId) -> *mut RawCommon {
@@ -386,9 +390,9 @@ impl<'g> Document<'g> {
         let index = if p == self.doc_ptr() as *mut RawCommon {
             0
         } else {
-            unsafe { extra(p).slot }
+            unsafe { node_slot(p) }
         };
-        NodeId { index, generation: self.d().slots[index as usize].generation }
+        NodeId { index, generation: self.d().gens[index as usize] }
     }
 
     fn opt(&self, p: *mut RawNode) -> Option<NodeId> {
@@ -429,14 +433,14 @@ impl<'g> Document<'g> {
     /// # Ok::<(), exi::Error>(())
     /// ```
     pub fn node_id(&self, p: *const RawCommon) -> Option<NodeId> {
-        self.d()
-            .slots
+        let d = self.d();
+        d.ptrs
             .iter()
             .enumerate()
-            .find(|(_, slot)| !slot.ptr.is_null() && ptr::eq(slot.ptr, p))
-            .map(|(index, slot)| NodeId {
+            .find(|&(_, &ptr)| !ptr.is_null() && ptr::eq(ptr, p))
+            .map(|(index, _)| NodeId {
                 index: index as u32,
-                generation: slot.generation,
+                generation: d.gens[index],
             })
     }
 
@@ -454,11 +458,11 @@ impl<'g> Document<'g> {
         let index = if p == self.doc_ptr().cast() {
             0
         } else {
-            unsafe { extra(p).slot }
+            unsafe { node_slot(p) }
         };
-        let slot = self.d().slots.get(index as usize)?;
-        (slot.ptr == p)
-            .then_some(NodeId { index, generation: slot.generation })
+        let d = self.d();
+        let ptr = *d.ptrs.get(index as usize)?;
+        (ptr == p).then_some(NodeId { index, generation: d.gens[index as usize] })
     }
 
     /// The node's C struct: `exiNode*`, `exiAttr*`, `exiDtd*` or
@@ -477,25 +481,39 @@ impl<'g> Document<'g> {
         self.p(n)
     }
 
+    pub(crate) fn reserve_nodes(&mut self, additional: usize) {
+        let d = self.dm();
+        d.ptrs.reserve(additional);
+        d.gens.reserve(additional);
+    }
+
     fn reserve_slot(&mut self) -> u32 {
         let d = self.dm();
         match d.free.pop() {
             Some(i) => i,
             None => {
-                d.slots.push(Slot { ptr: ptr::null_mut(), generation: 0 });
-                (d.slots.len() - 1) as u32
+                d.ptrs.push(ptr::null_mut());
+                d.gens.push(0);
+                (d.ptrs.len() - 1) as u32
             }
         }
     }
 
     fn alloc_node(&mut self, kind: core::ffi::c_int) -> *mut RawCommon {
         let slot = self.reserve_slot();
-        let b = Box::new(NodeBox {
-            raw: RawNode::blank(kind, self.doc_ptr()),
-            x: Extra::new(slot),
-        });
-        let p = Box::into_raw(b) as *mut RawCommon;
-        self.dm().slots[slot as usize].ptr = p;
+        let p = if kind == EXI_ELEMENT_NODE {
+            Box::into_raw(Box::new(ElemBox {
+                raw: RawNode::blank(kind, self.doc_ptr()),
+                slot,
+                want_prefix: NO_ID,
+            })) as *mut RawCommon
+        } else {
+            Box::into_raw(Box::new(NodeBox {
+                raw: RawNode::blank(kind, self.doc_ptr()),
+                x: Extra::new(slot),
+            })) as *mut RawCommon
+        };
+        self.dm().ptrs[slot as usize] = p;
         p
     }
 
@@ -503,72 +521,167 @@ impl<'g> Document<'g> {
         let slot = self.reserve_slot();
         let b = Box::new(AttrBox {
             raw: RawAttr::blank(self.doc_ptr()),
-            x: Extra::new(slot),
+            slot,
+            want_prefix: NO_ID,
         });
         let p = Box::into_raw(b) as *mut RawCommon;
-        self.dm().slots[slot as usize].ptr = p;
+        self.dm().ptrs[slot as usize] = p;
         p
     }
 
-    fn alloc_dtd(&mut self, ids: [Box<[u8]>; 3]) -> *mut RawCommon {
+    fn alloc_dtd(
+        &mut self,
+        name: Box<[u8]>,
+        ids: [Box<[u8]>; 3],
+    ) -> *mut RawCommon {
         let slot = self.reserve_slot();
         let b = Box::new(DtdBox {
             raw: RawDtd::blank(self.doc_ptr()),
-            x: Extra::new(slot),
+            slot,
+            name,
             ids,
         });
         let p = Box::into_raw(b) as *mut RawCommon;
-        self.dm().slots[slot as usize].ptr = p;
+        self.dm().ptrs[slot as usize] = p;
+        p
+    }
+
+    fn alloc_text_raw(&mut self, text: &str) -> *mut RawCommon {
+        let p = self.alloc_node(EXI_TEXT_NODE);
+        // SAFETY: `p` is new.
+        unsafe { (*p).name = TEXT_NAME.as_ptr() };
+        self.set_text(p, text);
+        p
+    }
+
+    fn alloc_value_raw(&mut self, value: OwnedValue) -> *mut RawCommon {
+        let p = self.alloc_node(EXI_TEXT_NODE);
+        // SAFETY: `p` is new.
+        unsafe { (*p).name = TEXT_NAME.as_ptr() };
+        self.set_typed(p, value);
         p
     }
 
     /// Sets the node's name from `name`, holding its strings.
     fn set_name(&mut self, p: *mut RawCommon, name: Name<'_>) -> Result<()> {
         let s = self.d().strings;
-        let uri = s.uris().intern(name.uri())?;
-        let local = s.locals().intern(name.local_name())?;
+        let uri = s.uris().intern_id(name.uri())?;
+        let local = match s.locals().intern_id(name.local_name()) {
+            Ok(l) => l,
+            Err(e) => {
+                s.uris().release(uri);
+                return Err(e);
+            }
+        };
         // SAFETY: the caller supplies a live element or attribute.
-        unsafe { Self::install_name(p, uri, local) };
+        unsafe { Self::install_name_ids(p, s, s, uri, local) };
         Ok(())
     }
 
-    /// Installs the already interned name of a live element or
-    /// attribute.
-    unsafe fn install_name(
+    /// Sets the node's name when `name.global()` is known to belong to
+    /// `self.strings()`, retaining its ids directly without hashing.
+    fn set_name_trusted(
+        &mut self,
         p: *mut RawCommon,
-        uri: Held<'g, Uri>,
-        local: Held<'g, Local>,
+        name: Name<'_>,
+    ) -> Result<()> {
+        if let Some(g) = name.global() {
+            let s = self.d().strings;
+            s.uris().retain(g.uri);
+            s.locals().retain(g.local);
+            // SAFETY: `g` came from `s` and we just retained both ids.
+            unsafe { Self::install_name_ids(p, s, s, g.uri, g.local) };
+            Ok(())
+        } else {
+            self.set_name(p, name)
+        }
+    }
+
+    /// Installs the already-retained name ids of a live element or
+    /// attribute, releasing any previous ids from `old_strings`.
+    unsafe fn install_name_ids(
+        p: *mut RawCommon,
+        strings: &GlobalStrings,
+        old_strings: &GlobalStrings,
+        uri: StrId<Uri>,
+        local: StrId<Local>,
     ) {
-        // SAFETY: `p` is a live element or attribute of this document.
-        // The name pointer points into the table, alive while `local`
-        // is held, which the node keeps.
+        // SAFETY: `p` is a live element or attribute. The name pointer
+        // points into `strings`, alive while the node holds `local`.
         unsafe {
-            (*p).name = local.as_str().as_ptr();
-            let (u, l) = (uri.id().index(), local.id().index());
-            match (*p).r#type {
+            let (old_u, old_l) = match (*p).r#type {
                 EXI_ATTRIBUTE_NODE => {
-                    (*(p as *mut RawAttr)).uriId = u;
-                    (*(p as *mut RawAttr)).localId = l;
+                    let a = p as *mut RawAttr;
+                    let old = ((*a).uriId, (*a).localId);
+                    (*a).uriId = uri.index();
+                    (*a).localId = local.index();
+                    old
                 }
                 _ => {
-                    (*(p as *mut RawNode)).uriId = u;
-                    (*(p as *mut RawNode)).localId = l;
+                    let n = p as *mut RawNode;
+                    let old = ((*n).uriId, (*n).localId);
+                    (*n).uriId = uri.index();
+                    (*n).localId = local.index();
+                    old
                 }
+            };
+            (*p).name = strings.locals().resolve(local).as_ptr();
+            if old_u != NO_ID {
+                old_strings.uris().release(StrId::from_raw(old_u));
             }
-            let x = extra_mut(p);
-            x.uri = Some(uri);
-            x.local = Some(local);
+            if old_l != NO_ID {
+                old_strings.locals().release(StrId::from_raw(old_l));
+            }
         }
     }
 
     /// Remembers the prefix wanted for an element's or attribute's
     /// namespace, used when its declaration is chosen.
-    fn want_prefix(&mut self, p: *mut RawCommon, prefix: Option<&str>) {
-        // SAFETY: a live element or attribute; `name_buf` is unused by
-        // those otherwise.
-        unsafe {
-            extra_mut(p).name_buf = prefix.filter(|p| !p.is_empty()).map(cstr)
+    fn want_prefix(
+        &mut self,
+        p: *mut RawCommon,
+        prefix: Option<&str>,
+    ) -> Result<()> {
+        let s = self.d().strings;
+        let new_id = match prefix.filter(|p| !p.is_empty()) {
+            Some(pre) => s.prefixes().intern_id(pre)?.index(),
+            None => NO_ID,
         };
+        // SAFETY: a live element or attribute.
+        let old = unsafe { swap_want_prefix_id(p, new_id) };
+        if old != NO_ID {
+            s.prefixes().release(StrId::from_raw(old));
+        }
+        Ok(())
+    }
+
+    /// Sets the wanted prefix from an already-interned `PrefixId` in
+    /// `self.strings()` (infallible, used by `detach_ns`).
+    fn want_prefix_id_retain(
+        &mut self,
+        p: *mut RawCommon,
+        id: Option<StrId<Prefix>>,
+    ) {
+        let s = self.d().strings;
+        let new_id = match id {
+            Some(pid) => {
+                s.prefixes().retain(pid);
+                pid.index()
+            }
+            None => NO_ID,
+        };
+        // SAFETY: a live element or attribute.
+        let old = unsafe { swap_want_prefix_id(p, new_id) };
+        if old != NO_ID {
+            s.prefixes().release(StrId::from_raw(old));
+        }
+    }
+
+    fn want_prefix_str(&self, p: *mut RawCommon) -> Option<&'g str> {
+        // SAFETY: a live element or attribute.
+        let id = unsafe { want_prefix_id(p) };
+        (id != NO_ID)
+            .then(|| self.d().strings.prefixes().resolve(StrId::from_raw(id)))
     }
 
     /// A new attribute on no element (`xmlNewProp` with a NULL node).
@@ -593,9 +706,8 @@ impl<'g> Document<'g> {
         check_attribute_name(name)?;
         let a = self.alloc_attr();
         self.set_name(a, name)?;
-        self.want_prefix(a, name.prefix());
-        let t = self.new_text(value);
-        let tp = self.p(t);
+        self.want_prefix(a, name.prefix())?;
+        let tp = self.alloc_text_raw(value);
         // SAFETY: a new text node under the new attribute.
         unsafe { append_raw(a, tp) };
         Ok(self.id(a))
@@ -635,7 +747,7 @@ impl<'g> Document<'g> {
                 ));
             }
             if let Some(name) = self.name(attr) {
-                let prefix = extra(a).name_buf.as_deref().map(text_of);
+                let prefix = self.want_prefix_str(a);
                 check_attribute_name(match prefix {
                     Some(prefix) => name.with_prefix(prefix),
                     None => name,
@@ -685,23 +797,31 @@ impl<'g> Document<'g> {
         match unsafe { (*p).r#type } {
             EXI_ELEMENT_NODE => {
                 self.set_name(p, name)?;
-                self.want_prefix(p, name.prefix());
+                self.want_prefix(p, name.prefix())?;
                 let mode = self.mode_at(p);
                 self.fix_ns_tree(p as *mut RawNode, mode)
             }
             EXI_ATTRIBUTE_NODE => {
                 check_attribute_name(name)?;
                 self.set_name(p, name)?;
-                self.want_prefix(p, name.prefix());
+                self.want_prefix(p, name.prefix())?;
                 let mode = self.mode_at(p);
                 self.fix_attr_ns(p as *mut RawAttr, mode)
             }
             EXI_PI_NODE => {
                 let b = cstr(name.local_name());
-                // SAFETY: a live PI; the buffer is kept by it.
+                // SAFETY: a live PI; `Payload::Pi` keeps both target and data.
                 unsafe {
                     (*p).name = b.as_ptr();
-                    extra_mut(p).name_buf = Some(b);
+                    match &mut extra_mut(p).payload {
+                        Payload::Pi(pair) => pair.0 = b,
+                        slot => {
+                            let data = cstr("");
+                            (*(p as *mut RawNode)).content =
+                                data.as_ptr() as *mut u8;
+                            *slot = Payload::Pi(Box::new((b, data)));
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -767,15 +887,33 @@ impl<'g> Document<'g> {
 
     /// Sets the text of a text, comment or PI node.
     fn set_text(&mut self, p: *mut RawCommon, s: &str) {
-        self.set_text_buffer(p, cstr(s));
-    }
-
-    fn set_text_buffer(&mut self, p: *mut RawCommon, text: Box<[u8]>) {
         // SAFETY: `p` is a live node of this document with a `content`
-        // field. Its payload owns the NUL-terminated buffer.
+        // field. Its payload owns the NUL-terminated bytes (inline or
+        // heap-allocated), and the box address never moves while live.
         unsafe {
-            (*(p as *mut RawNode)).content = text.as_ptr() as *mut u8;
-            extra_mut(p).content = Content::Text(text);
+            if (*p).r#type == EXI_PI_NODE {
+                let data = cstr(s);
+                (*(p as *mut RawNode)).content = data.as_ptr() as *mut u8;
+                if let Payload::Pi(pair) = &mut extra_mut(p).payload {
+                    pair.1 = data;
+                }
+                return;
+            }
+            if s.len() <= INLINE_MAX {
+                let mut buf = [0u8; INLINE_MAX + 1];
+                buf[..s.len()].copy_from_slice(s.as_bytes());
+                let x = extra_mut(p);
+                x.payload = Payload::Inline { len: s.len() as u8, buf };
+                let ptr = match &mut x.payload {
+                    Payload::Inline { buf, .. } => buf.as_mut_ptr(),
+                    _ => unreachable!(),
+                };
+                (*(p as *mut RawNode)).content = ptr;
+            } else {
+                let text = cstr(s);
+                (*(p as *mut RawNode)).content = text.as_ptr() as *mut u8;
+                extra_mut(p).payload = Payload::Text(text);
+            }
         }
     }
 
@@ -783,10 +921,10 @@ impl<'g> Document<'g> {
         match v {
             OwnedValue::Str(s) => self.set_text(p, &s),
             v => {
-                // SAFETY: as in `set_text_buffer`.
+                // SAFETY: as in `set_text`.
                 unsafe {
                     (*(p as *mut RawNode)).content = ptr::null_mut();
-                    extra_mut(p).content = Content::Typed(Box::new(v));
+                    extra_mut(p).payload = Payload::Typed(Box::new(v));
                 }
             }
         }
@@ -812,7 +950,7 @@ impl<'g> Document<'g> {
         let name = name.as_name();
         let p = self.alloc_node(EXI_ELEMENT_NODE);
         self.set_name(p, name)?;
-        self.want_prefix(p, name.prefix());
+        self.want_prefix(p, name.prefix())?;
         Ok(self.id(p))
     }
 
@@ -828,14 +966,7 @@ impl<'g> Document<'g> {
     /// # Ok::<(), exi::Error>(())
     /// ```
     pub fn new_text(&mut self, text: &str) -> NodeId {
-        self.new_text_buffer(cstr(text))
-    }
-
-    fn new_text_buffer(&mut self, text: Box<[u8]>) -> NodeId {
-        let p = self.alloc_node(EXI_TEXT_NODE);
-        // SAFETY: `p` is new.
-        unsafe { (*p).name = TEXT_NAME.as_ptr() };
-        self.set_text_buffer(p, text);
+        let p = self.alloc_text_raw(text);
         self.id(p)
     }
 
@@ -854,10 +985,7 @@ impl<'g> Document<'g> {
     /// # Ok::<(), exi::Error>(())
     /// ```
     pub fn new_value(&mut self, value: OwnedValue) -> NodeId {
-        let p = self.alloc_node(EXI_TEXT_NODE);
-        // SAFETY: `p` is new.
-        unsafe { (*p).name = TEXT_NAME.as_ptr() };
-        self.set_typed(p, value);
+        let p = self.alloc_value_raw(value);
         self.id(p)
     }
 
@@ -895,13 +1023,13 @@ impl<'g> Document<'g> {
     /// ```
     pub fn new_pi(&mut self, target: &str, data: &str) -> NodeId {
         let p = self.alloc_node(EXI_PI_NODE);
-        let b = cstr(target);
-        // SAFETY: `p` is new; the name buffer is kept by the node.
+        let pair = Box::new((cstr(target), cstr(data)));
+        // SAFETY: `p` is new; `Payload::Pi` owns both buffers.
         unsafe {
-            (*p).name = b.as_ptr();
-            extra_mut(p).name_buf = Some(b);
+            (*p).name = pair.0.as_ptr();
+            (*(p as *mut RawNode)).content = pair.1.as_ptr() as *mut u8;
+            extra_mut(p).payload = Payload::Pi(pair);
         }
-        self.set_text(p, data);
         self.id(p)
     }
 
@@ -922,7 +1050,7 @@ impl<'g> Document<'g> {
         // SAFETY: as `new_pi`.
         unsafe {
             (*p).name = b.as_ptr();
-            extra_mut(p).name_buf = Some(b);
+            extra_mut(p).payload = Payload::Name(b);
         }
         self.id(p)
     }
@@ -952,24 +1080,21 @@ impl<'g> Document<'g> {
         if let Some(old) = self.doctype_node() {
             self.remove(old);
         }
-        let p = self.alloc_dtd([
-            cstr(dt.public_id),
-            cstr(dt.system_id),
-            cstr(dt.text),
-        ]);
-        let name = cstr(dt.name);
+        let p = self.alloc_dtd(
+            cstr(dt.name),
+            [cstr(dt.public_id), cstr(dt.system_id), cstr(dt.text)],
+        );
         let doc = self.doc_ptr();
         // SAFETY: `p` is a new DTD box; its strings are kept by it.
         unsafe {
-            let dtd = &mut *(p as *mut DtdBox<'g>);
-            dtd.raw.name = name.as_ptr();
+            let dtd = &mut *(p as *mut DtdBox);
+            dtd.raw.name = dtd.name.as_ptr();
             if !dt.public_id.is_empty() {
                 dtd.raw.ExternalID = dtd.ids[0].as_ptr();
             }
             if !dt.system_id.is_empty() {
                 dtd.raw.SystemID = dtd.ids[1].as_ptr();
             }
-            dtd.x.name_buf = Some(name);
             (*doc).intSubset = p as *mut RawDtd;
             // Before the root element, or last if there is none.
             match self.root() {
@@ -997,7 +1122,7 @@ impl<'g> Document<'g> {
         let p = self.p(n);
         // SAFETY: a live DTD node; its strings live as long as `&self`.
         unsafe {
-            let b = &(*(p as *const DtdBox<'g>)).ids;
+            let b = &(*(p as *const DtdBox)).ids;
             Some(Doctype {
                 name: str_at((*p).name),
                 public_id: text_of(&b[0]),
@@ -1395,19 +1520,30 @@ impl<'g> Document<'g> {
         // SAFETY: a live node; its held strings live as long as
         // `&self`.
         unsafe {
-            if !matches!((*p).r#type, EXI_ELEMENT_NODE | EXI_ATTRIBUTE_NODE) {
+            let (u, l, ns) = match (*p).r#type {
+                EXI_ELEMENT_NODE => {
+                    let n = p as *mut RawNode;
+                    ((*n).uriId, (*n).localId, (*n).ns)
+                }
+                EXI_ATTRIBUTE_NODE => {
+                    let a = p as *mut RawAttr;
+                    ((*a).uriId, (*a).localId, (*a).ns)
+                }
+                _ => return None,
+            };
+            if u == NO_ID || l == NO_ID {
                 return None;
             }
-            let x = extra(p);
-            let (u, l) = (x.uri.as_ref()?, x.local.as_ref()?);
-            let ns = if (*p).r#type == EXI_ATTRIBUTE_NODE {
-                (*(p as *mut RawAttr)).ns
-            } else {
-                (*(p as *mut RawNode)).ns
-            };
-            let mut name = Name::new(u.as_str(), l.as_str()).with_ids(
+            let s = self.d().strings;
+            let uri_id = StrId::<Uri>::from_raw(u);
+            let local_id = StrId::<Local>::from_raw(l);
+            let mut name = Name::new(
+                s.uris().resolve(uri_id),
+                s.locals().resolve(local_id),
+            )
+            .with_ids(
                 None,
-                Some(GlobalName { uri: u.id(), local: l.id() }),
+                Some(GlobalName { uri: uri_id, local: local_id }),
             );
             if !ns.is_null() && !(*ns).prefix.is_null() {
                 name = name.with_prefix(str_at((*ns).prefix));
@@ -1451,7 +1587,13 @@ impl<'g> Document<'g> {
     /// # Ok::<(), exi::Error>(())
     /// ```
     pub fn global_name(&self, n: NodeId) -> Option<GlobalName> {
-        self.name(n).and_then(|n| n.global())
+        let p = self.p(n);
+        // SAFETY: a live node.
+        let (u, l) = unsafe { raw_ids(p) };
+        (u != NO_ID && l != NO_ID).then(|| GlobalName {
+            uri: StrId::from_raw(u),
+            local: StrId::from_raw(l),
+        })
     }
 
     /// The global ids of a name, if some node holds it: compare with
@@ -1494,10 +1636,10 @@ impl<'g> Document<'g> {
         unsafe {
             match (*p).r#type {
                 EXI_TEXT_NODE | EXI_CDATA_SECTION_NODE => {
-                    let content = &extra(p).content;
-                    Some(match content {
-                        Content::Typed(v) => v.as_value(),
-                        _ => Value::Str(content.text()),
+                    let x = extra(p);
+                    Some(match x.typed() {
+                        Some(v) => v.as_value(),
+                        None => Value::Str(x.text()),
                     })
                 }
                 EXI_ATTRIBUTE_NODE => {
@@ -1546,13 +1688,13 @@ impl<'g> Document<'g> {
                 | EXI_CDATA_SECTION_NODE
                 | EXI_COMMENT_NODE
                 | EXI_PI_NODE => {
-                    let content = &extra(p).content;
-                    match content {
-                        Content::Typed(v) => out.push_str(
+                    let x = extra(p);
+                    match x.typed() {
+                        Some(v) => out.push_str(
                             &crate::engine::lexical_string(&v.as_value())
                                 .unwrap_or_default(),
                         ),
-                        _ => out.push_str(content.text()),
+                        None => out.push_str(x.text()),
                     }
                 }
                 EXI_ELEMENT_NODE | EXI_DOCUMENT_NODE | EXI_ATTRIBUTE_NODE => {
@@ -1901,12 +2043,11 @@ impl<'g> Document<'g> {
                 let a = p as *mut RawAttr;
                 let ns = (*a).ns;
                 if !ns.is_null() && ns != (*self.doc_ptr()).oldNs {
-                    let pre = (!(*ns).prefix.is_null()).then(|| {
-                        alloc::string::ToString::to_string(str_at(
-                            (*ns).prefix,
-                        ))
-                    });
-                    self.want_prefix(p, pre.as_deref());
+                    let pre = (*(ns as *const NsBox<'g>))
+                        .prefix
+                        .as_ref()
+                        .map(|h| h.id());
+                    self.want_prefix_id_retain(p, pre);
                     (*a).ns = ptr::null_mut();
                 }
                 return;
@@ -1921,24 +2062,22 @@ impl<'g> Document<'g> {
             while let Some(e) = todo.pop() {
                 let ns = (*e).ns;
                 if !ns.is_null() && ns != xml && !inside.contains(&ns) {
-                    let pre = (!(*ns).prefix.is_null()).then(|| {
-                        alloc::string::ToString::to_string(str_at(
-                            (*ns).prefix,
-                        ))
-                    });
-                    self.want_prefix(e as *mut RawCommon, pre.as_deref());
+                    let pre = (*(ns as *const NsBox<'g>))
+                        .prefix
+                        .as_ref()
+                        .map(|h| h.id());
+                    self.want_prefix_id_retain(e as *mut RawCommon, pre);
                     (*e).ns = ptr::null_mut();
                 }
                 let mut a = (*e).properties;
                 while !a.is_null() {
                     let ns = (*a).ns;
                     if !ns.is_null() && ns != xml && !inside.contains(&ns) {
-                        let pre = (!(*ns).prefix.is_null()).then(|| {
-                            alloc::string::ToString::to_string(str_at(
-                                (*ns).prefix,
-                            ))
-                        });
-                        self.want_prefix(a as *mut RawCommon, pre.as_deref());
+                        let pre = (*(ns as *const NsBox<'g>))
+                            .prefix
+                            .as_ref()
+                            .map(|h| h.id());
+                        self.want_prefix_id_retain(a as *mut RawCommon, pre);
                         (*a).ns = ptr::null_mut();
                     }
                     a = (*a).next;
@@ -1991,12 +2130,14 @@ impl<'g> Document<'g> {
             return Ok(n);
         }
         let strings = self.d().strings;
-        let same = ptr::eq(strings, from.d().strings);
+        let from_strings = from.d().strings;
+        let same = ptr::eq(strings, from_strings);
         let from_doc = from.doc_ptr();
         let mut todo = alloc::vec![p];
         let mut nodes = Vec::new();
         let mut namespaces = Vec::new();
         let mut uses_xml = false;
+        let mut has_default_ns = false;
         // SAFETY: all pointers are in the source tree. Stage fallible
         // operations while the source still owns every node.
         unsafe {
@@ -2016,14 +2157,28 @@ impl<'g> Document<'g> {
                     && *ns_field == (*from_doc).oldNs;
                 uses_xml |= implicit_xml;
                 let name = if !same && !ns_field.is_null() {
-                    let x = extra(node);
-                    let uri = strings
-                        .uris()
-                        .intern(x.uri.as_ref().map_or("", Held::as_str))?;
-                    let local = strings
-                        .locals()
-                        .intern(x.local.as_ref().map_or("", Held::as_str))?;
-                    Some((uri, local))
+                    let (u, l) = raw_ids(node);
+                    let u_str = if u == NO_ID {
+                        ""
+                    } else {
+                        from_strings.uris().resolve(StrId::from_raw(u))
+                    };
+                    let l_str = if l == NO_ID {
+                        ""
+                    } else {
+                        from_strings.locals().resolve(StrId::from_raw(l))
+                    };
+                    let uri = strings.uris().intern(u_str)?;
+                    let local = strings.locals().intern(l_str)?;
+                    let w = want_prefix_id(node);
+                    let want = if w != NO_ID {
+                        let pre =
+                            from_strings.prefixes().resolve(StrId::from_raw(w));
+                        Some(strings.prefixes().intern(pre)?)
+                    } else {
+                        None
+                    };
+                    Some((uri, local, want))
                 } else {
                     None
                 };
@@ -2042,6 +2197,11 @@ impl<'g> Document<'g> {
                     }
                     let mut ns = (*el).nsDef;
                     while !ns.is_null() {
+                        if (*ns).prefix.is_null()
+                            && !str_at((*ns).href).is_empty()
+                        {
+                            has_default_ns = true;
+                        }
                         let names = if same {
                             None
                         } else {
@@ -2065,19 +2225,42 @@ impl<'g> Document<'g> {
             {
                 (*from_doc).intSubset = ptr::null_mut();
             }
+            if has_default_ns {
+                self.dm().has_default_ns = true;
+            }
             for (node, name, xml_field) in nodes {
-                let slot = extra(node).slot as usize;
+                let slot = node_slot(node) as usize;
                 let source = from.dm();
-                source.slots[slot].ptr = ptr::null_mut();
-                source.slots[slot].generation =
-                    source.slots[slot].generation.wrapping_add(1);
+                source.ptrs[slot] = ptr::null_mut();
+                source.gens[slot] = source.gens[slot].wrapping_add(1);
                 source.free.push(slot as u32);
                 let mine = self.reserve_slot();
-                self.dm().slots[mine as usize].ptr = node;
-                extra_mut(node).slot = mine;
+                self.dm().ptrs[mine as usize] = node;
+                set_node_slot(node, mine);
                 (*node).doc = self.doc_ptr();
-                if let Some((uri, local)) = name {
-                    Self::install_name(node, uri, local);
+                if let Some((uri, local, want)) = name {
+                    let (uid, lid) = (uri.id(), local.id());
+                    core::mem::forget(uri);
+                    core::mem::forget(local);
+                    Self::install_name_ids(
+                        node,
+                        strings,
+                        from_strings,
+                        uid,
+                        lid,
+                    );
+                    let new_w = match want {
+                        Some(h) => {
+                            let id = h.id().index();
+                            core::mem::forget(h);
+                            id
+                        }
+                        None => NO_ID,
+                    };
+                    let old_w = swap_want_prefix_id(node, new_w);
+                    if old_w != NO_ID {
+                        from_strings.prefixes().release(StrId::from_raw(old_w));
+                    }
                 }
                 if let Some(field) = xml_field {
                     *field = xml;
@@ -2167,13 +2350,13 @@ impl<'g> Document<'g> {
                 if !done {
                     unlink_raw(node);
                 }
-                let slot = extra(node).slot as usize;
+                let slot = node_slot(node) as usize;
                 let d = self.dm();
-                d.slots[slot].ptr = ptr::null_mut();
-                d.slots[slot].generation =
-                    d.slots[slot].generation.wrapping_add(1);
+                let strings = d.strings;
+                d.ptrs[slot] = ptr::null_mut();
+                d.gens[slot] = d.gens[slot].wrapping_add(1);
                 d.free.push(slot as u32);
-                drop_box(node);
+                drop_box(node, strings);
                 if done {
                     break;
                 }
@@ -2260,9 +2443,10 @@ impl<'g> Document<'g> {
     /// ```
     pub fn copy(&mut self, n: NodeId, deep: bool) -> Result<NodeId> {
         let p = self.p(n);
+        let src_strings = self.d().strings;
         // SAFETY: `p` is a live node of this document; copying reads it
         // and allocates new nodes, which moves no existing node.
-        let c = unsafe { self.copy_raw(p, deep)? };
+        let c = unsafe { self.copy_raw(src_strings, p, deep)? };
         Ok(self.id(c))
     }
 
@@ -2296,7 +2480,7 @@ impl<'g> Document<'g> {
         let p = from.p(n);
         // SAFETY: `p` is a live node of `from`, which is borrowed for
         // the call.
-        let c = unsafe { self.copy_raw(p, deep)? };
+        let c = unsafe { self.copy_raw(from.d().strings, p, deep)? };
         Ok(self.id(c))
     }
 
@@ -2306,15 +2490,16 @@ impl<'g> Document<'g> {
     ///
     /// # Safety
     ///
-    /// `src` is a live node of some document that stays borrowed for
-    /// the call.
+    /// `src` is a live node of some document using `src_strings` that
+    /// stays borrowed for the call.
     unsafe fn copy_raw(
         &mut self,
+        src_strings: &GlobalStrings,
         src: *mut RawCommon,
         deep: bool,
     ) -> Result<*mut RawCommon> {
         // SAFETY: the caller's contract.
-        let c = unsafe { self.copy_node(src, deep)? };
+        let c = unsafe { self.copy_node(src_strings, src, deep)? };
         // SAFETY: the new copy.
         if unsafe { (*c).r#type } == EXI_ELEMENT_NODE {
             self.fix_ns_tree(
@@ -2330,20 +2515,39 @@ impl<'g> Document<'g> {
     /// As [`copy_raw`](Self::copy_raw).
     unsafe fn copy_node(
         &mut self,
+        src_strings: &GlobalStrings,
         src: *mut RawCommon,
         deep: bool,
     ) -> Result<*mut RawCommon> {
         // SAFETY: reads of the live source; the new nodes are ours.
         unsafe {
             let t = (*src).r#type;
-            let x = extra(src);
+            let same = ptr::eq(src_strings, self.d().strings);
             let new = match t {
                 EXI_ELEMENT_NODE => {
                     let s = src as *mut RawNode;
-                    let uri = x.uri.as_ref().map_or("", |h| h.as_str());
-                    let local = x.local.as_ref().map_or("", |h| h.as_str());
                     let e = self.alloc_node(EXI_ELEMENT_NODE);
-                    self.set_name(e, Name::new(uri, local))?;
+                    let (u, l) = ((*s).uriId, (*s).localId);
+                    if same && u != NO_ID && l != NO_ID {
+                        let dst = self.d().strings;
+                        let (uid, lid) =
+                            (StrId::from_raw(u), StrId::from_raw(l));
+                        dst.uris().retain(uid);
+                        dst.locals().retain(lid);
+                        Self::install_name_ids(e, dst, dst, uid, lid);
+                    } else {
+                        let uri = if u == NO_ID {
+                            ""
+                        } else {
+                            src_strings.uris().resolve(StrId::from_raw(u))
+                        };
+                        let local = if l == NO_ID {
+                            ""
+                        } else {
+                            src_strings.locals().resolve(StrId::from_raw(l))
+                        };
+                        self.set_name(e, Name::new(uri, local))?;
+                    }
                     let mut ns = (*s).nsDef;
                     while !ns.is_null() {
                         let pre = (!(*ns).prefix.is_null())
@@ -2356,11 +2560,15 @@ impl<'g> Document<'g> {
                         ns = (*ns).next;
                     }
                     if !(*s).ns.is_null() && !(*(*s).ns).prefix.is_null() {
-                        self.want_prefix(e, Some(str_at((*(*s).ns).prefix)));
+                        self.want_prefix(e, Some(str_at((*(*s).ns).prefix)))?;
                     }
                     let mut a = (*s).properties;
                     while !a.is_null() {
-                        let ac = self.copy_node(a as *mut RawCommon, true)?;
+                        let ac = self.copy_node(
+                            src_strings,
+                            a as *mut RawCommon,
+                            true,
+                        )?;
                         (*ac).parent = e as *mut RawNode;
                         append_attr_raw(e as *mut RawNode, ac as *mut RawAttr);
                         a = (*a).next;
@@ -2368,32 +2576,51 @@ impl<'g> Document<'g> {
                     e
                 }
                 EXI_ATTRIBUTE_NODE => {
-                    let uri = x.uri.as_ref().map_or("", |h| h.as_str());
-                    let local = x.local.as_ref().map_or("", |h| h.as_str());
-                    let a = self.alloc_attr();
-                    self.set_name(a, Name::new(uri, local))?;
                     let sa = src as *mut RawAttr;
+                    let a = self.alloc_attr();
+                    let (u, l) = ((*sa).uriId, (*sa).localId);
+                    if same && u != NO_ID && l != NO_ID {
+                        let dst = self.d().strings;
+                        let (uid, lid) =
+                            (StrId::from_raw(u), StrId::from_raw(l));
+                        dst.uris().retain(uid);
+                        dst.locals().retain(lid);
+                        Self::install_name_ids(a, dst, dst, uid, lid);
+                    } else {
+                        let uri = if u == NO_ID {
+                            ""
+                        } else {
+                            src_strings.uris().resolve(StrId::from_raw(u))
+                        };
+                        let local = if l == NO_ID {
+                            ""
+                        } else {
+                            src_strings.locals().resolve(StrId::from_raw(l))
+                        };
+                        self.set_name(a, Name::new(uri, local))?;
+                    }
                     if !(*sa).ns.is_null() && !(*(*sa).ns).prefix.is_null() {
-                        self.want_prefix(a, Some(str_at((*(*sa).ns).prefix)));
+                        self.want_prefix(a, Some(str_at((*(*sa).ns).prefix)))?;
                     }
                     a
                 }
                 EXI_TEXT_NODE | EXI_CDATA_SECTION_NODE => {
+                    let x = extra(src);
                     let n = self.alloc_node(EXI_TEXT_NODE);
                     (*n).name = TEXT_NAME.as_ptr();
-                    match &x.content {
-                        Content::Typed(v) => self.set_typed(n, (**v).clone()),
-                        _ => self.set_text(n, x.content.text()),
+                    match x.typed() {
+                        Some(v) => self.set_typed(n, v.clone()),
+                        None => self.set_text(n, x.text()),
                     }
                     return Ok(n);
                 }
                 EXI_COMMENT_NODE => {
-                    let s = x.content.text();
+                    let s = extra(src).text();
                     let n = self.new_comment(s);
                     return Ok(self.p(n));
                 }
                 EXI_PI_NODE => {
-                    let s = x.content.text();
+                    let s = extra(src).text();
                     let n = self.new_pi(str_at((*src).name), s);
                     return Ok(self.p(n));
                 }
@@ -2406,7 +2633,8 @@ impl<'g> Document<'g> {
             if deep || t == EXI_ATTRIBUTE_NODE {
                 let mut c = (*src).children;
                 while !c.is_null() {
-                    let cc = self.copy_node(c as *mut RawCommon, true)?;
+                    let cc =
+                        self.copy_node(src_strings, c as *mut RawCommon, true)?;
                     append_raw(new, cc);
                     c = (*c).next;
                 }
@@ -2536,13 +2764,15 @@ impl<'g> Document<'g> {
             if (*el).r#type != EXI_ELEMENT_NODE {
                 return ptr::null_mut();
             }
+            let s = self.d().strings;
             let mut a = (*(el as *mut RawNode)).properties;
             while !a.is_null() {
-                let x = extra(a as *mut RawCommon);
-                if x.local
-                    .as_ref()
-                    .is_some_and(|l| l.as_str() == name.local_name())
-                    && x.uri.as_ref().is_some_and(|u| u.as_str() == name.uri())
+                let (u, l) = ((*a).uriId, (*a).localId);
+                if u != NO_ID
+                    && l != NO_ID
+                    && s.locals().resolve(StrId::from_raw(l))
+                        == name.local_name()
+                    && s.uris().resolve(StrId::from_raw(u)) == name.uri()
                 {
                     return a;
                 }
@@ -2616,7 +2846,7 @@ impl<'g> Document<'g> {
         }
         let a = self.alloc_attr();
         self.set_name(a, name)?;
-        self.want_prefix(a, name.prefix());
+        self.want_prefix(a, name.prefix())?;
         // SAFETY: a new attribute on a live element.
         unsafe {
             (*a).parent = el as *mut RawNode;
@@ -2624,8 +2854,7 @@ impl<'g> Document<'g> {
         }
         let mode = self.mode_at(el);
         self.fix_attr_ns(a as *mut RawAttr, mode)?;
-        let t = self.new_value(value);
-        let tp = self.p(t);
+        let tp = self.alloc_value_raw(value);
         // SAFETY: a new text node under the new attribute.
         unsafe { append_raw(a, tp) };
         Ok(self.id(a))
@@ -2826,6 +3055,9 @@ impl<'g> Document<'g> {
                 ns = (*ns).next;
             }
             let new = self.new_ns(prefix, uri)?;
+            if prefix.is_none() && !uri.is_empty() {
+                self.dm().has_default_ns = true;
+            }
             if last.is_null() {
                 (*el).nsDef = new;
             } else {
@@ -3063,13 +3295,18 @@ impl<'g> Document<'g> {
     fn fix_ns(&mut self, el: *mut RawNode, mode: Declare) -> Result<()> {
         // SAFETY: a live element.
         unsafe {
-            let x = extra(el as *mut RawCommon);
-            let uri = x.uri.as_ref().map_or("", |h| h.as_str());
+            let u = (*el).uriId;
+            let uri: &'g str = if u == NO_ID {
+                ""
+            } else {
+                self.d().strings.uris().resolve(StrId::from_raw(u))
+            };
             if uri.is_empty() {
                 (*el).ns = ptr::null_mut();
                 // An element in no namespace under a default namespace
                 // needs xmlns="".
                 if mode != Declare::No
+                    && self.d().has_default_ns
                     && self
                         .find_ns(el, None)
                         .is_some_and(|ns| !str_at((*ns).href).is_empty())
@@ -3078,7 +3315,6 @@ impl<'g> Document<'g> {
                 }
                 return Ok(());
             }
-            let uri: &str = &*(uri as *const str);
             // The declaration it has, if still in scope and right.
             let cur = (*el).ns;
             if !cur.is_null() && str_at((*cur).href) == uri {
@@ -3091,36 +3327,33 @@ impl<'g> Document<'g> {
             // The wanted prefix if it is bound to this URI here; else
             // any binding of the URI; else a new declaration on the
             // element.
-            let wanted = x
-                .name_buf
-                .as_ref()
-                .map(|b| alloc::string::ToString::to_string(text_of(b)));
-            let ns = match wanted.as_deref().and_then(|p| {
-                self.find_ns(el, Some(p))
-                    .filter(|&ns| str_at((*ns).href) == uri)
-            }) {
+            let wanted = self.want_prefix_str(el as *mut RawCommon);
+            let found = wanted
+                .and_then(|p| {
+                    self.find_ns(el, Some(p))
+                        .filter(|&ns| str_at((*ns).href) == uri)
+                })
+                .or_else(|| self.find_ns_by_href(el, uri, false));
+            let ns = match found {
                 Some(ns) => ns,
-                None => match self.find_ns_by_href(el, uri, false) {
-                    Some(ns) => ns,
-                    None if mode == Declare::No => {
-                        (*el).ns = ptr::null_mut();
-                        return Ok(());
+                None if mode == Declare::No => {
+                    (*el).ns = ptr::null_mut();
+                    return Ok(());
+                }
+                // A prefixed declaration goes on the host (a copy's
+                // root, as libxml2 puts it); a default one on the
+                // element itself, since declaring a default on an
+                // ancestor would change that ancestor's own
+                // meaning.
+                None => match wanted {
+                    Some(p) => self.declare_prefixed(el, mode, p, uri)?,
+                    None if !self.declares_prefix(el, None) => {
+                        self.declare_raw(el, None, uri)?
                     }
-                    // A prefixed declaration goes on the host (a copy's
-                    // root, as libxml2 puts it); a default one on the
-                    // element itself, since declaring a default on an
-                    // ancestor would change that ancestor's own
-                    // meaning.
-                    None => match wanted {
-                        Some(p) => self.declare_prefixed(el, mode, &p, uri)?,
-                        None if !self.declares_prefix(el, None) => {
-                            self.declare_raw(el, None, uri)?
-                        }
-                        None => {
-                            let p = self.free_prefix(el);
-                            self.declare_prefixed(el, mode, &p, uri)?
-                        }
-                    },
+                    None => {
+                        let p = self.free_prefix(el);
+                        self.declare_prefixed(el, mode, &p, uri)?
+                    }
                 },
             };
             (*el).ns = ns;
@@ -3208,9 +3441,12 @@ impl<'g> Document<'g> {
     fn fix_attr_ns(&mut self, a: *mut RawAttr, mode: Declare) -> Result<()> {
         // SAFETY: a live attribute on a live element.
         unsafe {
-            let x = extra(a as *mut RawCommon);
-            let uri = x.uri.as_ref().map_or("", |h| h.as_str());
-            let uri: &str = &*(uri as *const str);
+            let u = (*a).uriId;
+            let uri: &'g str = if u == NO_ID {
+                ""
+            } else {
+                self.d().strings.uris().resolve(StrId::from_raw(u))
+            };
             if uri.is_empty() {
                 (*a).ns = ptr::null_mut();
                 return Ok(());
@@ -3232,30 +3468,25 @@ impl<'g> Document<'g> {
             {
                 return Ok(());
             }
-            let wanted = x
-                .name_buf
-                .as_ref()
-                .map(|b| alloc::string::ToString::to_string(text_of(b)));
-            let ns = match wanted.as_deref().and_then(|p| {
-                self.find_ns(el, Some(p))
-                    .filter(|&ns| str_at((*ns).href) == uri)
-            }) {
+            let wanted = self.want_prefix_str(a as *mut RawCommon);
+            let found = wanted
+                .and_then(|p| {
+                    self.find_ns(el, Some(p))
+                        .filter(|&ns| str_at((*ns).href) == uri)
+                })
+                .or_else(|| self.find_ns_by_href(el, uri, true));
+            let ns = match found {
                 Some(ns) => ns,
-                None => match self.find_ns_by_href(el, uri, true) {
-                    Some(ns) => ns,
-                    None if mode == Declare::No => {
-                        (*a).ns = ptr::null_mut();
-                        return Ok(());
+                None if mode == Declare::No => {
+                    (*a).ns = ptr::null_mut();
+                    return Ok(());
+                }
+                None => match wanted {
+                    Some(p) if self.find_ns(el, Some(p)).is_none() => {
+                        self.declare_prefixed(el, mode, p, uri)?
                     }
-                    None => {
-                        let p = match wanted {
-                            Some(p)
-                                if self.find_ns(el, Some(&p)).is_none() =>
-                            {
-                                p
-                            }
-                            _ => self.free_prefix(el),
-                        };
+                    _ => {
+                        let p = self.free_prefix(el);
                         self.declare_prefixed(el, mode, &p, uri)?
                     }
                 },
@@ -3353,6 +3584,29 @@ impl Iterator for Children<'_, '_> {
 }
 
 // ----- links -----
+
+/// `(uriId, localId)` on an element or attribute; `(NO_ID, NO_ID)` on
+/// other nodes.
+///
+/// # Safety
+///
+/// `p` is a live node.
+unsafe fn raw_ids(p: *mut RawCommon) -> (u32, u32) {
+    // SAFETY: the caller's contract.
+    unsafe {
+        match (*p).r#type {
+            EXI_ELEMENT_NODE => {
+                let n = p as *mut RawNode;
+                ((*n).uriId, (*n).localId)
+            }
+            EXI_ATTRIBUTE_NODE => {
+                let a = p as *mut RawAttr;
+                ((*a).uriId, (*a).localId)
+            }
+            _ => (NO_ID, NO_ID),
+        }
+    }
+}
 
 /// Every declaration made inside the subtree of `el`.
 ///

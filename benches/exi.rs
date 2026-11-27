@@ -15,17 +15,36 @@
 //!     cargo bench --features infer                     # every case
 //!     cargo bench --features infer -- encode svg       # cases whose name has every word
 //!     cargo bench --features infer -- --corpus DIR     # write the generated documents
+//!     cargo bench --features infer,dom                 # and the document tree
 //!
-//! Each case runs for about a second after a warm-up. The figure is the median of ten
-//! samples: time per run, and input megabytes per second. `benches/compare.sh` times the
-//! `exi` tool against other XML and EXI tools with hyperfine.
+//! Each case runs for about a second after a warm-up. A sample is the mean time of the
+//! runs in about 100 ms; the figures are the median of ten samples, input megabytes per
+//! second at the median, and the spread (slowest over fastest sample). A spread above a
+//! few percent means the machine was busy or changed speed. `target/bench/exi.csv` holds
+//! every case and `target/bench/exi.meta` the build and machine. `benches/compare.sh`
+//! times the `exi` tool against other XML and EXI tools with hyperfine.
+//!
+//! Schema-less and strict encoding and decoding run in every coding built, except
+//! pre-compression: it is compression without DEFLATE, and `codecs` measures it. The
+//! other cases use byte alignment. A `reset` case reuses one writer or reader, as a server
+//! does for each stream; the others make a new one for each run.
+//!
+//! Every run starts a stream with its own string tables, which release their strings
+//! when the stream ends. So the global string pool should hold as many strings after a
+//! case as before it. The harness checks this and reports a case that leaves strings
+//! behind, because a growing pool would change the times of the cases after it.
 //!
 //! This harness uses only the standard library, so `cargo bench` needs no downloads.
 
+mod common;
+
+use std::cell::RefCell;
+use std::fmt::Write as _;
 use std::hint::black_box;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use common::Stats;
 use exi::grammar::{GrammarSet, Grammars};
 use exi::infer::{Fit, SchemaInference};
 use exi::strings::{GlobalConfig, GlobalStrings};
@@ -37,11 +56,22 @@ use exi::{
 
 // ----- the harness -----
 
-struct Bench {
+struct Bench<'s> {
     words: Vec<String>,
+    strings: &'s GlobalStrings,
+    /// `target/bench/exi.csv`: one line for each case run.
+    csv: RefCell<String>,
 }
 
-impl Bench {
+/// Live strings in all four tables of the global pool.
+fn live(strings: &GlobalStrings) -> u64 {
+    u64::from(strings.uris().stats().strings)
+        + u64::from(strings.prefixes().stats().strings)
+        + u64::from(strings.locals().stats().strings)
+        + u64::from(strings.values().stats().strings)
+}
+
+impl Bench<'_> {
     fn wanted(&self, name: &str) -> bool {
         self.words.iter().all(|w| name.contains(w.as_str()))
     }
@@ -51,6 +81,7 @@ impl Bench {
         if !self.wanted(name) {
             return;
         }
+        let pool = live(self.strings);
         // Warm up, and find how many runs make a sample of about 100 ms.
         let start = Instant::now();
         let mut runs = 0u32;
@@ -60,19 +91,37 @@ impl Bench {
         }
         let per = start.elapsed() / runs;
         let n = ((Duration::from_millis(100).as_nanos() / per.as_nanos().max(1)) as u32).max(1);
-        let mut samples: Vec<Duration> = (0..10)
-            .map(|_| {
-                let t = Instant::now();
-                for _ in 0..n {
-                    f();
-                }
-                t.elapsed() / n
-            })
-            .collect();
-        samples.sort();
-        let median = samples[5];
-        let mbs = bytes as f64 / median.as_secs_f64() / 1e6;
-        println!("{name:44} {:>12} {:>9.1} MB/s", fmt(median), mbs);
+        let s = Stats::of(
+            (0..10)
+                .map(|_| {
+                    let t = Instant::now();
+                    for _ in 0..n {
+                        f();
+                    }
+                    t.elapsed() / n
+                })
+                .collect(),
+        );
+        let mbs = bytes as f64 / s.median.as_secs_f64() / 1e6;
+        let grew = live(self.strings).saturating_sub(pool);
+        let note = if grew > 0 {
+            format!("  (the string pool grew by {grew})")
+        } else {
+            String::new()
+        };
+        println!(
+            "{name:48} {:>12} {mbs:>9.1} MB/s  spread {:>4.1}%{note}",
+            fmt(s.median),
+            100.0 * s.spread(),
+        );
+        let _ = writeln!(
+            self.csv.borrow_mut(),
+            "\"{name}\",{bytes},{n},{},{},{},{},{mbs:.2},{grew}",
+            s.samples,
+            s.median.as_nanos(),
+            s.min.as_nanos(),
+            s.max.as_nanos()
+        );
     }
 }
 
@@ -102,12 +151,24 @@ impl EventSink for Null {
 
 // ----- the paths timed -----
 
-fn opts(strict: bool) -> Options {
+fn opts(coding: Coding, strict: bool) -> Options {
     Options::builder()
-        .coding(Coding::ByteAligned)
+        .coding(coding)
         .strict(strict)
         .build()
         .unwrap()
+}
+
+/// The codings built, by name. Pre-compression is left out: see the module docs.
+fn codings() -> Vec<(&'static str, Coding)> {
+    let mut v = vec![("byte", Coding::ByteAligned)];
+    if cfg!(feature = "bit-packed") {
+        v.push(("bit", Coding::BitPacked));
+    }
+    if cfg!(feature = "compression") {
+        v.push(("compression", Coding::Compression));
+    }
+    v
 }
 
 fn xml_reader<'g>(g: &'g Grammars<'g>) -> XmlReader<'g> {
@@ -129,10 +190,10 @@ fn parse(g: &Grammars<'_>, xml: &[u8], sink: &mut impl EventSink) {
     }
 }
 
-fn encode(g: &Grammars<'_>, xml: &[u8], strict: bool) -> Vec<u8> {
+fn encode(g: &Grammars<'_>, xml: &[u8], o: &Options) -> Vec<u8> {
     let mut w = Writer::new(
         Vec::with_capacity(xml.len() / 4),
-        WriterConfig::new(opts(strict), g),
+        WriterConfig::new(o.clone(), g),
     )
     .unwrap();
     parse(g, xml, &mut w);
@@ -141,13 +202,18 @@ fn encode(g: &Grammars<'_>, xml: &[u8], strict: bool) -> Vec<u8> {
 
 fn decode(g: &Grammars<'_>, stream: &[u8], sink: &mut impl EventSink) {
     let mut r: Reader = Reader::new(ReaderConfig::new(g)).unwrap();
+    decode_with(&mut r, stream, sink);
+}
+
+/// Decodes `stream` with a reader that is new or reset.
+fn decode_with(r: &mut Reader<'_>, stream: &[u8], sink: &mut impl EventSink) {
     let mut rest = stream;
     loop {
         rest = &rest[r.feed(rest)..];
         if rest.is_empty() {
             r.end_input();
         }
-        if exi::transcode(&mut r, sink).unwrap() == Status::End {
+        if exi::transcode(r, sink).unwrap() == Status::End {
             return;
         }
     }
@@ -178,11 +244,13 @@ fn learn(xml: &[u8]) -> SchemaInference {
     l
 }
 
-fn case(b: &Bench, strings: &GlobalStrings, name: &str, xml: &[u8]) {
+fn case(b: &Bench<'_>, name: &str, xml: &[u8]) {
+    let strings = b.strings;
     let none = GrammarSet::schemaless();
     let g = none.attach(strings).unwrap();
     let evs = events(&g, xml);
     let n = xml.len();
+    let byte = opts(Coding::ByteAligned, false);
 
     b.run(&format!("xml parse {name}"), n, || {
         let mut s = Null(0);
@@ -197,14 +265,27 @@ fn case(b: &Bench, strings: &GlobalStrings, name: &str, xml: &[u8]) {
         black_box(w.into_sink());
     });
 
-    let stream = encode(&g, xml, false);
-    b.run(&format!("encode {name} schema-less"), n, || {
-        black_box(encode(&g, xml, false));
-    });
-    b.run(&format!("encode-events {name} schema-less"), n, || {
+    let mut sizes = format!("xml {n}");
+    for (cname, coding) in codings() {
+        let o = opts(coding, false);
+        let stream = encode(&g, xml, &o);
+        let _ = write!(sizes, ", {cname} {}", stream.len());
+        b.run(&format!("encode {name} schema-less {cname}"), n, || {
+            black_box(encode(&g, xml, &o));
+        });
+        b.run(&format!("decode {name} schema-less {cname}"), n, || {
+            let mut s = Null(0);
+            decode(&g, &stream, &mut s);
+            black_box(s.0);
+        });
+    }
+
+    // From events, without the XML parser: a new writer, then one writer reset each run.
+    let stream = encode(&g, xml, &byte);
+    b.run(&format!("encode-events {name} schema-less byte"), n, || {
         let mut w = Writer::new(
             Vec::with_capacity(n / 4),
-            WriterConfig::new(opts(false), &g),
+            WriterConfig::new(byte.clone(), &g),
         )
         .unwrap();
         for e in &evs {
@@ -212,16 +293,34 @@ fn case(b: &Bench, strings: &GlobalStrings, name: &str, xml: &[u8]) {
         }
         black_box(w.into_sink());
     });
-    b.run(&format!("decode {name} schema-less"), n, || {
+    let mut w = Writer::new(
+        Vec::with_capacity(n / 4),
+        WriterConfig::new(byte.clone(), &g),
+    )
+    .unwrap();
+    b.run(&format!("encode-events {name} schema-less byte reset"), n, || {
+        for e in &evs {
+            w.event(&e.as_event()).unwrap();
+        }
+        black_box(w.reset(Vec::with_capacity(n / 4)));
+    });
+    drop(w);
+    // Reset after each stream, so the pool check does not count the last stream's strings.
+    let mut r: Reader = Reader::new(ReaderConfig::new(&g)).unwrap();
+    b.run(&format!("decode {name} schema-less byte reset"), n, || {
         let mut s = Null(0);
-        decode(&g, &stream, &mut s);
+        decode_with(&mut r, &stream, &mut s);
+        r.reset();
         black_box(s.0);
     });
-    b.run(&format!("decode-to-xml {name} schema-less"), n, || {
+    drop(r);
+    b.run(&format!("decode-to-xml {name} schema-less byte"), n, || {
         let mut w = XmlWriter::new(Vec::with_capacity(n), XmlWriterConfig::new());
         decode(&g, &stream, &mut w);
         black_box(w.into_sink());
     });
+    #[cfg(feature = "dom")]
+    dom(b, name, xml, &g, &stream);
 
     // A schema learned from the document itself: strict streams.
     b.run(&format!("infer {name}"), n, || {
@@ -242,24 +341,67 @@ fn case(b: &Bench, strings: &GlobalStrings, name: &str, xml: &[u8]) {
         black_box(GrammarSet::from_exig(&exig).unwrap());
     });
     let gs = set.attach(strings).unwrap();
-    let strict = encode(&gs, xml, true);
-    b.run(&format!("encode {name} strict"), n, || {
-        black_box(encode(&gs, xml, true));
-    });
-    b.run(&format!("decode {name} strict"), n, || {
-        let mut s = Null(0);
-        decode(&gs, &strict, &mut s);
-        black_box(s.0);
-    });
-    if b.wanted("size") || b.words.is_empty() {
-        println!(
-            "{:44} xml {n}, exi {}, strict exi {}, exig {}",
-            format!("size {name}"),
-            stream.len(),
-            strict.len(),
-            exig.len()
-        );
+    for (cname, coding) in codings() {
+        let o = opts(coding, true);
+        let strict = encode(&gs, xml, &o);
+        let _ = write!(sizes, ", strict {cname} {}", strict.len());
+        b.run(&format!("encode {name} strict {cname}"), n, || {
+            black_box(encode(&gs, xml, &o));
+        });
+        b.run(&format!("decode {name} strict {cname}"), n, || {
+            let mut s = Null(0);
+            decode(&gs, &strict, &mut s);
+            black_box(s.0);
+        });
     }
+    if b.wanted("size") || b.words.is_empty() {
+        println!("{:48} {sizes}, exig {}", format!("size {name}"), exig.len());
+    }
+}
+
+/// Layer 2: the tree from XML text and from EXI, and back.
+#[cfg(feature = "dom")]
+fn dom(b: &Bench<'_>, name: &str, xml: &[u8], g: &Grammars<'_>, stream: &[u8]) {
+    use exi::dom::{Document, DocumentBuilder};
+    let strings = b.strings;
+    let n = xml.len();
+    b.run(&format!("dom parse-xml {name}"), n, || {
+        black_box(Document::parse_xml(strings, xml).unwrap());
+    });
+    let doc = Document::parse_xml(strings, xml).unwrap();
+    b.run(&format!("dom to-xml {name}"), n, || {
+        black_box(doc.to_xml().unwrap());
+    });
+    b.run(&format!("dom read {name} schema-less byte"), n, || {
+        let mut t = DocumentBuilder::new(strings);
+        decode(g, stream, &mut t);
+        black_box(t.finish().unwrap());
+    });
+    b.run(&format!("dom write {name} schema-less byte"), n, || {
+        let mut w = Writer::new(
+            Vec::with_capacity(n / 4),
+            WriterConfig::new(opts(Coding::ByteAligned, false), g),
+        )
+        .unwrap();
+        doc.write(&mut w).unwrap();
+        black_box(w.into_sink());
+    });
+}
+
+/// The hand-written schemas in `schemas/`: compiling, loading and attaching.
+fn schemas(b: &Bench<'_>) {
+    let xsd = std::fs::read(common::package("schemas/xhtml5-1.xsd")).unwrap();
+    b.run("compile xhtml5-1.xsd", xsd.len(), || {
+        black_box(GrammarSet::from_xsd(&xsd).unwrap());
+    });
+    let exig = std::fs::read(common::package("schemas/xhtml5-1.exig")).unwrap();
+    b.run("exig-load xhtml5-1.exig", exig.len(), || {
+        black_box(GrammarSet::from_exig(&exig).unwrap());
+    });
+    let set = GrammarSet::from_exig(&exig).unwrap();
+    b.run("attach xhtml5-1.exig", exig.len(), || {
+        black_box(set.attach(b.strings).unwrap());
+    });
 }
 
 // ----- the generated documents -----
@@ -396,7 +538,7 @@ fn corpus() -> Vec<(String, Vec<u8>)> {
         ("svg".to_string(), svg(1 << 20).into_bytes()),
         ("orders".to_string(), orders(1 << 20).into_bytes()),
     ];
-    if let Ok(dir) = std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("benches/data")) {
+    if let Ok(dir) = std::fs::read_dir(common::package("benches/data")) {
         let mut extra: Vec<_> = dir
             .flatten()
             .map(|e| e.path())
@@ -423,11 +565,20 @@ fn main() {
         return;
     }
     // cargo passes --bench; words are the filter.
+    let strings = GlobalStrings::new(GlobalConfig::new()).unwrap();
     let b = Bench {
         words: args.into_iter().filter(|a| !a.starts_with('-')).collect(),
+        strings: &strings,
+        csv: RefCell::new(String::from(
+            "case,input_octets,runs_per_sample,samples,median_ns,min_ns,max_ns,mb_s,pool_growth\n",
+        )),
     };
-    let strings = GlobalStrings::new(GlobalConfig::new()).unwrap();
     for (name, xml) in corpus() {
-        case(&b, &strings, &name, &xml);
+        case(&b, &name, &xml);
     }
+    schemas(&b);
+    let path = common::out_dir().join("exi.csv");
+    std::fs::write(&path, b.csv.into_inner()).unwrap();
+    println!("wrote {}", path.display());
+    common::write_meta("exi");
 }

@@ -236,9 +236,7 @@ impl Decoder for ByteDecoder<'_> {
                 "input ends inside binary content",
             ));
         }
-        for (i, o) in out.iter_mut().enumerate() {
-            *o = self.byte_at(self.pos + i);
-        }
+        super::copy_split(self.first, self.second, self.pos, out);
         self.pos += out.len();
         Ok(())
     }

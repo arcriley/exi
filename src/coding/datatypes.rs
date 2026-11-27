@@ -197,10 +197,11 @@ pub fn write_uint_digits<E: Encoder>(
     // Repeated division by 128 gives the groups, least significant
     // first.
     let mut num: Vec<u8> = digits.bytes().map(|b| b - b'0').collect();
+    let mut next = Vec::with_capacity(num.len());
     let mut groups = Vec::new();
     loop {
         let mut rem: u32 = 0;
-        let mut next = Vec::with_capacity(num.len());
+        next.clear();
         for &dgt in &num {
             let cur = rem * 10 + dgt as u32;
             let q = cur / 128;
@@ -213,7 +214,7 @@ pub fn write_uint_digits<E: Encoder>(
         if next.is_empty() {
             break;
         }
-        num = next;
+        core::mem::swap(&mut num, &mut next);
     }
     let last = groups.len() - 1;
     for (i, g) in groups.iter().enumerate() {
@@ -453,6 +454,8 @@ pub fn read_bool_pattern<D: Decoder>(
 /// assert_eq!(enc(Decimal::new(true, 0, 5, 1))?, [0x01, 0x00, 0x05]);
 /// assert_eq!(enc(Decimal::new(false, 7, 0, 0))?, [0x00, 0x07, 0x00]);
 /// assert_eq!(enc(Decimal::new(false, 1, 10, 1)).unwrap_err().kind(), exi::ErrorKind::Value);
+/// assert!(enc(Decimal::new(false, 0, 9_999_999_999_999_999_999, 19)).is_ok());
+/// assert_eq!(enc(Decimal::new(false, 0, u64::MAX, 19)).unwrap_err().kind(), exi::ErrorKind::Value); // 20 digits
 /// let back = read_decimal(&mut ByteDecoder::new(&[0x00, 0x03, 0x32], &[]), S, 64)?;
 /// assert_eq!(back, Decimal::new(false, 3, 5, 2));
 /// let trailing = read_decimal(&mut ByteDecoder::new(&[0x00, 0x03, 0x05], &[]), S, 64)?;
@@ -464,10 +467,7 @@ pub fn write_decimal<E: Encoder>(
     ch: Channel,
     d: &Decimal,
 ) -> Result<()> {
-    if d.fraction_digits > 19
-        || (d.fraction_digits < 19
-            && d.fraction >= 10u64.pow(d.fraction_digits as u32))
-    {
+    if !fraction_fits(d.fraction, d.fraction_digits) {
         return Err(err(
             ErrorKind::Value,
             "decimal fraction has more digits than fraction_digits",
@@ -644,6 +644,8 @@ pub fn read_binary_len<D: Decoder>(
 /// assert_eq!(enc(bad).unwrap_err().kind(), exi::ErrorKind::Value);
 /// let far = DateTime { tz_minutes: Some(841), ..base };              // beyond +14:00
 /// assert_eq!(enc(far).unwrap_err().kind(), exi::ErrorKind::Value);
+/// let long = DateTime { kind: DateTimeKind::Time, fraction: Some((u64::MAX, 19)), ..base };
+/// assert_eq!(enc(long).unwrap_err().kind(), exi::ErrorKind::Value);   // 20 digits
 /// # Ok::<(), exi::Error>(())
 /// ```
 pub fn write_datetime<E: Encoder>(
@@ -680,9 +682,7 @@ pub fn write_datetime<E: Encoder>(
             return Err(bad());
         }
         if let Some((v, digits)) = d.fraction {
-            if !(1..=19).contains(&digits)
-                || (digits < 19 && v >= 10u64.pow(digits as u32))
-            {
+            if digits == 0 || !fraction_fits(v, digits) {
                 return Err(bad());
             }
         }
@@ -833,16 +833,30 @@ pub fn read_datetime<D: Decoder>(
 /// let mut e = ByteEncoder::new(Vec::new());
 /// write_chars(&mut e, S, "aé")?;
 /// assert_eq!(e.into_sink(), [0x61, 0xE9, 0x01]);
+/// // The same in bit-packed coding, one bit in:
+/// use exi::coding::{Encoder, bits::BitEncoder};
+/// let mut b = BitEncoder::new(Vec::new());
+/// b.nbit(S, 1, 1)?;
+/// write_chars(&mut b, S, "aé")?;
+/// assert_eq!(b.into_sink(), [0xB0, 0xF4, 0x80, 0x80]);
 /// # Ok::<(), exi::Error>(())
 /// ```
 pub fn write_chars<E: Encoder>(e: &mut E, ch: Channel, s: &str) -> Result<()> {
-    // An aligned ASCII run is already in wire form. An unaligned bit
-    // encoder would need a shifted copy of the whole run.
-    if !s.is_empty() && e.bit_position() % 8 == 0 && s.is_ascii() {
-        return e.octets(ch, s.as_bytes());
-    }
-    for c in s.chars() {
-        write_uint(e, ch, c as u64)?;
+    // An ASCII character's Unsigned Integer is one 8-bit group equal to
+    // the character, which is what `octets` writes in every coding, so
+    // runs of ASCII go out as octets.
+    let mut rest = s;
+    while !rest.is_empty() {
+        let n = rest.bytes().take_while(u8::is_ascii).count();
+        if n > 0 {
+            e.octets(ch, &rest.as_bytes()[..n])?;
+            rest = &rest[n..];
+        }
+        let mut chars = rest.chars();
+        if let Some(c) = chars.next() {
+            write_uint(e, ch, c as u64)?;
+            rest = chars.as_str();
+        }
     }
     Ok(())
 }
@@ -1180,6 +1194,13 @@ fn decimal_add_one(digits: &mut String) {
     }
     digits.clear();
     digits.push_str(core::str::from_utf8(&bytes).expect("digits"));
+}
+
+/// True when `v` has at most `digits` digits and `digits ≤ 19`.
+/// 10^19 still fits a `u64`, so 19 digits is checked too: `u64::MAX`
+/// has 20.
+fn fraction_fits(v: u64, digits: u8) -> bool {
+    10u64.checked_pow(digits as u32).is_some_and(|limit| v < limit)
 }
 
 /// The digits of `v` reversed, as a number: 50 → 5 reads "05" written

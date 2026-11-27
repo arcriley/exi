@@ -87,6 +87,21 @@ fn check_nbit(value: u32, width: u8) -> Result<()> {
     Ok(())
 }
 
+/// Fills `out` from `first` and `second` read as one input, starting
+/// at octet `pos`. The caller has checked that the input is long
+/// enough.
+fn copy_split(first: &[u8], second: &[u8], pos: usize, out: &mut [u8]) {
+    let (a, b) = if pos < first.len() {
+        let n = (first.len() - pos).min(out.len());
+        (&first[pos..pos + n], &second[..out.len() - n])
+    } else {
+        let p = pos - first.len();
+        (&[][..], &second[p..p + out.len()])
+    };
+    out[..a.len()].copy_from_slice(a);
+    out[a.len()..].copy_from_slice(b);
+}
+
 /// Where encoded octets go.
 ///
 /// Implemented for `Vec<u8>` (grows without limit), [`SliceSink`] (a

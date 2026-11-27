@@ -22,6 +22,7 @@
 //! | `codecs.csv` | one per corpus and configuration: octets, ratio to the text, encode and decode times |
 //! | `stanzas.csv` | one per stanza: its size as text and under every per-stanza configuration |
 //! | `pages.csv` | one per HTML page: its size under every document configuration |
+//! | `codecs.meta` | the build and machine (`benches/common`) |
 //!
 //! # Corpora
 //!
@@ -31,12 +32,17 @@
 //! | `pages` | HTML pages in `target/html-corpus` (or `EXI_HTML_CORPUS`), when present |
 //! | `log` | a generated data log of 60 000 records |
 //!
+//! A corpus that is missing is skipped with a line that says how to make it, so check
+//! the output before comparing two runs.
+//!
 //! # What is measured
 //!
 //! Encoding starts from events and ends with the octets sent; decoding starts from those
 //! octets and ends with events. So the text rows include writing or parsing the text, and
-//! the EXI rows writing or reading EXI; each includes its compressor. Times are the median
-//! of several runs over the whole corpus.
+//! the EXI rows writing or reading EXI; each includes its compressor. Rows for the
+//! original text compress the text as it was given, not the text written, so the writer
+//! is timed but its output is thrown away. Times are the median of 3 to 15 runs over the
+//! whole corpus (one with `--quick`); `codecs.csv` also has the fastest and slowest.
 //!
 //! Per-stanza configurations encode every stanza alone: fresh string tables and a fresh
 //! compressor for each, so nothing one stanza contains changes the size of another (no
@@ -48,10 +54,14 @@
 //! Compressor settings: LZ4 is `lz4_flex` block format with the size in front (4 octets);
 //! zstd frames carry the content size but no checksum or dictionary id; DEFLATE is raw.
 
+mod common;
+
 use std::fmt::Write as _;
 use std::hint::black_box;
 use std::io::Write as _;
 use std::time::{Duration, Instant};
+
+use common::Stats;
 
 use exi::grammar::{GrammarSet, Grammars};
 use exi::infer::{Fit, SchemaInference};
@@ -121,18 +131,26 @@ impl Packer {
         }
         p
     }
+    /// Compresses an encoder's output; with no compressor it is passed on, not copied.
     fn pack(&mut self, data: Vec<u8>) -> Vec<u8> {
         match &self.outer {
             Outer::None => data,
-            Outer::Lz4 => lz4_flex::block::compress_prepend_size(&data),
-            Outer::Lz4Dict(d) => lz4_flex::block::compress_prepend_size_with_dict(&data, d),
+            _ => self.pack_slice(&data),
+        }
+    }
+    /// Compresses borrowed octets: the original text.
+    fn pack_slice(&mut self, data: &[u8]) -> Vec<u8> {
+        match &self.outer {
+            Outer::None => data.to_vec(),
+            Outer::Lz4 => lz4_flex::block::compress_prepend_size(data),
+            Outer::Lz4Dict(d) => lz4_flex::block::compress_prepend_size_with_dict(data, d),
             Outer::Zstd(_) | Outer::ZstdDict(..) => {
-                self.zc.as_mut().unwrap().compress(&data).unwrap()
+                self.zc.as_mut().unwrap().compress(data).unwrap()
             }
             Outer::Deflate(l) => {
                 let mut z =
                     flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(*l));
-                z.write_all(&data).unwrap();
+                z.write_all(data).unwrap();
                 z.finish().unwrap()
             }
         }
@@ -308,8 +326,8 @@ struct Clock {
 }
 
 impl Clock {
-    /// The median time of `f` over several runs (one with --quick).
-    fn time(&self, mut f: impl FnMut()) -> Duration {
+    /// Times `f` over several runs (one with --quick).
+    fn time(&self, mut f: impl FnMut()) -> Stats {
         let mut v = Vec::new();
         let start = Instant::now();
         loop {
@@ -323,8 +341,7 @@ impl Clock {
                 break;
             }
         }
-        v.sort();
-        v[v.len() / 2]
+        Stats::of(v)
     }
 }
 
@@ -337,8 +354,8 @@ struct Row {
     items: usize,
     text_bytes: usize,
     bytes: usize,
-    enc: Duration,
-    dec: Duration,
+    enc: Stats,
+    dec: Stats,
 }
 
 fn ms(d: Duration) -> f64 {
@@ -356,21 +373,24 @@ struct Corpus {
     train: Vec<(Vec<u8>, Vec<OwnedEvent>)>,
 }
 
-fn load_stanzas(g: &Grammars<'_>, kind: &str) -> Corpus {
-    let read = |which: &str| -> Vec<(Vec<u8>, Vec<OwnedEvent>)> {
-        let text = std::fs::read_to_string(format!("benches/xmpp/{kind}-{which}.xml"))
-            .expect("run benches/xmpp/gen_sessions.py");
-        text.lines()
-            .filter(|l| !l.is_empty())
-            .map(|l| (l.as_bytes().to_vec(), xml_events(g, l.as_bytes())))
-            .collect()
+/// A session and its training session, or `None` when they have not been generated.
+fn load_stanzas(g: &Grammars<'_>, kind: &str) -> Option<Corpus> {
+    let read = |which: &str| -> Option<Vec<(Vec<u8>, Vec<OwnedEvent>)>> {
+        let path = common::package(&format!("benches/xmpp/{kind}-{which}.xml"));
+        let text = std::fs::read_to_string(path).ok()?;
+        Some(
+            text.lines()
+                .filter(|l| !l.is_empty())
+                .map(|l| (l.as_bytes().to_vec(), xml_events(g, l.as_bytes())))
+                .collect(),
+        )
     };
-    Corpus {
+    Some(Corpus {
         name: kind.into(),
         text: Text::Xml,
-        items: read("test"),
-        train: read("train"),
-    }
+        items: read("test")?,
+        train: read("train")?,
+    })
 }
 
 fn log_document() -> Vec<u8> {
@@ -454,8 +474,8 @@ fn per_item(
         config,
         bytes,
         100.0 * bytes as f64 / text_bytes as f64,
-        ms(enc),
-        ms(dec)
+        ms(enc.median),
+        ms(dec.median)
     );
     sizes.push((config.clone(), wire.iter().map(Vec::len).collect()));
     rows.push(Row {
@@ -471,22 +491,26 @@ fn per_item(
 }
 
 /// The original text under a compressor: the size the XML or HTML would have on the wire.
+///
+/// Encoding writes the text from events, as an application would, and then compresses
+/// the original text, so the sizes are those of the text as given. The written text is
+/// thrown away; the time to write it is kept, so these rows compare with the EXI rows.
 fn original_text(
     clock: &Clock,
     sets: &Sets<'_, '_>,
     c: &Corpus,
+    mode: &'static str,
     outer: &Outer,
     rows: &mut Vec<Row>,
     sizes: &mut Vec<(String, Vec<usize>)>,
 ) {
     let mut p = Packer::new(outer);
-    let wire: Vec<Vec<u8>> = c.items.iter().map(|(t, _)| p.pack(t.clone())).collect();
+    let wire: Vec<Vec<u8>> = c.items.iter().map(|(t, _)| p.pack_slice(t)).collect();
     let r = Repr::Text(c.text);
-    // Encoding writes the text from events, then compresses the original text.
     let enc = clock.time(|| {
         for (t, evs) in &c.items {
             black_box(to_text(c.text, evs).len());
-            black_box(p.pack(t.clone()));
+            black_box(p.pack_slice(t));
         }
     });
     let dec = clock.time(|| {
@@ -497,11 +521,6 @@ fn original_text(
     let config = format!("{}{}", r.name(), outer.name());
     let bytes = wire.iter().map(Vec::len).sum();
     let text_bytes = c.items.iter().map(|(t, _)| t.len()).sum();
-    let mode = if c.text == Text::Xml && c.items.len() > 1 && c.name != "pages" {
-        "stanza"
-    } else {
-        "document"
-    };
     println!(
         "{:9} {:9} {:44} {:>10} {:>7.1}% {:>9.1} {:>9.1}",
         c.name,
@@ -509,8 +528,8 @@ fn original_text(
         config,
         bytes,
         100.0 * bytes as f64 / text_bytes as f64,
-        ms(enc),
-        ms(dec)
+        ms(enc.median),
+        ms(dec.median)
     );
     sizes.push((config.clone(), wire.iter().map(Vec::len).collect()));
     rows.push(Row {
@@ -529,7 +548,7 @@ fn original_text(
 /// whole session. These leak between stanzas.
 fn session_wide(clock: &Clock, sets: &Sets<'_, '_>, c: &Corpus, rows: &mut Vec<Row>) {
     let text_bytes: usize = c.items.iter().map(|(t, _)| t.len()).sum();
-    let mut push = |config: String, bytes: usize, enc: Duration, dec: Duration| {
+    let mut push = |config: String, bytes: usize, enc: Stats, dec: Stats| {
         println!(
             "{:9} {:9} {:44} {:>10} {:>7.1}% {:>9.1} {:>9.1}",
             c.name,
@@ -537,8 +556,8 @@ fn session_wide(clock: &Clock, sets: &Sets<'_, '_>, c: &Corpus, rows: &mut Vec<R
             config,
             bytes,
             100.0 * bytes as f64 / text_bytes as f64,
-            ms(enc),
-            ms(dec)
+            ms(enc.median),
+            ms(dec.median)
         );
         rows.push(Row {
             corpus: c.name.clone(),
@@ -674,7 +693,7 @@ fn main() {
     let none = GrammarSet::schemaless();
     let g0 = none.attach(&strings).unwrap();
     let mut rows = Vec::new();
-    std::fs::create_dir_all("target/bench").unwrap();
+    let out = common::out_dir();
     println!(
         "{:9} {:9} {:44} {:>10} {:>8} {:>9} {:>9}",
         "corpus", "mode", "configuration", "octets", "of text", "enc ms", "dec ms"
@@ -686,7 +705,10 @@ fn main() {
         if !wanted("stanzas") && !wanted(kind) {
             continue;
         }
-        let c = load_stanzas(&g0, kind);
+        let Some(c) = load_stanzas(&g0, kind) else {
+            println!("{kind:9} skipped: no session; run python3 benches/xmpp/gen_sessions.py");
+            continue;
+        };
         // A schema learned from the training session.
         let mut learn = SchemaInference::new().fit(Fit::General);
         for (t, _) in &c.train {
@@ -734,7 +756,7 @@ fn main() {
             Outer::ZstdDict(19, dict_for(&xml)),
             Outer::Deflate(6),
         ] {
-            original_text(&clock, &sets, &c, &o, &mut rows, &mut sizes);
+            original_text(&clock, &sets, &c, "stanza", &o, &mut rows, &mut sizes);
         }
         let mut reprs: Vec<(Repr, Vec<Outer>)> = Vec::new();
         for (label, set, strict) in [
@@ -823,7 +845,7 @@ fn main() {
         }
         println!();
     }
-    std::fs::write("target/bench/stanzas.csv", stanza_csv).unwrap();
+    std::fs::write(out.join("stanzas.csv"), stanza_csv).unwrap();
 
     // ----- documents -----
     let mut page_csv = String::from("page,config,octets\n");
@@ -835,7 +857,9 @@ fn main() {
             .unwrap_or_default();
         paths.retain(|p| p.extension().is_some_and(|x| x == "html"));
         paths.sort();
-        if !paths.is_empty() {
+        if paths.is_empty() {
+            println!("pages     skipped: no .html files in {dir} (set EXI_HTML_CORPUS)");
+        } else {
             let items = paths
                 .iter()
                 .map(|p| {
@@ -874,7 +898,7 @@ fn main() {
             Outer::Zstd(19),
             Outer::Deflate(6),
         ] {
-            original_text(&clock, &sets, c, &o, &mut rows, &mut sizes);
+            original_text(&clock, &sets, c, "document", &o, &mut rows, &mut sizes);
         }
         let mut reprs: Vec<(Repr, Vec<Outer>)> = Vec::new();
         // Comments, PIs and the DOCTYPE are kept, as in the text.
@@ -936,18 +960,19 @@ fn main() {
         }
         println!();
     }
-    if !docs.iter().all(|d| d.name != "pages") {
-        std::fs::write("target/bench/pages.csv", page_csv).unwrap();
+    if docs.iter().any(|d| d.name == "pages") {
+        std::fs::write(out.join("pages.csv"), page_csv).unwrap();
     }
 
+    // New columns go at the end, so scripts that read the first ones keep working.
     let mut csv = String::from(
-        "corpus,mode,config,items,text_octets,octets,ratio,encode_ms,decode_ms,encode_mb_s,decode_mb_s\n",
+        "corpus,mode,config,items,text_octets,octets,ratio,encode_ms,decode_ms,encode_mb_s,decode_mb_s,encode_runs,decode_runs,encode_min_ms,encode_max_ms,decode_min_ms,decode_max_ms\n",
     );
     for r in &rows {
         let mb = r.text_bytes as f64 / 1e6;
         let _ = writeln!(
             csv,
-            "{},{},\"{}\",{},{},{},{:.4},{:.3},{:.3},{:.1},{:.1}",
+            "{},{},\"{}\",{},{},{},{:.4},{:.3},{:.3},{:.1},{:.1},{},{},{:.3},{:.3},{:.3},{:.3}",
             r.corpus,
             r.mode,
             r.config,
@@ -955,12 +980,19 @@ fn main() {
             r.text_bytes,
             r.bytes,
             r.bytes as f64 / r.text_bytes as f64,
-            ms(r.enc),
-            ms(r.dec),
-            mb / r.enc.as_secs_f64(),
-            mb / r.dec.as_secs_f64()
+            ms(r.enc.median),
+            ms(r.dec.median),
+            mb / r.enc.median.as_secs_f64(),
+            mb / r.dec.median.as_secs_f64(),
+            r.enc.samples,
+            r.dec.samples,
+            ms(r.enc.min),
+            ms(r.enc.max),
+            ms(r.dec.min),
+            ms(r.dec.max)
         );
     }
-    std::fs::write("target/bench/codecs.csv", csv).unwrap();
-    println!("wrote target/bench/codecs.csv, stanzas.csv, pages.csv");
+    std::fs::write(out.join("codecs.csv"), csv).unwrap();
+    println!("wrote {}: codecs.csv, stanzas.csv, pages.csv", out.display());
+    common::write_meta("codecs");
 }

@@ -317,7 +317,7 @@ fn main() {
     let set = sensor_grammar();
     assert!(set.is_closed());
     let exig = set.to_exig().unwrap();
-    println!("Strict bit-packed sensor schema, {} EXIG bytes", exig.len());
+    println!("Strict sensor schema, {} EXIG bytes", exig.len());
     println!(
         "{:34} {:>13} {:>10} {:>10}",
         "Phase", "Median", "Peak heap", "Live at end"
@@ -334,30 +334,41 @@ fn main() {
     });
     let global = GlobalStrings::new(GlobalConfig::device()).unwrap();
     let g = set.attach(&global).unwrap();
-    let options = Options::builder()
-        .coding(Coding::BitPacked)
-        .strict(true)
-        .value_partition_capacity(Some(0))
-        .build()
-        .unwrap();
-    for size in [64, 2048] {
-        let samples: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
-        let stream = encode(&g, &options, &samples);
-        println!("\n{size} B binary value, {} B EXI input", stream.len());
-        run("4 KiB ring, complete input", || {
-            decode::<4096>(
-                &g,
-                &options,
-                black_box(&stream),
-                stream.len(),
-                &samples,
-            )
-        });
-        run("4 KiB ring, one-byte feeds", || {
-            decode::<4096>(&g, &options, black_box(&stream), 1, &samples)
-        });
-        run("256 B ring, 32-byte feeds", || {
-            decode::<256>(&g, &options, black_box(&stream), 32, &samples)
-        });
+    // Bit-packed is what a device sends; byte-aligned shows what the
+    // bit reader costs.
+    for (name, coding) in [
+        ("bit-packed", Coding::BitPacked),
+        ("byte-aligned", Coding::ByteAligned),
+    ] {
+        let options = Options::builder()
+            .coding(coding)
+            .strict(true)
+            .value_partition_capacity(Some(0))
+            .build()
+            .unwrap();
+        for size in [64, 2048] {
+            let samples: Vec<u8> =
+                (0..size).map(|i| (i % 251) as u8).collect();
+            let stream = encode(&g, &options, &samples);
+            println!(
+                "\n{name}, {size} B binary value, {} B EXI input",
+                stream.len()
+            );
+            run("4 KiB ring, complete input", || {
+                decode::<4096>(
+                    &g,
+                    &options,
+                    black_box(&stream),
+                    stream.len(),
+                    &samples,
+                )
+            });
+            run("4 KiB ring, one-byte feeds", || {
+                decode::<4096>(&g, &options, black_box(&stream), 1, &samples)
+            });
+            run("256 B ring, 32-byte feeds", || {
+                decode::<256>(&g, &options, black_box(&stream), 32, &samples)
+            });
+        }
     }
 }

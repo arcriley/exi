@@ -15,17 +15,33 @@
 # HTML pages (.html, .htm) get their own rows: the page, the page compressed, and EXI
 # of the parsed page, schema-less and with the XHTML5 profile. These need the html5ever
 # and xhtml5 features, which the build line below turns on.
+#
+# The times are of whole processes: start-up, reading and writing files, and for
+# EXIficient the JVM's start-up. A pipeline (`exi encode | zstd`) is two processes. For
+# library times in one process, use `cargo bench`. Output goes to target/compare: a
+# markdown and a JSON table for each document, and meta.txt with the tool versions and
+# machine.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 work=$root/target/compare
+
+# Check named documents before building: paths are taken from where the script was run.
+docs=()
+for f in "$@"; do
+    if [ ! -f "$f" ]; then
+        echo "compare.sh: no such file: $f" >&2
+        exit 1
+    fi
+    docs+=("$(cd "$(dirname "$f")" && pwd)/$(basename "$f")")
+done
+
 mkdir -p "$work"
 cd "$root"
 
 cargo build --quiet --release --features infer,xhtml5,html5ever
 exi=$root/target/release/exi
 
-docs=("$@")
 if [ ${#docs[@]} -eq 0 ]; then
     cargo bench --quiet --features infer --bench exi -- --corpus "$work/corpus" >/dev/null
     docs=("$work"/corpus/*)
@@ -41,6 +57,28 @@ exificient=""
 if have java && [ -n "$cp" ]; then
     exificient="java -cp $cp com.siemens.ct.exi.main.cmd.EXIficientCMD"
 fi
+version() { # version TOOL ARGS...: its first line of version output, or nothing
+    have "$1" && "$@" 2>&1 | head -n 1 || true
+}
+{
+    echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "git_commit: $(git rev-parse HEAD 2>/dev/null)"
+    echo "git_dirty: $([ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ] && echo true || echo false)"
+    echo "rustc: $(rustc -V)"
+    echo "exi: $("$exi" --version 2>&1 | head -n 1)"
+    echo "hyperfine: $(version hyperfine --version)"
+    echo "xmllint: $(version xmllint --version)"
+    echo "gzip: $(version gzip --version)"
+    echo "xz: $(version xz --version)"
+    echo "zstd: $(version zstd --version)"
+    echo "brotli: $(version brotli --version)"
+    echo "java: $(version java -version)"
+    echo "exificient_classpath: $cp"
+    echo "cpu: $(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2- | sed 's/^ //')"
+    echo "kernel: $(uname -sr)"
+    echo "governor: $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)"
+    echo "boost: $(cat /sys/devices/system/cpu/cpufreq/boost 2>/dev/null)"
+} >"$work/meta.txt"
 size() { wc -c <"$1" | tr -d ' '; }
 row() { printf '%-40s %10s\n' "$1" "$(size "$2")"; }
 squeeze() { # squeeze LABEL FILE: the file under each installed compressor
@@ -88,8 +126,8 @@ html_page() {
     )
     if have gzip; then cmds+=(-n "gzip -6 (HTML)" "gzip -6c $d/in.html > $d/t.gz"); fi
     if have brotli; then cmds+=(-n "brotli -5 (HTML)" "brotli -q 5 -c $d/in.html > $d/t.br"); fi
-    hyperfine --shell=bash --style basic --warmup 2 --export-markdown "$work/$name.md" "${cmds[@]}"
-    echo "(markdown table: $work/$name.md)"
+    hyperfine --shell=bash --style basic --warmup 2 --export-markdown "$work/$name.md" --export-json "$work/$name.json" "${cmds[@]}"
+    echo "(whole-process times; tables: $work/$name.md, $name.json)"
 }
 
 for doc in "${docs[@]}"; do
@@ -181,6 +219,6 @@ for doc in "${docs[@]}"; do
         cmds+=(-n "EXIficient encode" "$exificient -encode -i $d/in.xml -o $d/t.exif -bytePacked")
         cmds+=(-n "EXIficient decode" "$exificient -decode -i $d/exif.byte -o $d/t.exif.xml -bytePacked")
     fi
-    hyperfine --shell=bash --style basic --warmup 2 --export-markdown "$work/$name.md" "${cmds[@]}"
-    echo "(markdown table: $work/$name.md)"
+    hyperfine --shell=bash --style basic --warmup 2 --export-markdown "$work/$name.md" --export-json "$work/$name.json" "${cmds[@]}"
+    echo "(whole-process times; tables: $work/$name.md, $name.json)"
 done

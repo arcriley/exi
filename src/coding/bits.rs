@@ -53,6 +53,25 @@ use crate::{Error, ErrorKind, Result};
 /// assert_eq!(e.into_sink(), [0xFF, 0xFF, 0xFF, 0xFF, 0x12]);
 /// # Ok::<(), exi::Error>(())
 /// ```
+///
+/// Octets after held bits are shifted through them, in chunks, so a
+/// large binary value needs no heap memory:
+///
+/// ```
+/// use exi::coding::{Channel::Structure as S, Decoder, Encoder, bits::{BitDecoder, BitEncoder}};
+/// let data: Vec<u8> = (0..600u32).map(|i| i as u8).collect();
+/// let mut e = BitEncoder::new(Vec::new());
+/// e.nbit(S, 0b101, 3)?;
+/// e.octets(S, &data)?;
+/// assert_eq!(e.bit_position(), 3 + 8 * 600);
+/// let bytes = e.into_sink();
+/// let mut d = BitDecoder::new(&bytes, 0);
+/// assert_eq!(d.nbit(S, 3)?, 0b101);
+/// let mut back = vec![0u8; 600];
+/// d.octets(S, &mut back)?;
+/// assert_eq!(back, data);
+/// # Ok::<(), exi::Error>(())
+/// ```
 pub struct BitEncoder<S: Sink> {
     sink: S,
     /// Bits not yet forming a full octet, in the low `held` bits.
@@ -135,17 +154,21 @@ impl<S: Sink> Encoder for BitEncoder<S> {
                 .map(|()| self.total += 8 * data.len() as u64);
         }
         // Each octet is split across two: the held bits shift through
-        // the data.
+        // the data. A fixed buffer keeps large binary values off the
+        // heap; the state is updated after each chunk, so on a sink
+        // error the chunks before it stay written and counted.
         let h = self.held;
-        let mut out = alloc::vec::Vec::with_capacity(data.len());
-        let mut acc = self.acc;
-        for &b in data {
-            out.push((acc << (8 - h)) | (b >> h));
-            acc = b & ((1u8 << h) - 1);
+        let mut buf = [0u8; 256];
+        for chunk in data.chunks(buf.len()) {
+            let mut acc = self.acc;
+            for (o, &b) in buf.iter_mut().zip(chunk) {
+                *o = (acc << (8 - h)) | (b >> h);
+                acc = b & ((1u8 << h) - 1);
+            }
+            self.sink.write(&buf[..chunk.len()])?;
+            self.acc = acc;
+            self.total += 8 * chunk.len() as u64;
         }
-        self.sink.write(&out)?;
-        self.acc = acc;
-        self.total += 8 * data.len() as u64;
         Ok(())
     }
     fn align(&mut self) -> Result<()> {
@@ -180,6 +203,25 @@ impl<S: Sink> Encoder for BitEncoder<S> {
 /// assert_eq!(d.nbit(S, 0)?, 0);                      // 0 bits: always available
 /// let mut d = BitDecoder::new(&[0b0000_0001, 0x80], 7);
 /// assert_eq!(d.nbit(S, 2)?, 0b11);                    // across an octet boundary
+/// # Ok::<(), exi::Error>(())
+/// ```
+///
+/// Octets at any bit position, across the two parts of a split input:
+///
+/// ```
+/// use exi::coding::{Channel::Structure as S, Decoder, bits::BitDecoder};
+/// let mut d = BitDecoder::split(&[0x0A, 0xBC], &[0xDE, 0xF0], 4);
+/// let mut out = [0u8; 3];
+/// d.octets(S, &mut out)?;
+/// assert_eq!(out, [0xAB, 0xCD, 0xEF]);
+/// let mut d = BitDecoder::split(&[0x12], &[0x34, 0x56], 8);    // aligned, all in `second`
+/// let mut two = [0u8; 2];
+/// d.octets(S, &mut two)?;
+/// assert_eq!(two, [0x34, 0x56]);
+/// let mut d = BitDecoder::split(&[0x12], &[0x34], 0);           // aligned, both parts
+/// d.octets(S, &mut two)?;
+/// assert_eq!(two, [0x12, 0x34]);
+/// assert_eq!(d.octets(S, &mut [0]).unwrap_err().kind(), exi::ErrorKind::Truncated);
 /// # Ok::<(), exi::Error>(())
 /// ```
 pub struct BitDecoder<'a> {
@@ -247,16 +289,29 @@ impl Decoder for BitDecoder<'_> {
         }
         Ok(v as u32)
     }
-    fn octets(&mut self, ch: Channel, out: &mut [u8]) -> Result<()> {
+    fn octets(&mut self, _ch: Channel, out: &mut [u8]) -> Result<()> {
         if self.bit + 8 * out.len() as u64 > self.len_bits() {
             return Err(Error::new(
                 ErrorKind::Truncated,
                 "input ends inside binary content",
             ));
         }
-        for o in out.iter_mut() {
-            *o = self.nbit(ch, 8)? as u8;
+        let start = (self.bit / 8) as usize;
+        let off = (self.bit % 8) as u32;
+        if off == 0 {
+            // Aligned: the octets are in the input as they are.
+            super::copy_split(self.first, self.second, start, out);
+        } else {
+            // Each octet is the low bits of one input octet and the high
+            // bits of the next. The bounds check above leaves `off` bits
+            // of the last needed octet, so `i + 1` is in range.
+            for (i, o) in out.iter_mut().enumerate() {
+                let hi = self.octet(start + i) << off;
+                let lo = self.octet(start + i + 1) >> (8 - off);
+                *o = hi | lo;
+            }
         }
+        self.bit += 8 * out.len() as u64;
         Ok(())
     }
     fn align(&mut self) {

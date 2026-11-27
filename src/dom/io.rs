@@ -319,6 +319,7 @@ impl<'g> DocumentBuilder<'g> {
     }
 
     fn attribute_ev(&mut self, name: Name<'_>, v: &Value<'_>) -> Result<()> {
+        super::check_attribute_name(name)?;
         self.settle()?;
         let el = self.open_element()?.ok_or_else(|| {
             Error::new(ErrorKind::State, "an attribute outside an element")
@@ -371,12 +372,24 @@ impl EventSink for DocumentBuilder<'_> {
             Event::Namespace(d) => self.ns_ev(d),
             Event::Attribute(n, v) => self.attribute_ev(*n, v),
             Event::Characters(v) => self.characters(v),
-            Event::EndElement(_) => {
-                self.flush()?;
-                self.settle()?;
-                self.stack.pop().ok_or_else(|| {
+            Event::EndElement(name) => {
+                let open = self.current().ok_or_else(|| {
                     Error::new(ErrorKind::State, "an end with no element open")
                 })?;
+                if !name.is("", "")
+                    && !self
+                        .doc
+                        .name(open)
+                        .is_some_and(|n| n.is(name.uri(), name.local_name()))
+                {
+                    return Err(Error::new(
+                        ErrorKind::State,
+                        "end element name does not match",
+                    ));
+                }
+                self.flush()?;
+                self.settle()?;
+                self.stack.pop();
                 Ok(())
             }
             Event::Comment(t) => {
@@ -615,6 +628,8 @@ impl<'g> Document<'g> {
     }
 
     /// One element as events (no StartDocument or EndDocument).
+    /// Its first event is followed by all in-scope namespace bindings,
+    /// including inherited bindings that do not name a node.
     ///
     /// ```
     /// use exi::{dom::Document, Event, EventSource, OwnedEvent, Step};
@@ -896,10 +911,10 @@ impl EventSource for DocEvents<'_, '_> {
                                 Some(v) => v,
                                 None => {
                                     self.scratch = doc.content(id);
-                                    Value::Str(
-                                        &*(self.scratch.as_str()
-                                            as *const str),
-                                    )
+                                    // The event borrows the scratch
+                                    // buffer until the next call to
+                                    // next().
+                                    Value::Str(&self.scratch)
                                 }
                             };
                             return Ok(Step::Event(

@@ -736,3 +736,114 @@ fn bad_input_is_an_error() {
     assert!(read_exi(&s, &g, &bad).is_err());
     assert_eq!(live(&s), start);
 }
+
+#[test]
+fn namespace_declarations_are_not_attributes() -> exi::Result<()> {
+    let strings = strings();
+    let mut doc = Document::new(&strings);
+    let root = doc.new_element("root")?;
+    doc.set_root(root)?;
+    let attr = doc.set_attribute(root, "ordinary", "kept")?;
+    let mut builder = exi::dom::DocumentBuilder::new(&strings);
+    builder.start_element("root")?;
+
+    for name in [
+        Name::local("xmlns"),
+        Name::new("urn:example", "bad").with_prefix("xmlns"),
+        Name::new("http://www.w3.org/2000/xmlns/", "bad"),
+    ] {
+        assert_eq!(
+            doc.new_attribute(name, "urn:bad").unwrap_err().kind(),
+            ErrorKind::Arg
+        );
+        assert_eq!(
+            doc.set_attribute(root, name, "urn:bad").unwrap_err().kind(),
+            ErrorKind::Arg
+        );
+        assert_eq!(doc.rename(attr, name).unwrap_err().kind(), ErrorKind::Arg);
+        assert_eq!(
+            builder.attribute(name, "urn:bad").unwrap_err().kind(),
+            ErrorKind::Arg
+        );
+    }
+
+    assert_eq!(doc.attribute(root, "ordinary").as_deref(), Some("kept"));
+    assert_eq!(doc.attributes(root).count(), 1);
+    assert_eq!(
+        builder.document().attributes(builder.current().unwrap()).count(),
+        0
+    );
+    Ok(())
+}
+
+#[test]
+fn builder_rejects_mismatched_end_before_flushing() -> exi::Result<()> {
+    let strings = strings();
+    let mut builder = exi::dom::DocumentBuilder::new(&strings);
+    builder.start_element(("urn:open", "item"))?;
+    builder.text("pending")?;
+    let node = builder.current().unwrap();
+    let end = |uri| exi::Event::EndElement(Name::new(uri, "item"));
+    assert_eq!(
+        builder.event(&end("urn:other")).unwrap_err().kind(),
+        ErrorKind::State
+    );
+    assert_eq!(builder.current(), Some(node));
+    assert_eq!(builder.document().first_child(node), None);
+    builder.event(&end("urn:open"))?;
+    assert_eq!(builder.document().content(node), "pending");
+    Ok(())
+}
+
+#[test]
+fn adopted_xml_bindings_outlive_the_source() -> exi::Result<()> {
+    const XML: &str = "http://www.w3.org/XML/1998/namespace";
+    let dest_strings = strings();
+    let mut dest = Document::new(&dest_strings);
+    let (element, attr) = {
+        let source_strings = strings();
+        let mut source = Document::parse_xml(
+            &source_strings,
+            b"<root xml:lang='en'><xml:item xml:space='preserve'/></root>",
+        )?;
+        let root = source.root().unwrap();
+        let element = source.first_element_child(root).unwrap();
+        let attr = source.attribute_node(root, (XML, "lang")).unwrap();
+        (dest.adopt(&mut source, element)?, dest.adopt(&mut source, attr)?)
+    };
+    assert_eq!(dest.parent(element), None);
+    assert_eq!(dest.name(element).unwrap().prefix(), Some("xml"));
+    assert_eq!(dest.name(attr).unwrap().prefix(), Some("xml"));
+    dest.set_root(element)?;
+    dest.attach_attribute(element, attr)?;
+    assert_eq!(
+        dest.to_xml()?,
+        r#"<xml:item xml:space="preserve" xml:lang="en"/>"#
+    );
+    Ok(())
+}
+
+#[test]
+fn failed_adoption_keeps_the_source_tree_intact() -> exi::Result<()> {
+    let source_strings = strings();
+    let dest_strings = GlobalStrings::new(GlobalConfig::new().max_strings(1))?;
+    let mut source =
+        Document::parse_xml(&source_strings, b"<root><child/></root>")?;
+    let mut dest = Document::new(&dest_strings);
+    let root = source.root().unwrap();
+    let child = source.first_child(root).unwrap();
+    let root_ptr = source.raw(root);
+    let child_ptr = source.raw(child);
+
+    assert_eq!(
+        dest.adopt(&mut source, root).unwrap_err().kind(),
+        ErrorKind::Limit
+    );
+    assert_eq!(source.root(), Some(root));
+    assert_eq!(source.parent(child), Some(root));
+    assert_eq!(source.node_id(root_ptr), Some(root));
+    assert_eq!(source.node_id(child_ptr), Some(child));
+    assert_eq!(source.to_xml()?, "<root><child/></root>");
+    assert!(dest.root().is_none());
+    Ok(())
+}

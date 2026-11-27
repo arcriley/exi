@@ -129,6 +129,8 @@ cargo +nightly build --release --lib --no-default-features --features bare-heade
   in `EXI_HTML_CORPUS` when it is set.
 - `XHTML5_REGEN=1 cargo test --features xhtml5,html5ever,xsd --test xhtml5` rewrites
   `schemas/xhtml5-1.exig` from `schemas/xhtml5-1.xsd`.
+- `EXIG_REGEN=1 cargo test --features xsd exig_tables_are_current` rewrites
+  `src/grammar/exig_tables.rs` from `schemas/exig-1.xsd`.
 
 ## Fixtures (EXIficient 1.0.7)
 

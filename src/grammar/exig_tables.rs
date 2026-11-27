@@ -9,7 +9,7 @@
 // communicating that changes are made under these same conditions.
 //
 //! Generated from `schemas/exig-1.xsd` by
-//! `cargo test --features xsd exig_tables -- --ignored` (EXIG_REGEN=1 writes this file).
+//! `cargo test --features xsd exig_tables_are_current` (EXIG_REGEN=1 writes this file).
 //! Do not edit.
 
 use alloc::vec;

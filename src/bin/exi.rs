@@ -489,6 +489,7 @@ fn decode(a: &Args) -> Res<()> {
     let strings = GlobalStrings::new(GlobalConfig::new())?;
     let g = set.attach(&strings)?;
     let mut cfg = ReaderConfig::new(&g);
+    let mut fragment = header.options.as_ref().is_some_and(|o| o.fragment());
     if header.options.is_some() {
         let ignored = a.header_flags();
         if !ignored.is_empty() {
@@ -498,10 +499,12 @@ fn decode(a: &Args) -> Res<()> {
             );
         }
     } else {
-        cfg = cfg.options(match profile {
+        let opts = match profile {
             Some(v) => a.recoded(profile_options(v)?)?,
             None => assumed(a, !a.schemas.is_empty())?,
-        });
+        };
+        fragment = opts.fragment();
+        cfg = cfg.options(opts);
     }
     let mut r: Reader = Reader::new(cfg)?;
     let html = a.html;
@@ -522,7 +525,10 @@ fn decode(a: &Args) -> Res<()> {
         };
         Out::Xml(XmlWriter::new(
             IoSink(a.output()?),
-            XmlWriterConfig::new().declaration(true).prefixes(policy),
+            XmlWriterConfig::new()
+                .declaration(true)
+                .prefixes(policy)
+                .fragment(fragment),
         ))
     };
     let mut at = 0;

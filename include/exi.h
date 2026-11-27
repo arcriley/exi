@@ -339,7 +339,7 @@ typedef struct exi_writer_config {
     uint32_t sequence;      /* EXI_SEQ_* */
     uint32_t format;        /* EXI_FORMAT_* */
     uint32_t _pad;
-    const exi_options *options;
+    const exi_options *options;  /* XML format: only EXI_OPT_FRAGMENT is used */
     exi_grammar_set *grammars;  /* NULL: schema-less */
     exi_write_fn write;     /* NULL: accumulate, see exi_writer_take */
     void *write_user;

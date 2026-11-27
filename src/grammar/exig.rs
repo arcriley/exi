@@ -120,7 +120,6 @@ pub(crate) struct TypeModel {
 /// canonical order.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub(crate) struct Model {
-    pub schema_id: Option<String>,
     /// Initial string table entries beyond the fixed ones: URI and its
     /// local names.
     pub strings: Vec<(String, Vec<String>)>,
@@ -198,7 +197,7 @@ impl Model {
             w.element(s, e);
         }
 
-        let mut m = Model { schema_id: None, ..Model::default() };
+        let mut m = Model::default();
         let fixed = InitialEntries::schema().build()?;
         for (u, uri) in entries.uris().iter().enumerate() {
             let known = fixed.uris().iter().position(|x| x == uri);
@@ -525,7 +524,6 @@ struct DType {
 /// An EXIG document as written.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 struct Doc {
-    schema_id: Option<String>,
     builtin_types: bool,
     all_global: bool,
     strings: Vec<(String, Vec<String>)>,
@@ -949,7 +947,6 @@ impl Doc {
             });
         let (t0, s0) = if builtin { (nb, ns) } else { (0, 0) };
         let mut d = Doc {
-            schema_id: m.schema_id.clone(),
             builtin_types: builtin,
             strings: m.strings.clone(),
             simple: m.simple[s0..].to_vec(),
@@ -1150,11 +1147,8 @@ impl Doc {
     /// The model this document describes; [`Model::build`] checks it.
     fn to_model(&self) -> Result<Model> {
         let names = Names::new(&self.strings)?;
-        let mut m = Model {
-            schema_id: self.schema_id.clone(),
-            strings: self.strings.clone(),
-            ..Model::default()
-        };
+        let mut m =
+            Model { strings: self.strings.clone(), ..Model::default() };
         let mut base = if self.builtin_types {
             let bi = builtins()?;
             m.simple = bi.simple;
@@ -1466,9 +1460,6 @@ fn write_doc(g: &GrammarSet, d: &Doc) -> Result<Vec<u8>> {
     if d.builtin_types {
         w.attribute("builtinTypes", true)?;
     }
-    if let Some(id) = &d.schema_id {
-        w.attribute("schemaId", id.as_str())?;
-    }
     el(&mut w, "strings")?;
     for (u, locals) in &d.strings {
         el(&mut w, "uri")?;
@@ -1763,7 +1754,6 @@ fn node_text(n: &Node) -> Result<String> {
 
 fn doc_of(root: &Node) -> Result<Doc> {
     let mut d = Doc {
-        schema_id: root.get("schemaId").map(text).transpose()?,
         builtin_types: root.flag("builtinTypes"),
         all_global: root.flag("allGlobal"),
         ..Doc::default()
@@ -2241,7 +2231,6 @@ pub(crate) fn render_tables(m: &Model) -> String {
     let _ = writeln!(o, "#[allow(unused_imports)]");
     let _ = writeln!(o, "pub(crate) fn model() -> Model {{");
     let _ = writeln!(o, "    Model {{");
-    let _ = writeln!(o, "        schema_id: None,");
     let _ = writeln!(o, "        strings: vec![");
     for (u, ls) in &m.strings {
         let _ = writeln!(

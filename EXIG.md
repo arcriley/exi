@@ -23,7 +23,8 @@ An `.exig` file is an EXIG document encoded as EXI 1.0:
 A reader rejects a file whose header has no options or is not strict.
 
 The digest is `sha256:` followed by the 64 lowercase hex digits of the SHA-256 of the
-file. It can be used as an EXI `schemaId`.
+file. It can be used as an EXI `schemaId`. A file does not carry a name of its own: its
+name is this digest, which the file cannot contain.
 
 The `exi` tool works with these files:
 
@@ -300,8 +301,6 @@ order of local name then URI.
 
 ### Attributes of `<grammars>`
 
-- `schemaId`: the schemaId the grammars are published under (EXI §5.4), when there is
-  one.
 - `builtinTypes`: see [Built-in types](#built-in-types).
 - `allGlobal`: see [`<global>`](#global).
 

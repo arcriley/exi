@@ -101,8 +101,6 @@
         <!-- The global element declarations, unless allGlobal. -->
         <xs:element name="global" type="xs:unsignedInt" minOccurs="0" maxOccurs="unbounded"/>
       </xs:sequence>
-      <!-- The schemaId the grammars are published under (EXI §5.4), when there is one. -->
-      <xs:attribute name="schemaId" type="xs:string"/>
       <!-- The XML Schema built-in types come first and are not listed. -->
       <xs:attribute name="builtinTypes" type="xs:boolean"/>
       <!-- Every element declaration is global, in order of local name then URI. -->

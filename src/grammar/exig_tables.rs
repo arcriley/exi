@@ -25,9 +25,8 @@ fn n(uri: &str, local: &str) -> OwnedName {
 #[allow(unused_imports)]
 pub(crate) fn model() -> Model {
     Model {
-        schema_id: None,
         strings: vec![
-            ("".into(), vec!["allGlobal".into(), "base".into(), "builtinTypes".into(), "castable".into(), "element".into(), "itemType".into(), "local".into(), "maxInclusive".into(), "minInclusive".into(), "next".into(), "nillable".into(), "required".into(), "schemaId".into(), "set".into(), "type".into(), "uri".into(), "value".into()]),
+            ("".into(), vec!["allGlobal".into(), "base".into(), "builtinTypes".into(), "castable".into(), "element".into(), "itemType".into(), "local".into(), "maxInclusive".into(), "minInclusive".into(), "next".into(), "nillable".into(), "required".into(), "set".into(), "type".into(), "uri".into(), "value".into()]),
             ("urn:exig:draft-1".into(), vec!["Empty".into(), "Numbers".into(), "SimpleTypes".into(), "State".into(), "Strings".into(), "Type".into(), "anyAttribute".into(), "at".into(), "atAny".into(), "atUri".into(), "attribute".into(), "attributeSet".into(), "attributes".into(), "base64Binary".into(), "boolean".into(), "booleanPattern".into(), "boundedInteger".into(), "ch".into(), "charset".into(), "content".into(), "date".into(), "dateTime".into(), "decimal".into(), "ee".into(), "element".into(), "elementSets".into(), "elements".into(), "empty".into(), "enumeration".into(), "float".into(), "gDay".into(), "gMonth".into(), "gMonthDay".into(), "gYear".into(), "gYearMonth".into(), "global".into(), "grammars".into(), "hexBinary".into(), "integer".into(), "list".into(), "local".into(), "scalar".into(), "se".into(), "seAny".into(), "seSet".into(), "seUri".into(), "set".into(), "simpleTypes".into(), "state".into(), "string".into(), "strings".into(), "time".into(), "type".into(), "types".into(), "unsignedInteger".into(), "uri".into(), "value".into()]),
         ],
         simple: vec![
@@ -555,17 +554,16 @@ pub(crate) fn model() -> Model {
                 castable: false,
                 casts: vec![],
                 states: vec![
-                    vec![Prod::At { name: n("", "allGlobal"), ty: SimpleTypeId(15), next: 1 }, Prod::At { name: n("", "builtinTypes"), ty: SimpleTypeId(15), next: 2 }, Prod::At { name: n("", "schemaId"), ty: SimpleTypeId(39), next: 3 }, Prod::Se { element: ElementId(1), next: 4 }],
-                    vec![Prod::At { name: n("", "builtinTypes"), ty: SimpleTypeId(15), next: 2 }, Prod::At { name: n("", "schemaId"), ty: SimpleTypeId(39), next: 3 }, Prod::Se { element: ElementId(1), next: 4 }],
-                    vec![Prod::At { name: n("", "schemaId"), ty: SimpleTypeId(39), next: 3 }, Prod::Se { element: ElementId(1), next: 4 }],
-                    vec![Prod::Se { element: ElementId(1), next: 4 }],
-                    vec![Prod::Se { element: ElementId(4), next: 5 }],
-                    vec![Prod::Se { element: ElementId(27), next: 6 }],
-                    vec![Prod::Se { element: ElementId(29), next: 7 }],
-                    vec![Prod::Se { element: ElementId(31), next: 8 }, Prod::Se { element: ElementId(32), next: 9 }],
-                    vec![Prod::Se { element: ElementId(32), next: 9 }],
-                    vec![Prod::Se { element: ElementId(49), next: 10 }],
-                    vec![Prod::Se { element: ElementId(51), next: 10 }, Prod::EE],
+                    vec![Prod::At { name: n("", "allGlobal"), ty: SimpleTypeId(15), next: 1 }, Prod::At { name: n("", "builtinTypes"), ty: SimpleTypeId(15), next: 2 }, Prod::Se { element: ElementId(1), next: 3 }],
+                    vec![Prod::At { name: n("", "builtinTypes"), ty: SimpleTypeId(15), next: 2 }, Prod::Se { element: ElementId(1), next: 3 }],
+                    vec![Prod::Se { element: ElementId(1), next: 3 }],
+                    vec![Prod::Se { element: ElementId(4), next: 4 }],
+                    vec![Prod::Se { element: ElementId(27), next: 5 }],
+                    vec![Prod::Se { element: ElementId(29), next: 6 }],
+                    vec![Prod::Se { element: ElementId(31), next: 7 }, Prod::Se { element: ElementId(32), next: 8 }],
+                    vec![Prod::Se { element: ElementId(32), next: 8 }],
+                    vec![Prod::Se { element: ElementId(49), next: 9 }],
+                    vec![Prod::Se { element: ElementId(51), next: 9 }, Prod::EE],
                 ],
             },
             TypeModel {

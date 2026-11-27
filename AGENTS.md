@@ -298,7 +298,9 @@ Open questions:
   location; whether to carry datatype representation maps; whether `.exig` files should
   carry compression dictionaries, which is still being discussed. Order is settled: the
   canonical order `EXIG.md` describes. The XML form `exi exig` prints serves as the text
-  form.
+  form. `.exig` is EXI 1.2 work (a third edition: the wire format does not change, so
+  not 2.0). Arc's proposal: the header's `schemaId` becomes `grammar`, holding the
+  `.exig` digest. A file cannot name itself, so `.exig` has no `schemaId` attribute.
 - HTML profile: permanent profile identifiers in place of `urn:libexi:`; typed
   attributes in profile version 2 (`width`, `tabindex`); registering the `schema`
   parameter of `application/exi`.

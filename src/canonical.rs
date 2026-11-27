@@ -15,6 +15,7 @@
 // The Apache license is incompatable with some free software licenses
 // including the GPLv2, the MIT license is available for compatability
 //
+//! Canonical EXI (W3C EXI C14N): the rules that choose exactly
 //! one stream for given events, options and grammars, so that different
 //! implementations write the same bytes.
 //!
@@ -32,7 +33,7 @@
 //! writer does what EXIficient does, so that the two write the same
 //! bytes.
 //!
-//! Two EXIficient results are not followed, because they change the
+//! Three EXIficient results are not followed, because they change the
 //! value: with `utcTime` it writes `2026-01-01+14:00` as `2025-12-28Z`
 //! (this crate: `2025-12-31Z`), a `gDay` with a time zone as some other
 //! day (this crate: unchanged, since a day of no particular month has
@@ -104,55 +105,71 @@ fn days_in(y: i64, m: u8) -> u8 {
     }
 }
 
-/// Moves a date and time by whole minutes, seconds untouched (XML
-/// Schema's "adding durations to dateTimes", as C14N 4.5.5 asks).
-fn add_minutes(d: &mut DateTime, minutes: i64) {
+/// `d` moved by whole minutes, seconds untouched (XML Schema's "adding
+/// durations to dateTimes", as C14N 4.5.5 asks). `None` when a field is
+/// out of range: the value is then written as given, and the coder
+/// rejects it.
+///
+/// In range, a time zone (±14:00) or hour 24 moves the date by at most
+/// one day, so one step each way is enough.
+fn add_minutes(mut d: DateTime, minutes: i64) -> Option<DateTime> {
+    let date = d.kind == DateTimeKind::DateTime;
+    if d.hour > 23
+        || d.minute > 59
+        || (date
+            && !((1..=12).contains(&d.month) && (1..=31).contains(&d.day)))
+    {
+        return None;
+    }
     let total = d.hour as i64 * 60 + d.minute as i64 + minutes;
-    let mut days = total.div_euclid(24 * 60);
+    let days = total.div_euclid(24 * 60);
     let rest = total.rem_euclid(24 * 60);
     d.hour = (rest / 60) as u8;
     d.minute = (rest % 60) as u8;
-    if d.kind != DateTimeKind::DateTime {
-        return; // a time alone wraps around the day
+    if !date {
+        return Some(d); // a time alone wraps around the day
     }
-    while days > 0 {
-        if d.day < days_in(d.year, d.month) {
-            d.day += 1;
-        } else {
+    match days {
+        0 => {}
+        1 if d.day < days_in(d.year, d.month) => d.day += 1,
+        1 => {
             d.day = 1;
             if d.month == 12 {
                 d.month = 1;
-                d.year += 1;
+                d.year = d.year.checked_add(1)?;
             } else {
                 d.month += 1;
             }
         }
-        days -= 1;
-    }
-    while days < 0 {
-        if d.day > 1 {
-            d.day -= 1;
-        } else {
+        -1 if d.day > 1 => d.day -= 1,
+        -1 => {
             if d.month == 1 {
                 d.month = 12;
-                d.year -= 1;
+                d.year = d.year.checked_sub(1)?;
             } else {
                 d.month -= 1;
             }
             d.day = days_in(d.year, d.month);
         }
-        days += 1;
+        _ => return None,
     }
+    Some(d)
 }
 
 /// 24:00:00 as 00:00:00 of the next day; a time alone wraps to
-/// 00:00:00.
-pub(crate) fn hour_24(mut d: DateTime) -> DateTime {
-    if d.hour == 24
+/// 00:00:00. Hour 24 with minutes or seconds is left for the coder to
+/// reject.
+pub(crate) fn hour_24(d: DateTime) -> DateTime {
+    let midnight = d.hour == 24
+        && d.minute == 0
+        && d.second == 0
+        && d.fraction.is_none_or(|(v, _)| v == 0);
+    if midnight
         && matches!(d.kind, DateTimeKind::DateTime | DateTimeKind::Time)
     {
-        d.hour = 0;
-        add_minutes(&mut d, 24 * 60);
+        if let Some(next) = add_minutes(DateTime { hour: 0, ..d }, 24 * 60) {
+            return next;
+        }
     }
     d
 }
@@ -171,13 +188,14 @@ pub(crate) fn datetime(mut d: DateTime, utc: bool) -> DateTime {
         d.day = 1;
     }
     let Some(tz) = d.tz_minutes.filter(|_| utc) else { return d };
-    if tz == 0 {
-        return d; // already UTC
+    if tz == 0 || !(-840..=840).contains(&tz) {
+        return d; // already UTC, or out of range for the coder to reject
     }
     match d.kind {
-        DateTime | Time => {
-            add_minutes(&mut d, -(tz as i64));
-        }
+        DateTime | Time => match add_minutes(d, -(tz as i64)) {
+            Some(m) => d = m,
+            None => return d,
+        },
         // A day of no month in particular has no day before it: left as
         // it is.
         GDay => return d,
@@ -199,7 +217,7 @@ pub(crate) fn datetime(mut d: DateTime, utc: bool) -> DateTime {
             if matches!(d.kind, GYear | GYearMonth | GMonth) {
                 m.day = 1;
             }
-            add_minutes(&mut m, -(tz as i64));
+            let Some(m) = add_minutes(m, -(tz as i64)) else { return d };
             if matches!(d.kind, GYear | GYearMonth | Date) {
                 d.year = m.year;
             }
@@ -297,6 +315,21 @@ mod tests {
         let mut d = dt(2024, 3, 1, 1, 2, 3, None);
         d.fraction = Some((0, 3));
         assert_eq!(datetime(d, false).fraction, None);
+    }
+
+    #[test]
+    fn out_of_range_left_for_the_coder() {
+        // Only 24:00:00 is the next midnight; 24:30 stays as it is so
+        // that the coder rejects it.
+        let d = dt(2024, 3, 1, 24, 30, 0, None);
+        assert_eq!(hour_24(d), d);
+        // A zone beyond ±14:00, or a month 0, is not converted.
+        let d = dt(2026, 1, 1, 12, 0, 0, Some(5000));
+        assert_eq!(datetime(d, true), d);
+        let d = dt(2026, 0, 1, 0, 15, 0, Some(60));
+        assert_eq!(datetime(d, true), d);
+        let d = dt(i64::MAX, 12, 31, 23, 30, 0, Some(-60));
+        assert_eq!(datetime(d, true), d);
     }
 
     #[test]

@@ -396,8 +396,21 @@ impl<S: Sink> Writer<'_, S> {
 
     /// Writes a buffered start tag: SE, NS events, then attributes in
     /// EXI's order.
+    ///
+    /// An attribute of an element whose type has sub-types is checked
+    /// here, once no `xsi:type` can follow. A failure comes after SE is
+    /// written and cannot be undone, so it poisons the writer even when
+    /// it is `Unencodable`.
     pub(super) fn commit(&mut self) -> Result<()> {
-        let Some(mut p) = self.pending.take() else { return Ok(()) };
+        let Some(p) = self.pending.take() else { return Ok(()) };
+        let r = self.write_start_tag(p);
+        if r.is_err() {
+            self.poisoned = true;
+        }
+        r
+    }
+
+    fn write_start_tag(&mut self, mut p: Pending) -> Result<()> {
         self.open_element(
             p.term,
             p.code,
@@ -419,6 +432,8 @@ impl<S: Sink> Writer<'_, S> {
                 marked |= local;
                 self.write_ns(&pre, &uri, local)?;
             }
+            self.unmarked =
+                (!marked).then(|| (el_prefix.into(), (*name.uri).into()));
         }
         // Schema-informed streams sort attributes, undeclared elements'
         // too (EXIficient does; any order is valid in built-in

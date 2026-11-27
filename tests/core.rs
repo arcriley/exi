@@ -476,3 +476,377 @@ fn independent_documents_on_reused_codec() -> exi::Result<()> {
     );
     Ok(())
 }
+
+/// Events of `bytes`, reading through `Reader::buffer` and
+/// `Reader::commit` a few octets at a time.
+fn read_committed<const N: usize>(
+    r: &mut Reader<'_, N>,
+    bytes: &[u8],
+) -> exi::Result<Vec<OwnedEvent>> {
+    let mut rest = bytes;
+    let mut out = Vec::new();
+    loop {
+        let buf = r.buffer();
+        let n = buf.len().min(rest.len()).min(7);
+        buf[..n].copy_from_slice(&rest[..n]);
+        r.commit(n);
+        rest = &rest[n..];
+        if rest.is_empty() {
+            r.end_input();
+        }
+        match r.next()? {
+            Step::Event(e, _) => out.push(e.to_owned()),
+            Step::NeedInput => {}
+            Step::End => return Ok(out),
+        }
+    }
+}
+
+#[test]
+fn buffer_and_commit_while_an_event_spills() -> exi::Result<()> {
+    let strings = GlobalStrings::new(GlobalConfig::new())?;
+    let set = GrammarSet::schemaless();
+    let grammars = set.attach(&strings)?;
+    let opts = Options::builder().coding(Coding::ByteAligned).build()?;
+    let text = "y".repeat(300); // larger than the 64-octet ring
+    let mut w =
+        Writer::new(Vec::new(), WriterConfig::new(opts.clone(), &grammars))?;
+    w.start_element("r")?;
+    for _ in 0..2 {
+        w.start_element("a")?;
+        w.text(text.as_str())?; // the second: a hit after the spill
+        w.end_element()?;
+    }
+    w.end_element()?;
+    w.end_document()?;
+    let bytes = w.into_sink();
+    let mut r = Reader::<64>::new(ReaderConfig::new(&grammars))?;
+    let events = read_committed(&mut r, &bytes)?;
+    let long = OwnedEvent::Characters(OwnedValue::Str(text.into()));
+    assert_eq!(events.iter().filter(|e| **e == long).count(), 2);
+    Ok(())
+}
+
+/// `<r><skip k="v"><x:in xmlns:x="urn:x">v</x:in><sc>v</sc></skip>
+/// <after k="v">v</after></r>`, with `<sc>` self-contained: values
+/// learned inside the skipped element are hits afterwards.
+#[test]
+fn skip_element_keeps_the_string_tables() -> exi::Result<()> {
+    let strings = GlobalStrings::new(GlobalConfig::new())?;
+    let set = GrammarSet::schemaless();
+    let grammars = set.attach(&strings)?;
+    let opts = Options::builder()
+        .coding(Coding::ByteAligned)
+        .preserve(Preserve::PREFIXES)
+        .self_contained(true)
+        .build()?;
+    let mut w = Writer::new(Vec::new(), WriterConfig::new(opts, &grammars))?;
+    w.start_element("r")?;
+    w.start_element("skip")?;
+    w.attribute("k", "v")?;
+    w.start_element(exi::Name::new("urn:x", "in").with_prefix("x"))?;
+    w.namespace("x", "urn:x")?;
+    w.text("v")?;
+    w.end_element()?;
+    w.start_element("sc")?;
+    w.event(&Event::SelfContained)?;
+    w.text("v")?;
+    w.end_element()?;
+    w.end_element()?;
+    w.start_element("after")?;
+    w.attribute("k", "v")?;
+    w.text("v")?;
+    w.end_element()?;
+    w.end_element()?;
+    w.end_document()?;
+    let bytes = w.into_sink();
+
+    for (skipped, depth) in [("skip", 1), ("sc", 2), ("in", 2)] {
+        let mut r: Reader = Reader::new(ReaderConfig::new(&grammars))?;
+        r.feed(&bytes);
+        r.end_input();
+        let mut names = Vec::new();
+        let mut values = Vec::new();
+        loop {
+            let skip = match r.next()? {
+                Step::Event(Event::StartElement(n), _) => {
+                    names.push(n.local_name().to_owned());
+                    n.local_name() == skipped
+                }
+                Step::Event(Event::Attribute(_, v), _)
+                | Step::Event(Event::Characters(v), _) => {
+                    values.push(v.as_str().unwrap().to_owned());
+                    false
+                }
+                Step::Event(..) => false,
+                _ => break,
+            };
+            if skip {
+                assert_eq!(r.skip_element()?, Status::End);
+                assert_eq!(r.depth(), depth, "after skipping {skipped}");
+            }
+        }
+        assert_eq!(names.last().unwrap(), "after");
+        assert!(values.ends_with(&["v".into(), "v".into()]));
+    }
+    Ok(())
+}
+
+/// `next` between `NeedInput` and the next `skip_element` gives up the
+/// skip: a later skip starts from the element open then.
+#[test]
+fn next_gives_up_an_unfinished_skip() -> exi::Result<()> {
+    let strings = GlobalStrings::new(GlobalConfig::new())?;
+    let set = GrammarSet::schemaless();
+    let grammars = set.attach(&strings)?;
+    let opts = Options::builder().coding(Coding::ByteAligned).build()?;
+    let cfg = WriterConfig::new(opts.clone(), &grammars)
+        .header(Header::Bare { cookie: false });
+    let mut w = Writer::new(Vec::new(), cfg)?;
+    // <r><a/><c><d><e/></d><f/></c></r>, cut after <a>
+    w.start_element("r")?;
+    w.start_element("a")?;
+    w.flush()?;
+    let cut = 1 + w.position().byte as usize; // the header is one octet
+    w.end_element()?;
+    w.start_element("c")?;
+    w.start_element("d")?;
+    w.start_element("e")?;
+    w.end_element()?;
+    w.end_element()?;
+    w.start_element("f")?;
+    w.end_element()?;
+    w.end_element()?;
+    w.end_element()?;
+    w.end_document()?;
+    let bytes = w.into_sink();
+
+    let mut r = Reader::<64>::new(ReaderConfig::new(&grammars).options(opts))?;
+    r.feed(&bytes[..cut]);
+    while let Step::Event(..) = r.next()? {}
+    assert_eq!(r.depth(), 2); // in <a>
+    assert_eq!(r.skip_element()?, Status::NeedInput);
+    r.feed(&bytes[cut..]);
+    r.end_input();
+    loop {
+        match r.next()? {
+            Step::Event(Event::StartElement(n), _)
+                if n.local_name() == "d" =>
+            {
+                break;
+            }
+            Step::Event(..) => {}
+            _ => panic!("no <d>"),
+        }
+    }
+    assert_eq!(r.skip_element()?, Status::End); // skips <d> only
+    assert!(matches!(
+        r.next()?,
+        Step::Event(Event::StartElement(n), _) if n.local_name() == "f"
+    ));
+    Ok(())
+}
+
+/// Rule 4 of the writer: an `xmlns` attribute after `flush` still gives
+/// the element its prefix.
+#[test]
+fn xmlns_attribute_after_flush_keeps_the_prefix() -> exi::Result<()> {
+    let strings = GlobalStrings::new(GlobalConfig::new())?;
+    let set = GrammarSet::schemaless();
+    let grammars = set.attach(&strings)?;
+    let opts = Options::builder()
+        .coding(Coding::ByteAligned)
+        .preserve(Preserve::PREFIXES)
+        .build()?;
+    let xmlns = exi::Name::new("http://www.w3.org/2000/xmlns/", "p");
+    let mut seen = Vec::new();
+    for flush in [false, true] {
+        let mut w = Writer::new(
+            Vec::new(),
+            WriterConfig::new(opts.clone(), &grammars),
+        )?;
+        w.start_element(exi::Name::new("urn:a", "el").with_prefix("p"))?;
+        if flush {
+            w.flush()?;
+        }
+        w.attribute(xmlns, "urn:a")?;
+        w.end_element()?;
+        w.end_document()?;
+        let mut r = Reader::<64>::new(ReaderConfig::new(&grammars))?;
+        seen.push(read_all(&mut r, &w.into_sink(), 64)?);
+    }
+    let el = OwnedName::new("urn:a", "el").with_prefix("p");
+    assert_eq!(seen[1][1], OwnedEvent::StartElement(el));
+    assert_eq!(seen[0], seen[1]);
+    Ok(())
+}
+
+/// `Sequence::Streams`: each stream takes the options of its own
+/// header, or `ReaderConfig::options` for a bare one, never the
+/// previous stream's. Input that ends inside a later stream is
+/// truncated.
+#[cfg(all(feature = "bit-packed", feature = "compression"))]
+#[test]
+fn streams_with_mixed_headers_and_codings() -> exi::Result<()> {
+    let strings = GlobalStrings::new(GlobalConfig::new())?;
+    let set = GrammarSet::schemaless();
+    let grammars = set.attach(&strings)?;
+    let byte = Options::builder().coding(Coding::ByteAligned).build()?;
+    let streams = [
+        (Coding::BitPacked, Header::WithOptions { cookie: true }),
+        (Coding::Compression, Header::WithOptions { cookie: false }),
+        (Coding::ByteAligned, Header::Bare { cookie: false }),
+    ];
+    let mut bytes = Vec::new();
+    for (i, (coding, header)) in streams.into_iter().enumerate() {
+        let opts = Options::builder().coding(coding).build()?;
+        let cfg = WriterConfig::new(opts, &grammars).header(header);
+        let mut w = Writer::new(Vec::new(), cfg)?;
+        w.start_element("s")?;
+        w.text(stream_text(i).as_str())?;
+        w.end_element()?;
+        w.end_document()?;
+        bytes.extend(w.into_sink());
+    }
+    let cfg =
+        ReaderConfig::new(&grammars).options(byte).sequence(Sequence::Streams);
+
+    let mut r: Reader = Reader::new(cfg.clone())?;
+    r.feed(&bytes);
+    r.end_input();
+    let mut texts = Vec::new();
+    let mut codings = Vec::new();
+    loop {
+        match r.next()? {
+            Step::Event(Event::StartDocument, _) => {
+                codings.push(r.options().unwrap().coding());
+            }
+            Step::Event(Event::Characters(v), _) => {
+                texts.push(v.as_str().unwrap().to_owned());
+            }
+            Step::Event(..) => {}
+            _ => break,
+        }
+    }
+    assert_eq!(codings, streams.map(|(c, _)| c));
+    assert_eq!(texts, (0..3).map(stream_text).collect::<Vec<_>>());
+
+    let mut r: Reader = Reader::new(cfg)?;
+    r.feed(&bytes[..bytes.len() - 1]); // the third stream lacks its ED
+    r.end_input();
+    let e = loop {
+        match r.next() {
+            Ok(Step::Event(..)) => {}
+            Ok(s) => panic!("{s:?} before the end"),
+            Err(e) => break e,
+        }
+    };
+    assert_eq!(e.kind(), ErrorKind::Truncated);
+    Ok(())
+}
+
+fn stream_text(i: usize) -> String {
+    format!("stream {i}")
+}
+
+/// One step of a canonical-EXI test document.
+enum Ev<'a> {
+    Se(&'a str),
+    Space(&'a str), // xml:space
+    Text(Value<'a>),
+    Comment,
+    Pi,
+    Ee,
+}
+
+/// `events` written with or without `WriterConfig::canonical`.
+fn write_doc(canonical: bool, events: &[Ev<'_>]) -> exi::Result<Vec<u8>> {
+    let strings = GlobalStrings::new(GlobalConfig::new())?;
+    let set = GrammarSet::schemaless();
+    let grammars = set.attach(&strings)?;
+    let opts = Options::builder().coding(Coding::ByteAligned).build()?;
+    let cfg = WriterConfig::new(opts, &grammars).canonical(canonical);
+    let mut w = Writer::new(Vec::new(), cfg)?;
+    let space =
+        exi::Name::new("http://www.w3.org/XML/1998/namespace", "space")
+            .with_prefix("xml");
+    for e in events {
+        match e {
+            Ev::Se(n) => w.start_element(*n)?,
+            Ev::Space(v) => w.attribute(space, *v)?,
+            Ev::Text(v) => w.event(&Event::Characters(*v))?,
+            Ev::Comment => w.comment("c")?,
+            Ev::Pi => w.event(&Event::ProcessingInstruction {
+                target: "p",
+                data: "d",
+            })?,
+            Ev::Ee => w.end_element()?,
+        }
+    }
+    w.end_document()?;
+    Ok(w.into_sink())
+}
+
+fn s(t: &str) -> Ev<'_> {
+    Ev::Text(Value::Str(t))
+}
+
+/// Canonical EXI: a comment or PI the options leave out joins the text
+/// around it into one CH.
+#[test]
+fn canonical_text_joins_across_dropped_comments_and_pis() -> exi::Result<()> {
+    use Ev::*;
+    let canonical =
+        write_doc(true, &[Se("a"), s("x"), Comment, s("y"), Pi, s("z"), Ee])?;
+    assert_eq!(canonical, write_doc(false, &[Se("a"), s("xyz"), Ee])?);
+    Ok(())
+}
+
+/// Canonical EXI: a typed value followed by text is one CH, written as
+/// text.
+#[test]
+fn canonical_typed_value_joins_following_text() -> exi::Result<()> {
+    use Ev::*;
+    let canonical =
+        write_doc(true, &[Se("a"), Ev::Text(Value::Int(1)), s("2"), Ee])?;
+    assert_eq!(canonical, write_doc(false, &[Se("a"), s("12"), Ee])?);
+    Ok(())
+}
+
+/// Canonical EXI: whitespace between elements is dropped, except under
+/// `xml:space="preserve"`, which children inherit until one says
+/// `default`.
+#[test]
+#[rustfmt::skip]
+fn canonical_whitespace_and_xml_space() -> exi::Result<()> {
+    use Ev::*;
+    let canonical = write_doc(
+        true,
+        &[
+            Se("r"), s("\n "),
+            Se("p"), Space("preserve"), s("\n "),
+            Se("i"), s("\n "), Se("b"), Ee, s("\n "), Ee, // inherits
+            s("\n "),
+            Se("q"), Space("default"), s("\n "), Se("b"), Ee, s("\n "), Ee,
+            s("\n "),
+            Ee,
+            s("\n"),
+            Ee,
+        ],
+    )?;
+    let expected = write_doc(
+        false,
+        &[
+            Se("r"),
+            Se("p"), Space("preserve"), s("\n "),
+            Se("i"), s("\n "), Se("b"), Ee, s("\n "), Ee,
+            s("\n "),
+            Se("q"), Space("default"), Se("b"), Ee, Ee,
+            s("\n "),
+            Ee,
+            Ee,
+        ],
+    )?;
+    assert_eq!(canonical, expected);
+    Ok(())
+}

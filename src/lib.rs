@@ -8,6 +8,9 @@
 // are welcome only if this notice remains unchanged clearly
 // communicating that changes are made under these same conditions.
 //
+//! W3C EXI 1.0 (Efficient XML Interchange) streams in and out: events
+//! (layer 1), a document tree (layer 2, feature `dom`) and a C ABI.
+//!
 //! The doc comments are the specification the bodies are written from;
 //! each item's examples are its unit tests.
 //!
@@ -15,12 +18,12 @@
 //!
 //! | Included | Later |
 //! |---|---|
-//! | Header and options documents | |
+//! | Header and options documents | EXI Profile parameters; datatype representation maps and user meta-data in the options document |
 //! | Bit-packed (`bit-packed`) and byte-aligned bodies | |
 //! | Pre-compression and DEFLATE compression (`compression`, through flate2) | |
 //! | Schema-less streams, built-in grammars that learn | |
-//! | Schema-informed streams, with or without `strict` | |
-//! | Self-contained elements, fragments, frames | EXI Profile, datatype maps |
+//! | Schema-informed streams, with or without `strict` | `schemaId ""` (built-in types only) |
+//! | Self-contained elements, fragments, frames | `selfContained` in schema-informed streams without `strict`; element fragment grammars |
 //! | Canonical EXI (`canonical`, [`WriterConfig::canonical`]) | |
 //! | `.exig` grammar files (feature `exig`) | |
 //! | The XSD compiler (`xsd`) | |

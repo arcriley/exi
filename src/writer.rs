@@ -42,7 +42,12 @@
 //!    cannot hold, a missing required attribute before content —
 //!    returns `ErrorKind::Unencodable`. Nothing is written and nothing
 //!    changes; the writer stays usable. The caller skips the event (for
-//!    a start element, the whole element) and carries on.
+//!    a start element, the whole element) and carries on. A buffered
+//!    start tag (rule 2) is written before the next event is matched,
+//!    because what may follow depends on the whole tag. When the
+//!    element's type has sub-types, its attributes are checked only
+//!    then (an `xsi:type` could still come), and a refusal there
+//!    poisons the writer: the SE is already written.
 //! 8. **Insignificant whitespace** (schema-informed): character data
 //!    that is all XML whitespace, where the state has no CH production,
 //!    is dropped. Indentation between elements of element-only content
@@ -782,6 +787,9 @@ pub struct Writer<'g, S: Sink> {
     /// The innermost open element has had no content yet: attributes
     /// may still come.
     in_start: bool,
+    /// With `Preserve.prefixes`: the prefix and URI of that element
+    /// while no NS event has been marked `local_element_ns` for it.
+    unmarked: Option<(String, String)>,
     /// Namespace bindings in scope, for QName values given as text:
     /// prefix, URI, depth.
     bindings: Vec<(String, String, u32)>,
@@ -940,6 +948,7 @@ impl<'g, S: Sink> Writer<'g, S> {
             pending: None,
             spare_attrs: Vec::new(),
             in_start: false,
+            unmarked: None,
             bindings: Vec::new(),
             events: 0,
             frame_ready: false,
@@ -1098,8 +1107,8 @@ impl<'g, S: Sink> Writer<'g, S> {
         }
     }
     /// Starts a new stream with the same configuration and returns
-    /// the old sink. Clears learned grammars, session tables, and any
-    /// poisoned state.
+    /// the old sink. Clears learned grammars, session tables, deviation
+    /// counts, and any poisoned state.
     ///
     /// ```
     /// use exi::{Coding, EventSink, Options, Writer, WriterConfig};
@@ -1134,13 +1143,20 @@ impl<'g, S: Sink> Writer<'g, S> {
         self.st = st;
         self.started = false;
         self.poisoned = false;
-        self.pending = None;
+        if let Some(mut p) = self.pending.take() {
+            p.attrs.clear();
+            self.spare_attrs = p.attrs;
+        }
         self.in_start = false;
+        self.unmarked = None;
         self.bindings.clear();
         self.events = 0;
         self.frame_ready = false;
         self.ctext = None;
         self.canonical_elements.clear();
+        if let Some(d) = &mut self.deviations {
+            *d = Deviations::default();
+        }
         old.into_sink().sink
     }
     /// The sink, with everything written to it.
@@ -1573,6 +1589,7 @@ impl<'g, S: Sink> Writer<'g, S> {
     ) -> Result<()> {
         let (term, code) = self.start_production(name)?;
         self.open_element(term, code, Some(name))?;
+        self.unmarked = None; // the last commit's element is not this one
         self.events += 1;
         for (local, value) in attrs {
             self.write_attr(Name::local(local), &Value::Str(&value))?;
@@ -1642,11 +1659,16 @@ impl<'g, S: Sink> Writer<'g, S> {
                         self.st.depth(),
                     ));
                     if self.st.prefixes() {
-                        return self.write_ns(
-                            ns.prefix,
-                            ns.uri,
-                            ns.local_element_ns,
-                        );
+                        // As in a buffered start tag: the first NS
+                        // event for the element's own prefix and URI.
+                        let local =
+                            self.unmarked.as_ref().is_some_and(|(p, u)| {
+                                p == ns.prefix && u == ns.uri
+                            });
+                        if local {
+                            self.unmarked = None;
+                        }
+                        return self.write_ns(ns.prefix, ns.uri, local);
                     }
                     return Ok(());
                 }

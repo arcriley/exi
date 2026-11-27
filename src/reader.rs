@@ -71,10 +71,13 @@
 //! # Limits and errors
 //!
 //! Every [`Limits`] field the reader checks is checked before
-//! allocating. Input that ends inside an event after `end_input` is
-//! `ErrorKind::Truncated`; events already returned remain valid. After
-//! any error the reader is poisoned: every later call to `next` returns
-//! `ErrorKind::State`.
+//! allocating. An event larger than the ring is held whole until it is
+//! complete, up to 4 × `max_value_chars` octets (or `max_binary_bytes`)
+//! plus 64 KiB; a larger one, such as a DOCTYPE with several long
+//! parts, is `ErrorKind::Limit`. Input that ends inside an event after
+//! `end_input` is `ErrorKind::Truncated`; events already returned
+//! remain valid. After any error the reader is poisoned: every later
+//! call to `next` returns `ErrorKind::State`.
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
@@ -891,6 +894,7 @@ impl<'g, const N: usize> Reader<'g, N> {
     /// ```
     #[allow(clippy::should_implement_trait)] // events borrow the reader: not an Iterator
     pub fn next(&mut self) -> Result<Step<'_>> {
+        self.skip_to = None;
         self.step()
     }
     /// The stream's options, once the header has been read.
@@ -963,7 +967,8 @@ impl<'g, const N: usize> Reader<'g, N> {
     ///
     /// Returns `Status::End` once the element's EE has been read (or
     /// the stream ended), and `Status::NeedInput` when input runs out
-    /// first: give more and call it again.
+    /// first: give more and call it again. Calling `next` instead gives
+    /// up the skip.
     ///
     /// ```
     /// use exi::{Coding, Event, Options, Reader, ReaderConfig, Status, Step};
@@ -1077,11 +1082,14 @@ impl<'g, const N: usize> Reader<'g, N> {
 
 impl<const N: usize> EventSource for Reader<'_, N> {
     fn next(&mut self) -> Result<Step<'_>> {
-        self.step()
+        Reader::next(self)
     }
 }
 
 impl<'g, const N: usize> Reader<'g, N> {
+    /// The most input one incomplete event may hold (module docs): the
+    /// longest string value in UTF-8, or the longest binary value, with
+    /// room for the event's code and names.
     fn spill_cap(&self) -> usize {
         let l = &self.cfg.limits;
         (l.get_max_value_chars() as usize)

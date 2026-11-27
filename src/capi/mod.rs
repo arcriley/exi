@@ -160,7 +160,7 @@ pub const EXI_E_UNENCODABLE: exi_status = -16;
 
 /// The ABI version: major in the high 16 bits, minor in the low 16.
 pub const EXI_ABI_MAJOR: u32 = 0;
-pub const EXI_ABI_MINOR: u32 = 12;
+pub const EXI_ABI_MINOR: u32 = 13;
 
 /// Feature bits from [`exi_features`].
 pub const EXI_FEAT_XML_TEXT: u64 = 1 << 1;
@@ -670,6 +670,8 @@ pub unsafe extern "C" fn exi_options_init(o: *mut exi_options) {
 ///     assert!(!why.is_null());
 ///     o.flags = 0; o.preserve = 0; o.coding = 9;                 // unknown constant
 ///     assert_eq!(exi_options_validate(&o, core::ptr::null_mut()), EXI_E_ARG);
+///     let unset = core::mem::zeroed::<exi_options>();              // size never set
+///     assert_eq!(exi_options_validate(&unset, core::ptr::null_mut()), EXI_E_ARG);
 /// }
 /// ```
 #[unsafe(no_mangle)]
@@ -753,7 +755,9 @@ pub unsafe extern "C" fn exi_strings_new(
 ) -> *mut exi_strings {
     guard(core::ptr::null_mut(), || {
         // SAFETY: the caller guarantees the pointer.
-        let c = unsafe { imp::read_sized(cfg) };
+        let Some(c) = (unsafe { imp::read_optional(cfg) }) else {
+            return core::ptr::null_mut();
+        };
         let mut g = crate::strings::GlobalConfig::new();
         if let Some(c) = c {
             match c.hash_bits {
@@ -1425,9 +1429,91 @@ pub unsafe extern "C" fn exi_reader_next(
     })
 }
 
+/// Decodes the rest of the current element without returning its
+/// events (`Reader::skip_element`): `EXI_OK` once its end is read,
+/// `EXI_NEED_INPUT` to be called again after more input. A call to
+/// `exi_reader_next` in between gives up the skip. `EXI_E_STATE` outside
+/// an element, and for XML text readers.
+///
+/// # Safety
+///
+/// `r` is live.
+///
+/// ```
+/// use exi::capi::*;
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
+/// use exi::{Coding, EventSink, Header, Options, Writer, WriterConfig};
+/// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+/// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+/// # let set = GrammarSet::schemaless();
+/// # let grammars = set.attach(&strings)?;
+/// let o = Options::builder().coding(Coding::ByteAligned).build()?;
+/// let cfg = WriterConfig::new(o, &grammars).header(Header::Bare { cookie: false });
+/// let mut w = Writer::new(Vec::new(), cfg)?;
+/// w.start_element("r")?;                                       // <r><a>x</a><b/></r>
+/// w.start_element("a")?;
+/// w.text("x")?;
+/// w.end_element()?;
+/// w.start_element("b")?;
+/// w.end_element()?;
+/// w.end_element()?;
+/// w.end_document()?;
+/// let doc = w.into_sink();
+/// unsafe {
+///     let r = exi_reader_new(&reader_config(&byte));
+///     exi_reader_feed(r, doc.as_ptr().cast(), doc.len(), EXI_FEED_FINAL, null_mut());
+///     let mut ev = core::mem::zeroed::<exi_event>();
+///     assert_eq!(exi_reader_skip_element(r), EXI_E_STATE);         // not in an element
+///     for _ in 0..3 { exi_reader_next(r, &mut ev); }               // SD, SE(r), SE(a)
+///     assert_eq!(exi_reader_skip_element(r), EXI_OK);              // past EE(a)
+///     exi_reader_next(r, &mut ev);
+///     assert_eq!((ev.r#type, *ev.name.local.ptr as u8), (EXI_EV_SE, b'b'));
+///     exi_reader_free(r);
+/// }
+/// # Ok::<(), exi::Error>(())
+/// ```
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn exi_reader_skip_element(
+    r: *mut exi_reader,
+) -> exi_status {
+    on_reader(r, |o| o.skip_element())
+}
+
+/// Starts a new stream with the same configuration, keeping the input
+/// buffer and other allocations; clears an error. `EXI_E_STATE` for XML
+/// text readers.
+///
+/// # Safety
+///
+/// `r` is live.
+///
+/// ```
+/// use exi::capi::*;
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
+/// unsafe {
+///     let r = exi_reader_new(&reader_config(&byte));
+///     let mut ev = core::mem::zeroed::<exi_event>();
+///     exi_reader_feed(r, [0x80u8, 0x04].as_ptr().cast(), 2, EXI_FEED_FINAL, null_mut());
+///     exi_reader_next(r, &mut ev);
+///     assert_eq!(exi_reader_next(r, &mut ev), EXI_E_GRAMMAR);
+///     assert_eq!(exi_reader_reset(r), EXI_OK);
+///     let a = [0x80u8, 0x01, 0x02, b'a', 0x00];
+///     exi_reader_feed(r, a.as_ptr().cast(), a.len(), EXI_FEED_FINAL, null_mut());
+///     let mut n = 0;
+///     while exi_reader_next(r, &mut ev) == EXI_OK { n += 1; }
+///     assert_eq!(n, 4);                                            // SD SE EE ED
+///     exi_reader_free(r);
+/// }
+/// ```
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn exi_reader_reset(r: *mut exi_reader) -> exi_status {
+    on_reader(r, |o| o.reset())
+}
+
 /// The stream's options once the header is read, else NULL. Valid while
 /// the reader lives; with `EXI_SEQ_STREAMS`, a later stream's header
-/// changes what it holds.
+/// changes what it holds. The C form is made on the first call and
+/// kept, so the reader is not `const` here.
 ///
 /// # Safety
 ///
@@ -1485,11 +1571,11 @@ pub unsafe extern "C" fn exi_reader_next(
 /// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exi_reader_options(
-    r: *const exi_reader,
+    r: *mut exi_reader,
 ) -> *const exi_options {
     guard(core::ptr::null(), || {
         // SAFETY: the caller guarantees a live reader.
-        let Some(o) = (unsafe { reader(r as *mut exi_reader) }) else {
+        let Some(o) = (unsafe { reader(r) }) else {
             return core::ptr::null();
         };
         let Some(now) = o.reader.options() else { return core::ptr::null() };
@@ -2022,6 +2108,39 @@ pub unsafe extern "C" fn exi_writer_end_frame(
         }
         s
     })
+}
+
+/// Starts a new stream with the same configuration, keeping
+/// allocations; clears an error. Output not yet taken is dropped.
+/// `EXI_E_STATE` for XML text writers.
+///
+/// # Safety
+///
+/// `w` is live.
+///
+/// ```
+/// use exi::capi::*;
+/// # #[allow(dead_code, unused_imports)] mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/doctest/c_api.rs")); } use fixture::*; #[allow(unused_variables)] let byte = byte();
+/// unsafe {
+///     let w = exi_writer_new(&writer_config(&byte));
+///     let write = |w| {
+///         exi_writer_start_element(w, s(""), s("a"));
+///         exi_writer_end_element(w);
+///         exi_writer_end_document(w);
+///         let (mut p, mut n) = (null(), 0);
+///         exi_writer_take(w, &mut p, &mut n);
+///         core::slice::from_raw_parts(p, n).to_vec()
+///     };
+///     let first = write(w);
+///     assert_eq!(exi_writer_end_document(w), EXI_E_STATE);       // ended
+///     assert_eq!(exi_writer_reset(w), EXI_OK);
+///     assert_eq!(write(w), first);
+///     exi_writer_free(w);
+/// }
+/// ```
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn exi_writer_reset(w: *mut exi_writer) -> exi_status {
+    on_writer(w, |o| o.reset())
 }
 
 /// With `write` NULL: the output accumulated so far, valid until the

@@ -220,7 +220,7 @@ Findings so far (synthetic XMPP data):
 
 ## C ABI
 
-- `EXI_ABI_MAJOR` 0, `EXI_ABI_MINOR` 12. Config structs grow only at the end.
+- `EXI_ABI_MAJOR` 0, `EXI_ABI_MINOR` 13. Config structs grow only at the end.
 - Status codes: `EXI_OK` 0, `EXI_END` 1, `EXI_NEED_INPUT` 2, negative codes one per
   `ErrorKind`.
 - Strings are `exi_str { ptr, len }`, UTF-8. Strings libexi returns also end with a NUL

@@ -25,7 +25,8 @@ fn run(args: &[&str], stdin: &[u8]) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    c.stdin.take().unwrap().write_all(stdin).unwrap();
+    // A command that fails may exit before reading its input.
+    let _ = c.stdin.take().unwrap().write_all(stdin);
     c.wait_with_output().unwrap()
 }
 

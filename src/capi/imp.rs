@@ -101,21 +101,55 @@ pub(super) unsafe fn str_of<'a>(s: exi_str) -> Option<&'a str> {
     core::str::from_utf8(bytes).ok()
 }
 
-/// Copies a config struct the caller compiled with `size` bytes into a
-/// zeroed full one.
+/// A config struct: it starts with `uint32_t size`, and all zero bytes
+/// are a valid value of it.
 ///
 /// # Safety
 ///
-/// `p` points to at least `size` readable bytes, where `size` is its
-/// first `u32`.
-pub(super) unsafe fn read_sized<T: Copy>(p: *const T) -> Option<T> {
+/// Only for `#[repr(C)]` structs whose first field is `size: u32` and
+/// whose fields are integers, raw pointers or `Option`s of fn pointers
+/// (no `bool`, references or `NonNull`).
+pub(super) unsafe trait Config: Copy {}
+
+// SAFETY: each is such a struct (see `src/capi/mod.rs`).
+unsafe impl Config for exi_options {}
+unsafe impl Config for exi_limits {}
+unsafe impl Config for exi_strings_config {}
+unsafe impl Config for exi_reader_config {}
+unsafe impl Config for exi_writer_config {}
+unsafe impl Config for exi_handlers {}
+
+/// Copies a config struct the caller compiled with `size` bytes into a
+/// zeroed full one. `None` for NULL, and for a `size` too small to
+/// hold the field itself: a struct whose `size` was never set.
+///
+/// # Safety
+///
+/// `p` is NULL or points to at least `size` readable bytes, where
+/// `size` is its first `u32`.
+pub(super) unsafe fn read_sized<T: Config>(p: *const T) -> Option<T> {
+    // SAFETY: the caller's contract.
+    unsafe { read_optional(p) }.flatten()
+}
+
+/// As `read_sized`, for a config that may be NULL: `Some(None)` for
+/// NULL (the defaults), `None` for a `size` never set.
+///
+/// # Safety
+///
+/// As `read_sized`.
+pub(super) unsafe fn read_optional<T: Config>(
+    p: *const T,
+) -> Option<Option<T>> {
     if p.is_null() {
-        return None;
+        return Some(None);
     }
     // SAFETY: every config struct starts with `uint32_t size`.
     let size = unsafe { *(p as *const u32) } as usize;
-    // SAFETY: all fields are integers, pointers or Options of fn
-    // pointers: zero is valid.
+    if size < core::mem::size_of::<u32>() {
+        return None;
+    }
+    // SAFETY: `T: Config`, so all zero bytes are a valid `T`.
     let mut out: T = unsafe { core::mem::zeroed() };
     let n = size.min(core::mem::size_of::<T>());
     // SAFETY: `p` has `size` readable bytes; `out` has
@@ -127,7 +161,7 @@ pub(super) unsafe fn read_sized<T: Copy>(p: *const T) -> Option<T> {
             n,
         )
     };
-    Some(out)
+    Some(Some(out))
 }
 
 // ----- options and limits -----
@@ -500,6 +534,14 @@ macro_rules! any_reader {
             pub fn options(&self) -> Option<&Options> {
                 match self { $( AnyReader::$v(r) => r.options(), )* _ => None }
             }
+            /// EXI readers only.
+            pub fn skip_element(&mut self) -> Option<crate::Result<crate::Status>> {
+                match self { $( AnyReader::$v(r) => Some(r.skip_element()), )* _ => None }
+            }
+            /// EXI readers only; `false` for XML text.
+            pub fn reset(&mut self) -> bool {
+                match self { $( AnyReader::$v(r) => { r.reset(); true } )* _ => false }
+            }
         }
     };
 }
@@ -507,30 +549,60 @@ macro_rules! any_reader {
 any_reader!(E64 X64 64, E256 X256 256, E1K X1K 1024, E4K X4K 4096, E16K X16K 16384, E64K X64K 65536);
 
 /// Storage for one event's C view, valid until the next call.
-#[derive(Default)]
+///
+/// Strings and binary values are copied into buffers kept from event to
+/// event: once they have grown, an event allocates nothing. Each copy
+/// has its own buffer, so a later copy never moves an earlier one; the
+/// pointers stay valid until `clear`. `Scratch` itself lives on the heap
+/// (in the reader, or boxed by the DOM), so `ns` keeps its address too.
 pub(super) struct Scratch {
-    strings: Vec<Box<[u8]>>,
+    buffers: Vec<Vec<u8>>,
+    used: usize,
     values: Vec<Box<[exi_value]>>,
-    bytes: Vec<Box<[u8]>>,
-    ns: Option<Box<exi_nsdecl>>,
+    ns: exi_nsdecl,
+}
+
+impl Default for Scratch {
+    fn default() -> Self {
+        let none = exi_str { ptr: core::ptr::null(), len: 0 };
+        Scratch {
+            buffers: Vec::new(),
+            used: 0,
+            values: Vec::new(),
+            ns: exi_nsdecl {
+                prefix: none,
+                uri: none,
+                local_element_ns: 0,
+                _pad: 0,
+            },
+        }
+    }
 }
 
 impl Scratch {
     pub fn clear(&mut self) {
-        self.strings.clear();
+        self.used = 0;
         self.values.clear();
-        self.bytes.clear();
-        self.ns = None;
+    }
+
+    /// A copy of `b` in the next free buffer, with `nul` after it.
+    fn copy(&mut self, b: &[u8], nul: bool) -> *const u8 {
+        if self.used == self.buffers.len() {
+            self.buffers.push(Vec::new());
+        }
+        let buf = &mut self.buffers[self.used];
+        self.used += 1;
+        buf.clear();
+        buf.extend_from_slice(b);
+        if nul {
+            buf.push(0);
+        }
+        buf.as_ptr()
     }
 
     /// A NUL-terminated copy.
     pub fn str(&mut self, s: &str) -> exi_str {
-        let mut b = Vec::with_capacity(s.len() + 1);
-        b.extend_from_slice(s.as_bytes());
-        b.push(0);
-        let b = b.into_boxed_slice();
-        let ptr = b.as_ptr().cast::<c_char>();
-        self.strings.push(b);
+        let ptr = self.copy(s.as_bytes(), true).cast::<c_char>();
         exi_str { ptr, len: s.len() }
     }
 
@@ -607,10 +679,8 @@ impl Scratch {
                 if kind == BinaryKind::Hex {
                     out.flags |= EXI_VF_HEX;
                 }
-                let copy: Box<[u8]> = b.into();
                 out.u.binary =
-                    exi_bytes { ptr: copy.as_ptr(), len: copy.len() };
-                self.bytes.push(copy);
+                    exi_bytes { ptr: self.copy(b, false), len: b.len() };
             }
             Value::DateTime(d) => {
                 out.r#type = EXI_V_DATETIME;
@@ -730,15 +800,14 @@ pub(super) fn event_to(
         }
         Event::Namespace(ns) => {
             out.r#type = EXI_EV_NS;
-            let d = Box::new(exi_nsdecl {
+            sc.ns = exi_nsdecl {
                 prefix: sc.str(ns.prefix),
                 uri: sc.str(ns.uri),
                 local_element_ns: ns.local_element_ns as u32,
                 _pad: 0,
-            });
-            out.ns = &*d;
+            };
+            out.ns = &sc.ns;
             out.ns_count = 1;
-            sc.ns = Some(d);
         }
         Event::Comment(c) => {
             out.r#type = EXI_EV_CM;
@@ -816,6 +885,36 @@ impl ReaderObj {
         self.last = Some(e);
         self.poisoned = true;
         s
+    }
+
+    /// Skips the rest of the current element (`Reader::skip_element`).
+    pub fn skip_element(&mut self) -> exi_status {
+        if self.poisoned {
+            return EXI_E_STATE;
+        }
+        self.scratch.clear();
+        match self.reader.skip_element() {
+            None => EXI_E_STATE,
+            Some(Ok(crate::Status::End)) => EXI_OK,
+            Some(Ok(crate::Status::NeedInput)) => EXI_NEED_INPUT,
+            // Outside an element: refused, nothing read.
+            Some(Err(e)) if e.kind() == ErrorKind::State => EXI_E_STATE,
+            Some(Err(e)) => self.fail(e),
+        }
+    }
+
+    /// A new stream with the same configuration (`Reader::reset`).
+    pub fn reset(&mut self) -> exi_status {
+        if !self.reader.reset() {
+            return EXI_E_STATE;
+        }
+        self.poisoned = false;
+        self.last = None;
+        self.last_msg = CString::default();
+        self.scratch.clear();
+        self.options = None;
+        self.options_keep.clear();
+        EXI_OK
     }
 
     /// The next event into `out`.
@@ -898,6 +997,26 @@ impl AnyWriter {
             AnyWriter::Exi(w) => w.sink_mut(),
             AnyWriter::Xml(w) => w.sink_mut(),
         }
+    }
+}
+
+impl WriterObj {
+    /// A new stream with the same configuration (`Writer::reset`).
+    /// Output not yet taken is dropped.
+    pub fn reset(&mut self) -> exi_status {
+        let AnyWriter::Exi(w) = &mut *self.writer else {
+            return EXI_E_STATE;
+        };
+        let fresh = match w.sink_mut() {
+            CSink::Callback(f, user, _) => CSink::Callback(*f, *user, None),
+            CSink::Buffer(_) => CSink::Buffer(Vec::new()),
+        };
+        w.reset(fresh);
+        self.poisoned = false;
+        self.last = None;
+        self.last_msg = CString::default();
+        self.taken.clear();
+        EXI_OK
     }
 }
 
@@ -984,12 +1103,12 @@ pub(super) unsafe fn writer_new(c: &exi_writer_config) -> Option<WriterObj> {
         ))
     } else {
         // SAFETY: the caller guarantees the pointers.
-        let o =
-            unsafe { read_sized(c.options) }.unwrap_or_else(default_options);
+        let o = unsafe { read_optional(c.options) }?
+            .unwrap_or_else(default_options);
         // SAFETY: as above.
         let opts = unsafe { options_from(&o) }.ok()?;
         // SAFETY: as above.
-        let limits = unsafe { read_sized(c.limits) }
+        let limits = unsafe { read_optional(c.limits) }?
             .map_or_else(Limits::new, |l| limits_from(&l));
         let cookie = c.header & EXI_HDR_COOKIE != 0;
         let header = if c.header & EXI_HDR_NO_OPTIONS != 0 {
@@ -1036,10 +1155,10 @@ pub(super) unsafe fn reader_new(c: &exi_reader_config) -> Option<ReaderObj> {
         return None;
     }
     // SAFETY: the caller guarantees the pointers.
-    let limits = unsafe { read_sized(c.limits) }
+    let limits = unsafe { read_optional(c.limits) }?
         .map_or_else(Limits::new, |l| limits_from(&l));
     // SAFETY: as above.
-    let options = match unsafe { read_sized(c.options) } {
+    let options = match unsafe { read_optional(c.options) }? {
         // SAFETY: as above.
         Some(o) => Some(unsafe { options_from(&o) }.ok()?),
         None => None,

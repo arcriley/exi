@@ -47,7 +47,7 @@ typedef int32_t exi_status;
 /* ----- version and features ----- */
 
 #define EXI_ABI_MAJOR 0
-#define EXI_ABI_MINOR 12
+#define EXI_ABI_MINOR 13
 
 #define EXI_FEAT_DEFLATE (1 << 0)
 #define EXI_FEAT_XML_TEXT (1 << 1)
@@ -221,7 +221,10 @@ typedef struct exi_event {
 /* "Not set" for the optional numeric options. */
 #define EXI_ABSENT UINT64_MAX
 
-/* Config structs start with `size` = sizeof the struct; zero fields mean the default. */
+/* Config structs start with `size` = sizeof the struct; a struct whose size is not set
+   (below 4) is refused. Zero fields mean the default, except value_max_length and
+   value_partition_capacity, where 0 is a real 0: exi_options_init sets them to
+   EXI_ABSENT. */
 typedef struct exi_options {
     uint32_t size;
     uint32_t coding;        /* EXI_CODING_* */
@@ -293,7 +296,8 @@ typedef struct exi_reader_config {
     const exi_options *options;
     exi_grammar_set *grammars;  /* NULL: schema-less */
     const exi_limits *limits;
-    exi_strings *strings;   /* NULL: private tables */
+    exi_strings *strings;   /* NULL: private tables, with their own copy of the
+                               schema's strings; share one to save memory */
     uint32_t input_buffer_size; /* 0 (4096), 64, 256, 1024, 4096, 16384 or 65536 */
     uint32_t _pad;
 } exi_reader_config;
@@ -340,7 +344,8 @@ typedef struct exi_writer_config {
     exi_write_fn write;     /* NULL: accumulate, see exi_writer_take */
     void *write_user;
     const exi_limits *limits;
-    exi_strings *strings;   /* NULL: private tables */
+    exi_strings *strings;   /* NULL: private tables, with their own copy of the
+                               schema's strings; share one to save memory */
 } exi_writer_config;
 
 /* ----- functions ----- */
@@ -376,7 +381,9 @@ EXI_API exi_status exi_reader_feed(exi_reader *r, const void *data, size_t len,
 EXI_API uint8_t *exi_reader_buffer(exi_reader *r, size_t *len);
 EXI_API exi_status exi_reader_commit(exi_reader *r, size_t n);
 EXI_API exi_status exi_reader_next(exi_reader *r, exi_event *out);
-EXI_API const exi_options *exi_reader_options(const exi_reader *r);
+EXI_API exi_status exi_reader_skip_element(exi_reader *r);
+EXI_API exi_status exi_reader_reset(exi_reader *r);
+EXI_API const exi_options *exi_reader_options(exi_reader *r);
 EXI_API exi_status exi_reader_error(const exi_reader *r, const char **msg,
                                     uint64_t *byte_offset, uint64_t *event_index);
 EXI_API exi_status exi_reader_run(exi_reader *r, const exi_handlers *h, void *user);
@@ -392,6 +399,7 @@ EXI_API exi_status exi_writer_end_element(exi_writer *w);
 EXI_API exi_status exi_writer_end_document(exi_writer *w);
 EXI_API exi_status exi_writer_flush(exi_writer *w, uint32_t *pending_bits);
 EXI_API exi_status exi_writer_end_frame(exi_writer *w, const uint8_t **data, size_t *len);
+EXI_API exi_status exi_writer_reset(exi_writer *w);
 EXI_API exi_status exi_writer_take(exi_writer *w, const uint8_t **data, size_t *len);
 EXI_API exi_status exi_writer_error(const exi_writer *w, const char **msg);
 

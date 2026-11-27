@@ -70,6 +70,9 @@ pub type exiDtdPtr = *mut RawDtd;
 
 /// `XML_PARSE_NOBLANKS`: leave out whitespace-only text.
 pub const EXI_PARSE_NOBLANKS: c_int = 1 << 8;
+/// `XML_PARSE_NODICT`: accepted and ignored; libexi's names are always
+/// shared.
+pub const EXI_PARSE_NODICT: c_int = 1 << 12;
 
 // ----- thread defaults -----
 

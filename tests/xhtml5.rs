@@ -151,6 +151,7 @@ fn parsed_tags_match_the_event_writer_byte_for_byte() {
     for html in [
         include_str!("../fixtures/input/html/page.html"),
         include_str!("../fixtures/input/html/fragmentary.html"),
+        include_str!("../fixtures/input/html/media-and-forms.html"),
         "<p z='hi' id=a class=b id=c @click=go U000040click=ignored>",
         "<svg><use xlink:href='#p'/><foreignObject><p lang=en>X</p></foreignObject></svg>",
         "<template><table>outside<tr><td a='a\u{c}b'>中\u{ffff}</table></template>",
@@ -165,4 +166,90 @@ fn parsed_tags_match_the_event_writer_byte_for_byte() {
         assert!(report.iter().eq(writer.deviations().unwrap().iter()));
         assert_eq!(profile::encode(html, 1).unwrap(), writer.into_sink());
     }
+}
+
+#[test]
+fn unsupported_profile_version() {
+    use exi::{ErrorKind, Header};
+    let valid = profile::encode("<p>ok", 1).unwrap();
+    let header = Header::WithOptions { cookie: false };
+    for error in [
+        profile::options(2).unwrap_err(),
+        profile::encode("<p>ok", 2).unwrap_err(),
+        profile::encode_with("<p>ok", 2, header).unwrap_err(),
+        profile::decode(&valid, 2).unwrap_err(),
+        profile::report("<p>ok", 2).unwrap_err(),
+    ] {
+        assert_eq!(error.kind(), ErrorKind::Arg);
+    }
+}
+
+#[test]
+fn profile_rejects_schemaless_headers() {
+    use exi::grammar::GrammarSet;
+    use exi::strings::{GlobalConfig, GlobalStrings};
+    use exi::{
+        Coding, ErrorKind, EventSink, Header, Options, SchemaId, Writer,
+        WriterConfig,
+    };
+
+    let pool = GlobalStrings::new(GlobalConfig::new()).unwrap();
+    let set = GrammarSet::schemaless();
+    let g = set.attach(&pool).unwrap();
+    for id in [SchemaId::Nil, SchemaId::Absent] {
+        let options = Options::builder()
+            .coding(Coding::ByteAligned)
+            .schema_id(id)
+            .build()
+            .unwrap();
+        let config = WriterConfig::new(options, &g)
+            .header(Header::WithOptions { cookie: false });
+        let mut writer = Writer::new(Vec::new(), config).unwrap();
+        writer.start_element("p").unwrap();
+        writer.end_element().unwrap();
+        writer.end_document().unwrap();
+        assert_eq!(
+            profile::decode(&writer.into_sink(), 1).unwrap_err().kind(),
+            ErrorKind::Schema
+        );
+    }
+}
+
+#[test]
+fn profile_rejects_incomplete_pages_and_invalid_root_codes() {
+    use exi::{ErrorKind, Header};
+    let page = profile::encode_with(
+        "<p>hello",
+        1,
+        Header::WithOptions { cookie: true },
+    )
+    .unwrap();
+    for end in 0..page.len() {
+        assert_eq!(
+            profile::decode(&page[..end], 1).unwrap_err().kind(),
+            ErrorKind::Truncated,
+            "prefix of {end} bytes"
+        );
+    }
+    // Bare header followed by a root event outside the v1 document
+    // grammar.
+    assert_eq!(
+        profile::decode(&[0x80, 0xff], 1).unwrap_err().kind(),
+        ErrorKind::Grammar
+    );
+}
+
+#[test]
+fn v1_string_attributes_preserve_their_spelling() {
+    let html = "<table><tr><td colspan='02'>a<td colspan='not-a-number'>b";
+    let back = profile::decode(&profile::encode(html, 1).unwrap(), 1).unwrap();
+    assert!(back.contains(
+        r#"<td colspan="02">a</td><td colspan="not-a-number">b</td>"#
+    ));
+    assert!(
+        !profile::report(html, 1)
+            .unwrap()
+            .iter()
+            .any(|(_, _, name, _)| name == "{}colspan")
+    );
 }

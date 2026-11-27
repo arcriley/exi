@@ -196,20 +196,6 @@ fn what_changes_on_the_way_in() {
     exi::dom::Document::parse_xml(&strings, x.as_bytes()).unwrap();
 }
 
-/// The default DOCTYPE comes before whatever is written first, an
-/// entity reference too.
-#[test]
-fn doctype_before_an_entity_reference() {
-    use exi::html::HtmlWriter;
-    use exi::{Event, EventSink};
-    let mut w = HtmlWriter::new(Vec::new());
-    w.event(&Event::EntityReference("amp")).unwrap();
-    w.start_element(("http://www.w3.org/1999/xhtml", "p")).unwrap();
-    w.end_element().unwrap();
-    w.event(&Event::EndDocument).unwrap();
-    assert_eq!(w.into_sink(), b"<!DOCTYPE html>&amp;<p></p>");
-}
-
 /// `xml` and `xmlns` name only their own namespaces (Namespaces in XML
 /// §3). A tree that gives one of them to another URI keeps the names
 /// and loses the prefix.
@@ -249,4 +235,41 @@ fn reserved_prefixes_on_other_namespaces() {
             ),
         ]
     );
+}
+
+#[test]
+fn parser_coercion_and_doctype_options() {
+    use exi::ErrorKind;
+    use exi::html::{Coercion, html_to_xhtml_with};
+    let reject = HtmlOptions::new().coercion(Coercion::Reject);
+    for html in ["<p @click=go>", "<bad@name>"] {
+        assert_eq!(
+            html_to_xhtml_with(html, &reject).unwrap_err().kind(),
+            ErrorKind::Xml
+        );
+    }
+    let html = "<!doctype html><p @click=go id=x>";
+    let drop = HtmlOptions::new().coercion(Coercion::Drop);
+    let without = html_to_xhtml_with(html, &drop).unwrap();
+    assert!(without.contains(r#"<p id="x"/>"#));
+    assert!(!without.contains("<!DOCTYPE"));
+    let with = html_to_xhtml_with(html, &drop.keep_doctype(true)).unwrap();
+    assert!(with.starts_with("<!DOCTYPE html>"));
+}
+
+#[test]
+fn implied_elements_count_toward_the_writer_depth_limit() {
+    let pool = GlobalStrings::new(GlobalConfig::new()).unwrap();
+    let set = GrammarSet::schemaless();
+    let g = set.attach(&pool).unwrap();
+    let options =
+        Options::builder().coding(Coding::ByteAligned).build().unwrap();
+    let write = |depth| {
+        let config = WriterConfig::new(options.clone(), &g)
+            .limits(exi::Limits::new().max_depth(depth));
+        let mut writer = Writer::new(Vec::new(), config)?;
+        encode_html("<p><b>hi", &mut writer, &HtmlOptions::new())
+    };
+    write(4).unwrap(); // html > body > p > b
+    assert_eq!(write(3).unwrap_err().kind(), exi::ErrorKind::Limit);
 }

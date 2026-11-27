@@ -66,9 +66,10 @@
 //! | An attribute in a namespace (`xlink:href`, `xml:lang`) | a global attribute in that namespace's document |
 //!
 //! Indentation between elements is not text: it is whitespace only.
-//! Comments, PIs and `xsi:` attributes are not learned (`xsi:type` and
-//! `xsi:nil` are not declared in schemas, and strict streams cannot
-//! carry the others).
+//! `xsi:nil="true"` marks the element `nillable="true"` without
+//! widening its type to `string`; comments, PIs and other `xsi:`
+//! attributes are not learned (strict streams cannot carry comments or
+//! PIs, and `xsi:` attributes are not declared in schemas).
 //!
 //! Values get the narrowest type all of them fit, tried in this order:
 //! `boolean` (`true`/`false`), an integer type, `decimal`, `double`,
@@ -218,6 +219,8 @@ struct ElemStats {
     /// elements, or instances with text and instances with children.
     text_seen: bool,
     mixed: bool,
+    nillable: bool,
+    nilled: u64,
     model: Model,
 }
 
@@ -263,6 +266,7 @@ struct Frame {
     runs: Vec<(usize, u64)>,
     text: String,
     text_nonws: bool,
+    nilled: bool,
     attrs: Vec<usize>,
 }
 
@@ -351,12 +355,20 @@ impl Values {
             self.range = None;
         }
         if !self.many {
-            if !self.distinct.contains(v) {
-                self.distinct.insert(v.to_string());
-            }
-            if self.distinct.len() > max_enum {
+            let candidate = !v.is_empty()
+                && v.trim_matches(|c| {
+                    matches!(c, ' ' | '\t' | '\n' | '\r')
+                }) == v;
+            if !candidate {
                 self.many = true;
                 self.distinct.clear();
+            } else if !self.distinct.contains(v) {
+                if self.distinct.len() >= max_enum {
+                    self.many = true;
+                    self.distinct.clear();
+                } else {
+                    self.distinct.insert(v.to_string());
+                }
             }
         }
     }
@@ -480,6 +492,10 @@ impl SchemaInference {
         })?;
         let max_enum = self.max_enum;
         let e = &mut self.elements[f.elem];
+        if f.nilled {
+            e.nilled += 1;
+            return Ok(());
+        }
         if f.runs.is_empty() {
             e.text.add(&f.text, max_enum);
             if f.text_nonws {
@@ -659,6 +675,7 @@ impl SchemaInference {
         names: &mut BTreeSet<String>,
     ) {
         let _ = write!(out, "  <xs:element name=\"{}\"", esc(&e.local));
+        let nillable = if e.nillable { " nillable=\"true\"" } else { "" };
         let children = e.with_children > 0;
         let text_only = !children && e.text_seen;
         let mixed = children && (e.mixed || e.text_seen);
@@ -673,10 +690,10 @@ impl SchemaInference {
                 names,
                 prefix.get(&e.uri).map(String::as_str),
             );
-            out.push_str("/>\n");
+            let _ = writeln!(out, "{nillable}/>");
             return;
         }
-        out.push_str(">\n");
+        let _ = writeln!(out, "{nillable}>");
         if mixed {
             out.push_str("    <xs:complexType mixed=\"true\">\n");
         } else {
@@ -756,7 +773,9 @@ impl SchemaInference {
                         esc(&Self::qref(prefix, &ce.uri, &ce.local))
                     );
                     if order.is_some() {
-                        if m.present.get(&c).copied().unwrap_or(0) < e.count {
+                        if m.present.get(&c).copied().unwrap_or(0)
+                            < e.count - e.nilled
+                        {
                             out.push_str(" minOccurs=\"0\"");
                         }
                         if m.repeats.contains(&c) {
@@ -1084,6 +1103,7 @@ impl EventSink for SchemaInference {
                     runs: Vec::new(),
                     text: String::new(),
                     text_nonws: false,
+                    nilled: false,
                     attrs: Vec::new(),
                 });
             }
@@ -1096,6 +1116,20 @@ impl EventSink for SchemaInference {
             }
             Event::Attribute(n, v) => {
                 if n.uri() == XSI {
+                    if n.local_name() == "nil" {
+                        let text = crate::engine::lexical_string(&v)?;
+                        if matches!(lexical::parse_bool(&text), Some((true, _)))
+                        {
+                            let f = self.stack.last_mut().ok_or_else(|| {
+                                Error::new(
+                                    ErrorKind::State,
+                                    "an attribute outside an element",
+                                )
+                            })?;
+                            f.nilled = true;
+                            self.elements[f.elem].nillable = true;
+                        }
+                    }
                     return Ok(());
                 }
                 let text = crate::engine::lexical_string(&v)?;

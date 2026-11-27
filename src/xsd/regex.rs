@@ -252,6 +252,9 @@ mod tests {
         assert_eq!(set(r"[\sa-c]").as_deref(), Some("\t\n\r abc"));
         assert_eq!(set("[a-f-[c-d]]").as_deref(), Some("abef"));
         assert_eq!(set("[ab-]").as_deref(), Some("-ab")); // a final - is itself
+        assert_eq!(set("[-a-c]").as_deref(), Some("-abc")); // a leading - is itself
+        assert_eq!(set("[-]").as_deref(), Some("-"));
+        assert_eq!(set("[a-c-f]").as_deref(), Some("-abcf"));
         assert_eq!(set("[z-a]"), None); // a range backwards
         assert_eq!(set(r"[a-\s]"), None); // a range to a set
     }

@@ -532,3 +532,67 @@ fn patterns_give_restricted_character_sets() {
     assert!(with("[0-9]{3}").contains("0123456789"));
     assert!(!with(".*").contains("0123456789"));
 }
+
+#[test]
+fn cyclic_definitions_return_schema_error() {
+    let compile = |body: &str| GrammarSet::from_xsd(&schema("", body));
+    for body in [
+        // Cyclic model group (direct and mutual).
+        r#"<xs:group name="G"><xs:sequence><xs:group ref="G"/></xs:sequence></xs:group>
+           <xs:element name="r"><xs:complexType><xs:group ref="G"/></xs:complexType></xs:element>"#,
+        r#"<xs:group name="A"><xs:sequence><xs:group ref="B"/></xs:sequence></xs:group>
+           <xs:group name="B"><xs:sequence><xs:group ref="A"/></xs:sequence></xs:group>
+           <xs:element name="r"><xs:complexType><xs:group ref="A"/></xs:complexType></xs:element>"#,
+        // Cyclic attribute group (direct and mutual).
+        r#"<xs:attributeGroup name="AG"><xs:attributeGroup ref="AG"/></xs:attributeGroup>
+           <xs:element name="r"><xs:complexType><xs:attributeGroup ref="AG"/></xs:complexType></xs:element>"#,
+        r#"<xs:attributeGroup name="A"><xs:attributeGroup ref="B"/></xs:attributeGroup>
+           <xs:attributeGroup name="B"><xs:attributeGroup ref="A"/></xs:attributeGroup>
+           <xs:element name="r"><xs:complexType><xs:attributeGroup ref="A"/></xs:complexType></xs:element>"#,
+        // Cyclic complexType derivation.
+        r#"<xs:complexType name="A"><xs:complexContent><xs:extension base="B"/></xs:complexContent></xs:complexType>
+           <xs:complexType name="B"><xs:complexContent><xs:extension base="A"/></xs:complexContent></xs:complexType>"#,
+        r#"<xs:complexType name="A"><xs:simpleContent><xs:extension base="A"/></xs:simpleContent></xs:complexType>"#,
+        // Cyclic simpleType restriction and list.
+        r#"<xs:simpleType name="S"><xs:restriction base="S"/></xs:simpleType>"#,
+        r#"<xs:simpleType name="L"><xs:list itemType="L"/></xs:simpleType>"#,
+        // Cyclic substitutionGroup.
+        r#"<xs:element name="a" substitutionGroup="b"/>
+           <xs:element name="b" substitutionGroup="a"/>"#,
+    ] {
+        let e = compile(body).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::Schema, "{body}: {e}");
+    }
+
+    // Non-cyclic diamond/repeated group references still succeed.
+    let dag = compile(
+        r#"<xs:group name="Leaf"><xs:sequence><xs:element name="x" type="xs:int"/></xs:sequence></xs:group>
+           <xs:attributeGroup name="BaseAttr"><xs:attribute name="id" type="xs:int"/></xs:attributeGroup>
+           <xs:attributeGroup name="A1"><xs:attributeGroup ref="BaseAttr"/></xs:attributeGroup>
+           <xs:attributeGroup name="A2"><xs:attributeGroup ref="BaseAttr"/></xs:attributeGroup>
+           <xs:element name="r"><xs:complexType>
+             <xs:sequence><xs:group ref="Leaf"/><xs:group ref="Leaf"/></xs:sequence>
+             <xs:attributeGroup ref="A1"/><xs:attributeGroup ref="A2"/>
+           </xs:complexType></xs:element>"#,
+    )
+    .unwrap();
+    assert!(fits(&dag, r#"<r id="1"><x>1</x><x>2</x></r>"#));
+}
+
+#[test]
+fn all_with_group_and_wildcard() {
+    let set = GrammarSet::from_xsd(&schema(
+        "",
+        r#"<xs:group name="Pair"><xs:sequence>
+             <xs:element name="a" type="xs:int"/>
+             <xs:element name="b" type="xs:int"/>
+           </xs:sequence></xs:group>
+           <xs:element name="r"><xs:complexType><xs:all>
+             <xs:group ref="Pair"/>
+             <xs:element name="c" type="xs:int"/>
+           </xs:all></xs:complexType></xs:element>"#,
+    ))
+    .unwrap();
+    assert!(fits(&set, "<r><c>3</c><a>1</a><b>2</b></r>"));
+    assert!(fits(&set, "<r><b>2</b><c>3</c></r>"));
+}

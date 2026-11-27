@@ -96,7 +96,7 @@ use crate::grammar::{Grammars, Terminal};
 use crate::header::parse_header_split;
 use crate::input::InputRing;
 use crate::name::{GlobalName, Name};
-use crate::stream::{EventSource, Status, Step};
+use crate::stream::{EventSink, EventSource, Status, Step};
 use crate::tables::SessionTables;
 use crate::value::{OwnedValue, ValueFlags};
 use crate::{Coding, ErrorKind, Limits, NameId, Options, Result};
@@ -897,6 +897,75 @@ impl<'g, const N: usize> Reader<'g, N> {
         self.skip_to = None;
         self.step()
     }
+    /// Feeds all of `data`, calls [`end_input`](Self::end_input), and
+    /// sends every event to `sink` until `Step::End`.
+    ///
+    /// Handles inputs larger than the ring `N` by draining events as
+    /// octets are fed. When `data` fits in the ring, `end_input` is
+    /// marked before decoding begins.
+    ///
+    /// ```
+    /// use exi::{Coding, EventSink, Header, Options, OwnedEvent, Reader, ReaderConfig, Writer, WriterConfig};
+    /// # use exi::{grammar::GrammarSet, strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// # let set = GrammarSet::schemaless();
+    /// # let grammars = set.attach(&strings)?;
+    /// let byte = Options::builder().coding(Coding::ByteAligned).build()?;
+    /// let text = "x".repeat(200);
+    /// let mut w = Writer::new(Vec::new(), WriterConfig::new(byte.clone(), &grammars).header(Header::Bare { cookie: false }))?;
+    /// w.start_element("a")?;
+    /// w.text(text.as_str())?;
+    /// w.end_element()?;
+    /// w.end_document()?;
+    /// let stream = w.into_sink();
+    ///
+    /// let mut r = Reader::<64>::new(ReaderConfig::new(&grammars).options(byte))?;
+    /// let mut events: Vec<OwnedEvent> = Vec::new();
+    /// r.decode_all(&stream, &mut events)?;
+    /// assert_eq!(events.len(), 5);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
+    pub fn decode_all<K: EventSink + ?Sized>(
+        &mut self,
+        data: &[u8],
+        sink: &mut K,
+    ) -> Result<()> {
+        let mut rest = data;
+        while !rest.is_empty() {
+            let n = self.feed(rest);
+            rest = &rest[n..];
+            if rest.is_empty() {
+                break;
+            }
+            loop {
+                match self.next()? {
+                    Step::Event(ev, _) => sink.event(&ev)?,
+                    Step::NeedInput => break,
+                    Step::End => return Ok(()),
+                }
+            }
+            if n == 0 {
+                let m = self.feed(rest);
+                if m == 0 {
+                    break;
+                }
+                rest = &rest[m..];
+            }
+        }
+        self.end_input();
+        loop {
+            match self.next()? {
+                Step::Event(ev, _) => sink.event(&ev)?,
+                Step::NeedInput => {
+                    return Err(err(
+                        ErrorKind::Internal,
+                        "reader asked for input after end_input",
+                    ));
+                }
+                Step::End => return Ok(()),
+            }
+        }
+    }
     /// The stream's options, once the header has been read.
     ///
     /// ```
@@ -1077,6 +1146,44 @@ impl<'g, const N: usize> Reader<'g, N> {
         self.sc_se = false;
         self.sc_ed = false;
         self.suppress = false;
+    }
+    /// Starts a new stream with `grammars`, keeping the rest of the
+    /// configuration and allocations. Clears a poisoned state.
+    ///
+    /// ```
+    /// use exi::{Coding, EventSink, Header, Options, OwnedEvent, OwnedName, Reader, ReaderConfig, Writer, WriterConfig};
+    /// use exi::grammar::{GrammarSet, informed::Prod};
+    /// # use exi::{strings::{GlobalConfig, GlobalStrings}};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let schemaless = GrammarSet::schemaless();
+    /// let mut b = GrammarSet::builder();
+    /// let empty = b.complex_type(None, vec![vec![Prod::EE]]);
+    /// let ping = b.element(OwnedName::new("", "ping"), empty, false);
+    /// b.global(ping);
+    /// let informed = b.build()?;
+    /// let (g_less, g_inf) = (schemaless.attach(&strings)?, informed.attach(&strings)?);
+    ///
+    /// let strict = Options::builder().coding(Coding::ByteAligned).strict(true).build()?;
+    /// let mut w = Writer::new(Vec::new(), WriterConfig::new(strict, &g_inf).header(Header::WithOptions { cookie: false }))?;
+    /// w.start_element("ping")?;
+    /// w.end_element()?;
+    /// w.end_document()?;
+    /// let strict_bytes = w.into_sink();
+    ///
+    /// let mut r = Reader::<64>::new(ReaderConfig::new(&g_less))?;
+    /// let mut events: Vec<OwnedEvent> = Vec::new();
+    /// r.decode_all(&[0xA0, 0x00, 0x4A, 0x01, 0x02, b'a', 0x00], &mut events)?;
+    /// assert_eq!(events.len(), 4);
+    ///
+    /// r.reset_with_grammars(&g_inf);
+    /// events.clear();
+    /// r.decode_all(&strict_bytes, &mut events)?;
+    /// assert!(matches!(&events[1], OwnedEvent::StartElement(n) if n.as_name().local_name() == "ping"));
+    /// # Ok::<(), exi::Error>(())
+    /// ```
+    pub fn reset_with_grammars(&mut self, grammars: &'g Grammars<'g>) {
+        self.cfg.grammars = grammars;
+        self.reset();
     }
 }
 

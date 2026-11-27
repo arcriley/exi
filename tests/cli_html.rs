@@ -140,7 +140,7 @@ fn xhtml5_report_and_suggest() {
     let p = dir.join("odd.html");
     std::fs::write(
         &p,
-        r#"<!DOCTYPE html><p>a<blink>b</blink><ol start="3"><li>c</ol>"#,
+        r#"<!DOCTYPE html><p data-foo="1" aria-label="x">a<blink>b</blink><ol start="3"><li>c</ol>"#,
     )
     .unwrap();
     let p = p.to_str().unwrap();
@@ -156,6 +156,10 @@ fn xhtml5_report_and_suggest() {
         suggest.contains(r#"<xs:attribute name="start""#),
         "{suggest}"
     );
+    for name in ["data-foo", "aria-label"] {
+        assert!(report.contains(&format!("{{}}{name}")), "{report}");
+        assert!(!suggest.contains(name), "{suggest}");
+    }
     // A page on standard input, the report to a file.
     let page = std::fs::read(p).unwrap();
     let out = dir.join("report.txt");
@@ -169,6 +173,64 @@ fn xhtml5_report_and_suggest() {
 fn usage_errors() {
     let page = std::fs::read(PAGE).unwrap();
     assert!(err(&["encode", "--html", "--xhtml5", "-p", "comments"], &page).contains("--xhtml5"));
+    assert!(
+        err(
+            &["encode", "--html", "--xhtml5", "-s", "schemas/xhtml5-1.exig"],
+            &page
+        )
+        .contains("leave out -s")
+    );
     assert!(err(&["xhtml5", "report"], b"").contains("page"));
     assert!(err(&["xhtml5", "frob", PAGE], b"").contains("report or suggest"));
+}
+
+#[test]
+fn alternate_profile_codings_with_and_without_header_options() {
+    use exi::{Coding, Limits, SchemaId};
+    let html = b"<p>hello &amp; goodbye";
+    let want = b"<!DOCTYPE html><html><head></head><body><p>hello &amp; goodbye</p></body></html>";
+    for (flag, coding) in [
+        #[cfg(feature = "bit-packed")]
+        ("bit", Coding::BitPacked),
+        #[cfg(feature = "compression")]
+        ("pre", Coding::PreCompression),
+        #[cfg(feature = "compression")]
+        ("compression", Coding::Compression),
+        ("byte", Coding::ByteAligned),
+    ] {
+        let opts = ["encode", "--html", "--xhtml5", "-c", flag];
+        let stream = ok(&opts, html);
+        let header = exi::header::parse_header(&stream, &Limits::new())
+            .unwrap()
+            .unwrap();
+        let options = header.options.unwrap();
+        assert_eq!(options.coding(), coding);
+        assert_eq!(
+            options.schema_id(),
+            &SchemaId::Id(exi::html::profile::SCHEMA_V1.into())
+        );
+        assert_eq!(ok(&["decode", "--html"], &stream), want);
+        let bare = ok(&[&opts[..], &["--bare"]].concat(), html);
+        assert!(
+            exi::header::parse_header(&bare, &Limits::new())
+                .unwrap()
+                .unwrap()
+                .options
+                .is_none()
+        );
+        assert_eq!(
+            ok(&["decode", "--html", "--xhtml5", "-c", flag], &bare),
+            want
+        );
+    }
+}
+
+#[test]
+fn html_decode_requires_the_named_schema() {
+    let stream = ok(
+        &["encode", "--html", "-s", "schemas/xhtml5-1.exig", "--non-strict"],
+        b"<p>hello",
+    );
+    let error = err(&["decode", "--html"], &stream);
+    assert!(error.contains("sha256:") && error.contains("-s"), "{error}");
 }

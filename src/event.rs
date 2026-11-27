@@ -70,8 +70,10 @@ use crate::value::{OwnedValue, Value, ValueFlags};
 /// let owned = e.to_owned();
 /// assert_eq!(owned.as_event(), e);
 /// assert_eq!(Event::StartDocument.kind(), EventKind::SD);
+/// let same: exi::OwnedEvent = e.into();                  // `From` calls `to_owned`
+/// assert_eq!(same, owned);
 /// ```
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Event<'a> {
     StartDocument,
     EndDocument,
@@ -143,6 +145,18 @@ impl Event<'_> {
     }
 }
 
+impl From<Event<'_>> for OwnedEvent {
+    fn from(ev: Event<'_>) -> Self {
+        ev.to_owned()
+    }
+}
+
+impl From<&Event<'_>> for OwnedEvent {
+    fn from(ev: &Event<'_>) -> Self {
+        ev.to_owned()
+    }
+}
+
 /// A namespace declaration. `local_element_ns` is true on the
 /// declaration, if any, that gives the prefix of the element it belongs
 /// to; at most one NS event per element sets it, and its `uri` is then
@@ -193,7 +207,7 @@ pub enum EventKind {
 }
 
 /// [`Event`] with owned data.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OwnedEvent {
     StartDocument,
     EndDocument,

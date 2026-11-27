@@ -82,6 +82,21 @@ pub trait EventSource {
 /// Anything that consumes events.
 ///
 /// The provided methods build an event and pass it to [`event`](EventSink::event).
+/// They need a sized sink, so that `dyn EventSink` is possible. A
+/// `&mut dyn EventSink` calls `event` directly, and reaches the
+/// provided methods through the impl for `&mut K`:
+///
+/// ```
+/// use exi::{Event, EventSink, OwnedEvent};
+/// let mut v: Vec<OwnedEvent> = Vec::new();
+/// let mut sink: &mut dyn EventSink = &mut v;
+/// sink.event(&Event::StartDocument)?;
+/// (&mut sink).start_element("a")?;
+/// (&mut sink).end_element()?;
+/// (&mut sink).end_document()?;
+/// assert_eq!(v.len(), 4);
+/// # Ok::<(), exi::Error>(())
+/// ```
 ///
 /// `end_element` sends `EndElement` with an empty name, meaning "the
 /// open element". A sink receiving `EndElement` with a non-empty name
@@ -90,38 +105,112 @@ pub trait EventSource {
 pub trait EventSink {
     fn event(&mut self, ev: &Event<'_>) -> Result<()>;
 
-    fn start_element(&mut self, name: impl AsName) -> Result<()> {
+    fn start_document(&mut self) -> Result<()>
+    where
+        Self: Sized,
+    {
+        self.event(&Event::StartDocument)
+    }
+    fn end_document(&mut self) -> Result<()>
+    where
+        Self: Sized,
+    {
+        self.event(&Event::EndDocument)
+    }
+    fn start_element(&mut self, name: impl AsName) -> Result<()>
+    where
+        Self: Sized,
+    {
         self.event(&Event::StartElement(name.as_name()))
     }
-    fn attribute(
-        &mut self,
-        name: impl AsName,
-        v: impl IntoValue,
-    ) -> Result<()> {
+    fn attribute(&mut self, name: impl AsName, v: impl IntoValue) -> Result<()>
+    where
+        Self: Sized,
+    {
         self.event(&Event::Attribute(name.as_name(), v.to_value()))
     }
-    fn namespace(&mut self, prefix: &str, uri: &str) -> Result<()> {
+    /// Sends NS with `local_element_ns` false. To declare the prefix of
+    /// the element just started, send `Event::Namespace` with
+    /// `local_element_ns` true, so that the element keeps its prefix
+    /// (`crate::coding` names rules).
+    fn namespace(&mut self, prefix: &str, uri: &str) -> Result<()>
+    where
+        Self: Sized,
+    {
         self.event(&Event::Namespace(NsDecl {
             prefix,
             uri,
             local_element_ns: false,
         }))
     }
-    fn text(&mut self, v: impl IntoValue) -> Result<()> {
+    fn text(&mut self, v: impl IntoValue) -> Result<()>
+    where
+        Self: Sized,
+    {
         self.event(&Event::Characters(v.to_value()))
     }
-    fn comment(&mut self, text: &str) -> Result<()> {
+    fn comment(&mut self, text: &str) -> Result<()>
+    where
+        Self: Sized,
+    {
         self.event(&Event::Comment(text))
     }
     fn processing_instruction(
         &mut self,
         target: &str,
         data: &str,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        Self: Sized,
+    {
         self.event(&Event::ProcessingInstruction { target, data })
     }
-    fn end_element(&mut self) -> Result<()> {
+    fn end_element(&mut self) -> Result<()>
+    where
+        Self: Sized,
+    {
         self.event(&Event::EndElement(Name::local("")))
+    }
+}
+
+/// A borrowed source: lend a source to a function that takes one by
+/// value, or use `&mut dyn EventSource`.
+impl<S: EventSource + ?Sized> EventSource for &mut S {
+    fn next(&mut self) -> Result<Step<'_>> {
+        (**self).next()
+    }
+}
+
+impl<S: EventSource + ?Sized> EventSource for alloc::boxed::Box<S> {
+    fn next(&mut self) -> Result<Step<'_>> {
+        (**self).next()
+    }
+}
+
+/// A borrowed sink: lend a sink to a function that takes one by value,
+/// and use it again afterwards.
+///
+/// ```
+/// use exi::{EventSink, OwnedEvent};
+/// fn root(mut sink: impl EventSink) -> exi::Result<()> {
+///     sink.start_element("a")?;
+///     sink.end_element()
+/// }
+/// let mut v: Vec<OwnedEvent> = Vec::new();
+/// root(&mut v)?;
+/// root(&mut v)?;
+/// assert_eq!(v.len(), 4);
+/// # Ok::<(), exi::Error>(())
+/// ```
+impl<K: EventSink + ?Sized> EventSink for &mut K {
+    fn event(&mut self, ev: &Event<'_>) -> Result<()> {
+        (**self).event(ev)
+    }
+}
+
+impl<K: EventSink + ?Sized> EventSink for alloc::boxed::Box<K> {
+    fn event(&mut self, ev: &Event<'_>) -> Result<()> {
+        (**self).event(ev)
     }
 }
 
@@ -148,7 +237,7 @@ pub trait EventSink {
 /// # }
 /// # Ok::<(), exi::Error>(())
 /// ```
-pub fn transcode<S: EventSource, K: EventSink>(
+pub fn transcode<S: EventSource + ?Sized, K: EventSink + ?Sized>(
     src: &mut S,
     sink: &mut K,
 ) -> Result<Status> {

@@ -109,7 +109,7 @@ use crate::{Error, ErrorKind, Result};
 /// # Ok::<(), exi::Error>(())
 /// ```
 #[non_exhaustive]
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Value<'a> {
     Str(&'a str),
     Bool(bool),
@@ -240,6 +240,8 @@ impl PartialEq for ListRef<'_> {
             && self.iter().zip(other.iter()).all(|(a, b)| a == b)
     }
 }
+
+impl Eq for ListRef<'_> {}
 
 /// How a binary value is written as text.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -416,7 +418,7 @@ impl core::ops::BitOr for ValueFlags {
 
 /// [`Value`] with owned data.
 #[non_exhaustive]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OwnedValue {
     Str(Box<str>),
     Bool(bool),

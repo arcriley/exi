@@ -44,13 +44,13 @@ const HDR_BYTES: usize = size_of::<ChunkHeader>();
 const MAX_CHUNK_BYTES: usize = 256 * 1024;
 
 const _: () = {
-    assert!(HDR_BYTES % 8 == 0);
+    assert!(HDR_BYTES.is_multiple_of(8));
     assert!(align_of::<ElemBox>() <= 8);
     assert!(align_of::<AttrBox>() <= 8);
     assert!(align_of::<NodeBox>() <= 8);
-    assert!(size_of::<ElemBox>() % 8 == 0);
-    assert!(size_of::<AttrBox>() % 8 == 0);
-    assert!(size_of::<NodeBox>() % 8 == 0);
+    assert!(size_of::<ElemBox>().is_multiple_of(8));
+    assert!(size_of::<AttrBox>().is_multiple_of(8));
+    assert!(size_of::<NodeBox>().is_multiple_of(8));
 };
 
 fn alloc_chunk(min_bytes: usize) -> *mut ChunkHeader {

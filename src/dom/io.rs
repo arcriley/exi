@@ -336,12 +336,12 @@ impl<'g> DocumentBuilder<'g> {
             append_raw(parent, p);
             if name.uri().is_empty() {
                 self.doc.has_default_ns()
-            } else if !has_prefix
-                && let Some(par) = open
-                && (*par).uriId == (*el).uriId
-                && !(*par).ns.is_null()
-                && (*(*par).ns).prefix.is_null()
-            {
+            } else if let Some(par) = open.filter(|&par| {
+                !has_prefix
+                    && (*par).uriId == (*el).uriId
+                    && !(*par).ns.is_null()
+                    && (*(*par).ns).prefix.is_null()
+            }) {
                 // Same default namespace as parent; `ns_ev` will re-enable
                 // `pending` if this element declares namespaces of its own.
                 (*el).ns = (*par).ns;

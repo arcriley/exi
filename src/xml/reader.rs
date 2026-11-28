@@ -970,10 +970,9 @@ fn lookup_name_id(
     local: &str,
 ) -> Result<NameId> {
     let slot = name_cache_slot(u, local.as_bytes());
-    if let Some((cu, cid, clid)) = name_cache[slot]
-        && cu == u
-        && tables.local_str_by_id(clid) == local
-    {
+    if let Some((_, cid, _)) = name_cache[slot].filter(|&(cu, _, clid)| {
+        cu == u && tables.local_str_by_id(clid) == local
+    }) {
         return Ok(cid);
     }
     let l = match tables
@@ -2774,9 +2773,10 @@ impl<'g, const N: usize> XmlReader<'g, N> {
                 u
             };
             let slot = name_cache_slot(u, elocal_str.as_bytes());
-            if let Some((cu, cid, clid)) = self.name_cache[slot]
-                && cu == u
-                && self.tables.local_str_by_id(clid) == elocal_str
+            if let Some((_, cid, _)) =
+                self.name_cache[slot].filter(|&(cu, _, clid)| {
+                    cu == u && self.tables.local_str_by_id(clid) == elocal_str
+                })
             {
                 cid
             } else {
@@ -2823,9 +2823,10 @@ impl<'g, const N: usize> XmlReader<'g, N> {
                 (p_span, u)
             };
             let slot = name_cache_slot(u, l.as_bytes());
-            let aid = if let Some((cu, cid, clid)) = self.name_cache[slot]
-                && cu == u
-                && self.tables.local_str_by_id(clid) == l
+            let aid = if let Some((_, cid, _)) =
+                self.name_cache[slot].filter(|&(cu, _, clid)| {
+                    cu == u && self.tables.local_str_by_id(clid) == l
+                })
             {
                 cid
             } else {

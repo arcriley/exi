@@ -10,7 +10,7 @@ works, how the code is laid out, how to build and test it, the decisions already
 - The crate is `exi`; the shared library built from it is `libexi.so`.
 - Rust users depend on `exi`.
 - License `MIT OR Apache-2.0`.
-- Edition 2024, `rust-version = "1.85"`.
+- Edition 2024, `rust-version = "1.87"`.
 - One crate with features, no workspace.
 - The engine is `no_std + alloc` and always compiled; `std` adds I/O and conveniences.
 - Each layer should build on the one below:

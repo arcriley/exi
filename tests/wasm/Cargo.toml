@@ -9,7 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 exi = { path = "../..", default-features = false, features = ["bare-header-only"] }
-exi-esp32c6 = { path = "../../examples/esp32c6" }
+exi-esp32c6 = { path = "../../benches/esp32c6" }
 
 [profile.release]
 opt-level = "z"

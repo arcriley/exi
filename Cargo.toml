@@ -93,3 +93,9 @@ required-features = ["xhtml5", "html5ever"]
 name = "xml"
 harness = false
 required-features = ["std", "xml", "dom"]
+
+[[bench]]
+# cargo bench --bench esp32c6: build, flash, and benchmark XIAO ESP32-C6 on /dev/ttyACM0
+name = "esp32c6"
+harness = false
+required-features = ["std"]

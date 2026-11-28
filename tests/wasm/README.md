@@ -1,7 +1,7 @@
 # EXI WebAssembly integration tests
 
 The Playwright suite builds a test-only WebAssembly module with the fixed
-reading grammar from the [ESP32-C6 demo](../../examples/esp32c6/README.md).
+reading grammar from the [ESP32-C6 benchmark](../../benches/esp32c6/README.md).
 Each test loads it through `WebAssembly.instantiateStreaming` and passes
 EXI bytes between JavaScript and Wasm linear memory. Playwright supplies the
 page and the Wasm response, so the suite needs no web server.

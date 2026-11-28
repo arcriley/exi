@@ -1432,7 +1432,7 @@ fn numbers(v: &[u32]) -> OwnedValue {
 
 /// Writes the EXIG document `d` with the EXIG grammars `g`.
 fn write_doc(g: &GrammarSet, d: &Doc) -> Result<Vec<u8>> {
-    let strings = GlobalStrings::new(GlobalConfig::new())?;
+    let strings = GlobalStrings::new(GlobalConfig::new().chunk_bytes(1_024))?;
     let grammars = g.attach(&strings)?;
     let cfg = WriterConfig::new(exig_options(), &grammars)
         .header(Header::WithOptions { cookie: false });
@@ -1668,9 +1668,9 @@ impl Node {
 /// Reads an EXIG document; [`Doc::to_model`] and [`Model::build`] check
 /// it.
 fn read_doc(g: &GrammarSet, exig: &[u8], limits: Limits) -> Result<Doc> {
-    let strings = GlobalStrings::new(GlobalConfig::new())?;
+    let strings = GlobalStrings::new(GlobalConfig::new().chunk_bytes(1_024))?;
     let grammars = g.attach(&strings)?;
-    let mut r: Reader =
+    let mut r: Reader<'_, 512> =
         Reader::new(ReaderConfig::new(&grammars).limits(limits))?;
     // The strict EXIG grammars hold the document to the EXIG schema, so
     // this only collects it into a tree.

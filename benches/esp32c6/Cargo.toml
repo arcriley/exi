@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[features]
+default = []
+# Adds bit-packed coding, .exig grammar loading, and XML text comparison.
+extended = ["exi/bit-packed", "exi/exig", "exi/xml"]
+
 [dependencies]
 exi = { path = "../..", default-features = false, features = ["bare-header-only"] }
 

@@ -128,14 +128,32 @@ fn is_space(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | b'\r')
 }
 
+/// ASCII name bytes: `START` may begin an NCName, `NAME` may follow.
+const START: u8 = 1;
+const NAME: u8 = 2;
+static CLASS: [u8; 256] = {
+    let mut t = [0u8; 256];
+    let mut b = 0;
+    while b < 256 {
+        let c = b as u8;
+        if c.is_ascii_alphabetic() || c == b'_' {
+            t[b] = START | NAME;
+        } else if c.is_ascii_digit() || c == b'-' || c == b'.' {
+            t[b] = NAME;
+        }
+        b += 1;
+    }
+    t
+};
+
 #[inline]
 fn is_name_start(b: u8) -> bool {
-    b.is_ascii_alphabetic() || b == b'_'
+    CLASS[b as usize] & START != 0
 }
 
 #[inline]
 fn is_name_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')
+    CLASS[b as usize] & NAME != 0
 }
 
 /// Whether `c` is an XML `Char`.
@@ -208,7 +226,10 @@ pub(super) fn parse<'g>(
         xml
     };
     let mut doc = Document::new(strings);
-    doc.reserve_nodes(s.len() / 16);
+    // Each `<` begins a node and is usually followed by text; each `=`
+    // is an attribute and its text node. This slightly overestimates
+    // (1-10 % on the benchmark documents), so the table never grows.
+    doc.reserve_nodes(2 * (scan::count(s, b'<') + scan::count(s, b'=')));
     let no_uri = doc.intern_uri("").ok()?.index();
     let mut p = P {
         s,
@@ -233,6 +254,7 @@ pub(super) fn parse<'g>(
         limits,
     };
     p.document()?;
+    p.doc.shrink_slots();
     Some(p.doc)
 }
 
@@ -576,6 +598,8 @@ impl<'s, 'g> P<'s, 'g> {
             let ns = self.doc.declare_raw(el, (!prefix.is_empty()).then_some(pre), u).ok()?;
             // SAFETY: a new declaration.
             let uri_id = unsafe { (*ns).uriId };
+            // Held once here for every element and attribute in it.
+            self.doc.hold_uri(StrId::<Uri>::from_raw(uri_id));
             self.scopes.push(Scope { prefix, ns, uri: uri_id, empty: uri.is_empty() });
         }
         // The element's namespace.
@@ -593,7 +617,6 @@ impl<'s, 'g> P<'s, 'g> {
             (*el).uriId = uri;
             (*el).ns = ns;
         }
-        self.doc.hold_uri(StrId::<Uri>::from_raw(uri));
         // Attributes.
         let mut last: *mut RawAttr = ptr::null_mut();
         self.expanded.clear();
@@ -647,7 +670,6 @@ impl<'s, 'g> P<'s, 'g> {
                 }
             }
             last = ap;
-            self.doc.hold_uri(StrId::<Uri>::from_raw(uri));
             let v = value_of(&self.attrs, &self.values, k);
             // SAFETY: valid UTF-8 (input, or decoded from it).
             let v = unsafe { core::str::from_utf8_unchecked(v) };

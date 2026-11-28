@@ -595,6 +595,17 @@ impl<'g> Document<'g> {
         d.gens.reserve(additional);
     }
 
+    /// Gives back slot capacity a parse reserved but did not use, when
+    /// that is more than an eighth.
+    #[cfg(feature = "xml")]
+    pub(crate) fn shrink_slots(&mut self) {
+        let d = self.dm();
+        if d.ptrs.capacity() - d.ptrs.len() > d.ptrs.len() / 8 {
+            d.ptrs.shrink_to_fit();
+            d.gens.shrink_to_fit();
+        }
+    }
+
     fn reserve_slot(&mut self) -> u32 {
         let d = self.dm();
         match d.free.pop() {

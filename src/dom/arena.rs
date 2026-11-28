@@ -274,10 +274,10 @@ impl NodeArena {
 
     #[cold]
     fn text_slow(&mut self, need: usize) -> *mut u8 {
-        // The same growth schedule as node chunks: 4 KiB doubling to
-        // 256 KiB.
+        // 1 KiB doubling to 256 KiB: a small document with a few long
+        // values keeps a small arena.
         let n = self.text.len();
-        let cap = (4096usize << n.min(6))
+        let cap = (1024usize << n.min(8))
             .min(MAX_CHUNK_BYTES)
             .max(need.next_multiple_of(8));
         let base = block_alloc(cap);

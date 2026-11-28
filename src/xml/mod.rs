@@ -19,6 +19,7 @@
 //! once, a partial token waits, and `NeedInput` comes in between.
 
 pub(crate) mod chars;
+pub(crate) mod scan;
 pub mod reader;
 pub mod writer;
 

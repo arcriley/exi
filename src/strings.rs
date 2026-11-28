@@ -571,6 +571,7 @@ impl<'g, K: Kind> Held<'g, K> {
     }
     /// The string as a C string, NUL included (see
     /// `GlobalTable::resolve_cstr`).
+    #[cfg(feature = "dom")]
     pub(crate) fn as_cptr(&self) -> *const u8 {
         self.table.resolve_cstr(self.id)
     }
@@ -962,6 +963,7 @@ impl Inner {
 
     /// A pointer to the entry's bytes and the NUL after them, made from
     /// the chunk's own pointer, so C-style readers may read the NUL.
+    #[cfg(feature = "dom")]
     fn cptr(&self, e: &Entry) -> *const u8 {
         let c = self.chunks[e.chunk as usize]
             .as_ref()
@@ -1450,6 +1452,7 @@ impl<K: Kind> GlobalTable<K> {
     /// NUL every entry has. A pointer taken from [`resolve`](Self::resolve)
     /// covers the bytes only, so reading its NUL is outside it. The
     /// caller must hold a reference for as long as it uses the result.
+    #[cfg(feature = "dom")]
     pub(crate) fn resolve_cstr(&self, id: StrId<K>) -> *const u8 {
         let inner = self.inner_ref();
         let e = &inner.entries[id.0 as usize];

@@ -40,6 +40,7 @@ use rustc_hash::FxBuildHasher;
 use super::raw::*;
 use super::{Document, append_raw};
 use crate::Limits;
+use crate::xml::scan;
 use crate::strings::{GlobalStrings, StrId, Uri};
 
 /// Stop short of the session tables' `max_names`, so a document that
@@ -149,17 +150,20 @@ fn chars_ok(s: &[u8]) -> bool {
         return false;
     }
     let mut i = 0;
-    while i < s.len() {
-        let b = s[i];
-        if b < 0x20 && !matches!(b, b'\t' | b'\n' | b'\r') {
+    loop {
+        i += scan::first_forbidden(&s[i..]);
+        if i == s.len() {
+            return true;
+        }
+        if s[i] < 0x20 {
             return false;
         }
-        if b == 0xEF && s.get(i + 1) == Some(&0xBF) && matches!(s.get(i + 2), Some(&0xBE | &0xBF)) {
+        // 0xEF: U+FFFE and U+FFFF are EF BF BE and EF BF BF.
+        if s.get(i + 1) == Some(&0xBF) && matches!(s.get(i + 2), Some(&0xBE | &0xBF)) {
             return false;
         }
         i += 1;
     }
-    true
 }
 
 /// CR LF and lone CR as LF (XML 1.0 §2.11), when the input has a CR.
@@ -264,7 +268,7 @@ impl<'s, 'g> P<'s, 'g> {
     /// The line offset `at` is on (counting from 1). Offsets only grow,
     /// so each byte is counted once.
     fn line_at(&mut self, at: usize) -> u32 {
-        let n = self.s[self.counted..at].iter().filter(|&&b| b == b'\n').count();
+        let n = scan::count(&self.s[self.counted..at], b'\n');
         self.line += n as u32;
         self.counted = at;
         self.line
@@ -674,20 +678,17 @@ impl<'s, 'g> P<'s, 'g> {
         let start = self.i;
         let max = self.limits.get_max_value_chars() as usize;
         // Plain: no reference, no whitespace to normalize.
-        let mut j = start;
-        while j < self.s.len() {
-            match self.s[j] {
-                b if b == q => {
-                    if j - start > max {
-                        return None;
-                    }
-                    self.i = j + 1;
-                    return Some(Ok(&self.s[start..j]));
+        let j = start + scan::find5(&self.s[start..], [q, b'<', b'&', b'\t', b'\n']);
+        match self.s.get(j) {
+            None | Some(b'<') => return None,
+            Some(&b) if b == q => {
+                if j - start > max {
+                    return None;
                 }
-                b'<' => return None,
-                b'&' | b'\t' | b'\n' => break,
-                _ => j += 1,
+                self.i = j + 1;
+                return Some(Ok(&self.s[start..j]));
             }
+            _ => {}
         }
         // Decoded into `values`.
         let at = self.values.len();
@@ -752,11 +753,8 @@ impl<'s, 'g> P<'s, 'g> {
         while !self.stack.is_empty() {
             // Text up to the next markup.
             let start = self.i;
-            let mut j = start;
             let s = self.s;
-            while j < s.len() && !matches!(s[j], b'<' | b'&' | b']') {
-                j += 1;
-            }
+            let j = start + scan::find3(&s[start..], b'<', b'&', b']');
             if j > start {
                 self.push_text(start, j);
             }

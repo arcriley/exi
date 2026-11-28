@@ -522,8 +522,8 @@ pub struct XmlReader<'g, const N: usize = 4096> {
     /// Scratch buffers reused across start tags.
     tag_buf: String,
     raw_attrs: Vec<(Span, Span)>,
-    plain_attrs: Vec<(Span, Span)>,
-    resolved_attrs: Vec<(NameId, Span, Span)>,
+    plain_attrs: Vec<(Span, ValSpan)>,
+    resolved_attrs: Vec<(NameId, Span, ValSpan)>,
     ns_decls: Vec<(Span, Span)>,
     norm_open: Vec<String>,
     /// Direct-mapped cache from `(uri_num, local)` to `(NameId, LocalId)`
@@ -552,7 +552,7 @@ impl<'g, const N: usize> XmlReader<'g, N> {
     /// ```
     pub fn new(cfg: XmlConfig, grammars: &'g Grammars<'g>) -> Self {
         let () = InputRing::<N>::VALID;
-        let tables = SessionTables::new(
+        let tables = SessionTables::new_for_reader(
             grammars.initial(),
             ValueRules::unbounded(),
             &cfg.limits,
@@ -811,6 +811,185 @@ impl Dtd {
 
 type Span = (usize, usize);
 
+#[derive(Copy, Clone, Debug)]
+enum ValSpan {
+    Text(usize, usize),
+    Ev(usize, usize),
+}
+
+// ----- Portable 8-byte SWAR helpers -----
+
+const SWAR_LO: u64 = 0x0101_0101_0101_0101;
+const SWAR_HI: u64 = 0x8080_8080_8080_8080;
+
+#[inline]
+fn has_zero(w: u64) -> u64 {
+    w.wrapping_sub(SWAR_LO) & !w & SWAR_HI
+}
+
+#[inline]
+fn has_byte(w: u64, b: u8) -> u64 {
+    has_zero(w ^ (SWAR_LO * b as u64))
+}
+
+/// Exact per-lane equality mask for 7-bit ASCII word `w` (`w & SWAR_HI == 0`)
+/// and 7-bit byte `b < 0x80`. Never borrows across lanes.
+#[inline]
+fn eq_ascii(w: u64, b: u8) -> u64 {
+    let x = w ^ (SWAR_LO * b as u64);
+    !((x | SWAR_HI).wrapping_sub(SWAR_LO)) & SWAR_HI
+}
+
+/// Length of the leading run of valid ASCII XML bytes excluding `\r`:
+/// `(0x20..0x80) | '\t' | '\n'`.
+#[inline]
+fn scan_ascii_xml_run(slice: &[u8]) -> usize {
+    let mut i = 0;
+    let len = slice.len();
+    while i + 8 <= len {
+        let w = u64::from_ne_bytes(slice[i..i + 8].try_into().unwrap());
+        if (w & SWAR_HI) != 0 {
+            break;
+        }
+        // Every byte is < 0x80, so adding 0x60 sets bit 7 iff byte >= 0x20
+        // with no cross-lane carry (max 0x7F + 0x60 = 0xDF).
+        let ctrl = !(w + 0x6060_6060_6060_6060) & SWAR_HI;
+        if ctrl != 0 {
+            let bad = ctrl & !eq_ascii(w, b'\n') & !eq_ascii(w, b'\t');
+            if bad != 0 {
+                break;
+            }
+        }
+        i += 8;
+    }
+    while i < len {
+        let c = slice[i];
+        if (0x20..0x80).contains(&c) || c == b'\t' || c == b'\n' {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    i
+}
+
+/// Length of the leading run of ASCII content bytes containing none of
+/// `<`, `&`, `]`.
+#[inline]
+fn scan_content_ascii(bytes: &[u8]) -> usize {
+    let mut i = 0;
+    let len = bytes.len();
+    while i + 8 <= len {
+        let w = u64::from_ne_bytes(bytes[i..i + 8].try_into().unwrap());
+        let stop = (w & SWAR_HI)
+            | has_byte(w, b'<')
+            | has_byte(w, b'&')
+            | has_byte(w, b']');
+        if stop != 0 {
+            break;
+        }
+        i += 8;
+    }
+    i
+}
+
+/// Finds the first occurrence of `needle` in `bytes`.
+#[inline]
+fn scan_byte(bytes: &[u8], needle: u8) -> Option<usize> {
+    let mut i = 0;
+    let len = bytes.len();
+    let pat = SWAR_LO * needle as u64;
+    while i + 8 <= len {
+        let w = u64::from_ne_bytes(bytes[i..i + 8].try_into().unwrap());
+        if has_zero(w ^ pat) != 0 {
+            break;
+        }
+        i += 8;
+    }
+    while i < len {
+        if bytes[i] == needle {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// True when `bytes` has no attribute-normalization triggers (`&`, `<`,
+/// `\t`, `\n`, `\r`).
+#[inline]
+fn scan_attr_clean(bytes: &[u8]) -> bool {
+    let mut i = 0;
+    let len = bytes.len();
+    while i + 8 <= len {
+        let w = u64::from_ne_bytes(bytes[i..i + 8].try_into().unwrap());
+        let hit = has_byte(w, b'&')
+            | has_byte(w, b'<')
+            | has_byte(w, b'\t')
+            | has_byte(w, b'\n')
+            | has_byte(w, b'\r');
+        if hit != 0 {
+            return false;
+        }
+        i += 8;
+    }
+    while i < len {
+        if matches!(bytes[i], b'&' | b'<' | b'\t' | b'\n' | b'\r') {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+#[inline]
+fn lookup_uri_id(
+    tables: &mut SessionTables<'_>,
+    last_uri: &mut u32,
+    uri: &str,
+) -> Result<u32> {
+    if uri.is_empty() {
+        return Ok(0);
+    }
+    if *last_uri != 0 && tables.uri_str(*last_uri) == Some(uri) {
+        return Ok(*last_uri);
+    }
+    let u = match tables.find_uri_str(uri) {
+        Some(u) => u,
+        None => tables.add_uri(uri)?,
+    };
+    *last_uri = u;
+    Ok(u)
+}
+
+#[inline]
+fn lookup_name_id(
+    tables: &mut SessionTables<'_>,
+    name_cache: &mut [Option<(u32, NameId, crate::strings::LocalId)>; 64],
+    u: u32,
+    local: &str,
+) -> Result<NameId> {
+    let slot = name_cache_slot(u, local.as_bytes());
+    if let Some((cu, cid, clid)) = name_cache[slot]
+        && cu == u
+        && tables.local_str_by_id(clid) == local
+    {
+        return Ok(cid);
+    }
+    let l = match tables
+        .global_strings_local(local)
+        .and_then(|id| tables.find_local(u, id))
+    {
+        Some(l) => l,
+        None => tables.add_local(u, local)?,
+    };
+    let nid = NameId { uri: u, local: l };
+    if let Some(lid) = tables.local(u, l) {
+        name_cache[slot] = Some((u, nid, lid));
+    }
+    Ok(nid)
+}
+
 struct Open {
     id: NameId,
     prefix: Option<Box<str>>,
@@ -823,9 +1002,10 @@ enum XEv {
     ED,
     SE(NameId, Span),
     EE(NameId, Span),
-    AT(NameId, Span, Span),
+    AT(NameId, Span, ValSpan),
     NS(Span, Span, bool),
     CH,
+    Text(Span),
     CM(Span),
     PI(Span, Span),
     DT(Span, Span, Span, Span),
@@ -917,7 +1097,7 @@ impl<'a> Cur<'a> {
         let r = self.rest();
         let bytes = r.as_bytes();
         let q = *bytes.first().filter(|&&b| b == b'"' || b == b'\'')?;
-        let end = bytes[1..].iter().position(|&b| b == q)?;
+        let end = scan_byte(&bytes[1..], q)?;
         let start = self.i + 1;
         self.i += end + 2;
         Some((start, start + end))
@@ -1140,18 +1320,7 @@ impl<'g, const N: usize> XmlReader<'g, N> {
                         } else {
                             &b[i - a.len()..]
                         };
-                        let mut run = 0;
-                        while run < slice.len() {
-                            let c = slice[run];
-                            if (0x20..0x80).contains(&c)
-                                || c == b'\t'
-                                || c == b'\n'
-                            {
-                                run += 1;
-                            } else {
-                                break;
-                            }
-                        }
+                        let run = scan_ascii_xml_run(slice);
                         if run > 0 {
                             // SAFETY: every byte in `slice[..run]` is 7-bit ASCII.
                             self.text.push_str(unsafe {
@@ -1292,42 +1461,69 @@ impl<'g, const N: usize> XmlReader<'g, N> {
             Some(e) => e.pos += n,
             None => {
                 let bytes = &self.text.as_bytes()[self.cur..self.cur + n];
-                let mut lines = 0u32;
-                let mut last_nl = None;
-                for (i, &b) in bytes.iter().enumerate() {
-                    if b == b'\n' {
-                        lines += 1;
-                        last_nl = Some(i);
+                let mut i = 0;
+                let len = bytes.len();
+                while i + 8 <= len {
+                    let w =
+                        u64::from_ne_bytes(bytes[i..i + 8].try_into().unwrap());
+                    if ((w & SWAR_HI) | has_byte(w, b'\n')) != 0 {
+                        break;
                     }
+                    i += 8;
                 }
-                if let Some(pos) = last_nl {
-                    self.line += lines;
-                    let tail = &bytes[pos + 1..];
-                    self.col = 1
-                        + if tail.iter().all(|&b| b < 0x80) {
-                            tail.len() as u32
-                        } else {
-                            tail.iter()
-                                .filter(|&&b| (b & 0xC0) != 0x80)
-                                .count() as u32
-                        };
+                if i == len {
+                    self.col += len as u32;
                 } else {
-                    let cols = if bytes.iter().all(|&b| b < 0x80) {
-                        bytes.len() as u32
+                    let rest = &bytes[i..];
+                    let mut lines = 0u32;
+                    let mut last_nl = None;
+                    let mut ascii = true;
+                    for (j, &b) in rest.iter().enumerate() {
+                        if b == b'\n' {
+                            lines += 1;
+                            last_nl = Some(j);
+                        } else if b >= 0x80 {
+                            ascii = false;
+                        }
+                    }
+                    if let Some(pos) = last_nl {
+                        self.line += lines;
+                        let tail = &rest[pos + 1..];
+                        self.col = 1
+                            + if ascii {
+                                tail.len() as u32
+                            } else {
+                                tail.iter()
+                                    .filter(|&&b| (b & 0xC0) != 0x80)
+                                    .count() as u32
+                            };
+                    } else if ascii {
+                        self.col += len as u32;
                     } else {
-                        bytes
+                        let tail_cols = rest
                             .iter()
                             .filter(|&&b| (b & 0xC0) != 0x80)
-                            .count() as u32
-                    };
-                    self.col += cols;
+                            .count() as u32;
+                        self.col += i as u32 + tail_cols;
+                    }
                 }
                 self.cur += n;
-                if self.cur > 4096 && self.cur * 2 > self.text.len() {
-                    self.text.drain(..self.cur);
-                    self.cur = 0;
-                }
             }
+        }
+    }
+
+    /// Reclaims parsed prefix of `self.text`. Only called when `self.queue`
+    /// is empty, so zero-copy spans into `self.text` stay valid while queued.
+    #[inline]
+    fn compact_text(&mut self) {
+        if self.cur == self.text.len() {
+            if self.cur > 0 {
+                self.text.clear();
+                self.cur = 0;
+            }
+        } else if self.cur > 4096 && self.cur * 2 > self.text.len() {
+            self.text.drain(..self.cur);
+            self.cur = 0;
         }
     }
 
@@ -1542,52 +1738,66 @@ impl<'g, const N: usize> XmlReader<'g, N> {
 
     fn content_step(&mut self) -> Result<P> {
         let (s, fin) = self.peek();
-        let c = s.chars().next().expect("not empty");
-        if c == '<' {
+        let b0 = s.as_bytes()[0];
+        if b0 == b'<' {
             const CDATA: &str = "<![CDATA[";
-            if s.starts_with(CDATA) {
-                let end = match self.find("]]>", CDATA.len())? {
-                    Ok(e) => e,
-                    Err(p) => return Ok(p),
-                };
-                self.add_input(CDATA.len(), end)?;
-                self.brackets = 0;
-                self.adv(end + 3);
-                return Ok(P::Again);
+            if s.len() >= 2 && s.as_bytes()[1] == b'!' {
+                if s.starts_with(CDATA) {
+                    let end = match self.find("]]>", CDATA.len())? {
+                        Ok(e) => e,
+                        Err(p) => return Ok(p),
+                    };
+                    self.add_input(CDATA.len(), end)?;
+                    self.brackets = 0;
+                    self.adv(end + 3);
+                    return Ok(P::Again);
+                }
+                if !fin && s.len() < CDATA.len() && CDATA.starts_with(s) {
+                    return Ok(P::Need);
+                }
+                if !self.chars.is_empty() {
+                    self.flush_chars();
+                    return Ok(P::Produced);
+                }
+                if !fin && s.len() < 4 && "<!--".starts_with(s) {
+                    return Ok(P::Need);
+                }
+                if s.starts_with("<!--") {
+                    return self.comment();
+                }
+                return Err(xml_err("markup not allowed in content")
+                    .at(self.pos_now()));
             }
-            if !fin && s.len() < CDATA.len() && CDATA.starts_with(s) {
+            if !fin && s.len() == 1 {
                 return Ok(P::Need);
             }
             if !self.chars.is_empty() {
                 self.flush_chars();
                 return Ok(P::Produced);
             }
-            if s.starts_with("</") {
-                return self.end_tag();
-            }
-            if !fin && s.len() < 4 && "<!--".starts_with(s) {
-                return Ok(P::Need);
-            }
-            if s.starts_with("<!--") {
-                return self.comment();
-            }
-            if s.starts_with("<?") {
-                return self.pi();
-            }
-            if s.starts_with("<!") {
-                return Err(xml_err("markup not allowed in content")
-                    .at(self.pos_now()));
+            if s.len() >= 2 {
+                let b1 = s.as_bytes()[1];
+                if b1 == b'/' {
+                    return self.end_tag();
+                }
+                if b1 == b'?' {
+                    return self.pi();
+                }
             }
             return self.start_tag();
         }
-        if c == '&' {
+        if b0 == b'&' {
             return self.reference();
         }
         // A run of text up to markup or a reference.
         let bytes = s.as_bytes();
-        let mut n = 0;
         let mut brackets = self.brackets;
-        let mut char_count = 0u64;
+        let (mut n, mut char_count) = if brackets == 0 {
+            let fast = scan_content_ascii(bytes);
+            (fast, fast as u64)
+        } else {
+            (0, 0)
+        };
         while n < bytes.len() {
             let byte = bytes[n];
             if byte == b'<' || byte == b'&' {
@@ -1605,6 +1815,25 @@ impl<'g, const N: usize> XmlReader<'g, N> {
             }
             n += 1;
         }
+        // Zero-copy fast path: single text run directly followed by a non-CDATA
+        // tag (`<tag`, `</tag`, `<?pi`), outside entities and with `chars` empty.
+        let flush_now = n < bytes.len()
+            && bytes[n] == b'<'
+            && ((n + 1 < bytes.len() && bytes[n + 1] != b'!')
+                || (fin && !s[n..].starts_with("<![CDATA[")));
+        if flush_now && self.chars.is_empty() && self.ents.is_empty() {
+            if char_count > self.cfg.limits.get_max_value_chars() {
+                return Err(limit(
+                    "character data longer than max_value_chars",
+                ));
+            }
+            let pos = self.pos_now();
+            let span = (self.cur, self.cur + n);
+            self.brackets = 0;
+            self.adv(n);
+            self.queue(XEv::Text(span), self.stack.len() as u32, pos);
+            return Ok(P::Produced);
+        }
         self.brackets = brackets;
         if self.chars.is_empty() {
             self.chars_pos = self.pos_now();
@@ -1618,6 +1847,11 @@ impl<'g, const N: usize> XmlReader<'g, N> {
             None => self.chars.push_str(&self.text[self.cur..self.cur + n]),
         }
         self.adv(n);
+        if flush_now {
+            self.brackets = 0;
+            self.flush_chars();
+            return Ok(P::Produced);
+        }
         Ok(P::Again)
     }
 
@@ -1828,19 +2062,48 @@ impl<'g, const N: usize> XmlReader<'g, N> {
     fn tag_end(&self) -> Result<core::result::Result<usize, P>> {
         let (s, fin) = self.peek();
         let bytes = s.as_bytes();
+        let len = bytes.len();
         let mut quote = 0u8;
         let mut i = 1;
-        while i < bytes.len() {
-            let b = bytes[i];
+        while i < len {
             if quote == 0 {
-                match b {
+                while i + 8 <= len {
+                    let w =
+                        u64::from_ne_bytes(bytes[i..i + 8].try_into().unwrap());
+                    let stop = has_byte(w, b'>')
+                        | has_byte(w, b'"')
+                        | has_byte(w, b'\'')
+                        | has_byte(w, b'<');
+                    if stop != 0 {
+                        break;
+                    }
+                    i += 8;
+                }
+                if i >= len {
+                    break;
+                }
+                match bytes[i] {
                     b'>' => return Ok(Ok(i)),
-                    b'"' | b'\'' => quote = b,
+                    b'"' | b'\'' => quote = bytes[i],
                     b'<' => return Err(xml_err("< inside a tag")),
                     _ => {}
                 }
-            } else if b == quote {
-                quote = 0;
+            } else {
+                let pat = SWAR_LO * quote as u64;
+                while i + 8 <= len {
+                    let w =
+                        u64::from_ne_bytes(bytes[i..i + 8].try_into().unwrap());
+                    if has_zero(w ^ pat) != 0 {
+                        break;
+                    }
+                    i += 8;
+                }
+                if i >= len {
+                    break;
+                }
+                if bytes[i] == quote {
+                    quote = 0;
+                }
             }
             i += 1;
         }
@@ -1857,6 +2120,9 @@ impl<'g, const N: usize> XmlReader<'g, N> {
             Ok(e) => e,
             Err(p) => return Ok(p),
         };
+        if self.ents.is_empty() && self.dtd.attlists.is_empty() {
+            return self.start_tag_fast(end, pos);
+        }
         self.tag_buf.clear();
         match self.ents.last() {
             Some(e) => self.tag_buf.push_str(&e.text[e.pos + 1..e.pos + end]),
@@ -1914,6 +2180,341 @@ impl<'g, const N: usize> XmlReader<'g, N> {
         Ok(P::Produced)
     }
 
+    /// Zero-copy start-tag parser for the common case: direct input (not
+    /// inside an entity) and no DTD ATTLIST declarations.
+    fn start_tag_fast(&mut self, end: usize, pos: Position) -> Result<P> {
+        let limits = self.cfg.limits;
+        if self.stack.len() as u32 + 1 > limits.get_max_depth() {
+            return Err(limit("elements nested deeper than max_depth").at(pos));
+        }
+        let base = self.cur + 1;
+        let raw_end = self.cur + end;
+        let (body_end, empty) =
+            if raw_end > base && self.text.as_bytes()[raw_end - 1] == b'/' {
+                (raw_end - 1, true)
+            } else {
+                (raw_end, false)
+            };
+        let body = &self.text[base..body_end];
+        let mut c = Cur { s: body, i: 0 };
+        let qrel = c
+            .name_span()
+            .ok_or_else(|| xml_err("a start tag without a name").at(pos))?;
+        let qname = (base + qrel.0, base + qrel.1);
+        let had_first_space = c.ws();
+        if c.done() {
+            // Fast path: tag with no attributes at all.
+            let (eprefix_str, elocal_str) =
+                split_qname(&self.text[qname.0..qname.1])
+                    .map_err(|e| e.at(pos))?;
+            let eprefix_span = if eprefix_str.is_empty() {
+                (0, 0)
+            } else {
+                let s = self.ev_buf.len();
+                self.ev_buf.push_str(eprefix_str);
+                (s, self.ev_buf.len())
+            };
+            let u = if self.ns.is_empty() && eprefix_str.is_empty() {
+                0
+            } else {
+                let euri = lookup_ns(&self.ns, eprefix_str)
+                    .ok_or_else(|| xml_err("an undeclared prefix").at(pos))?;
+                lookup_uri_id(&mut self.tables, &mut self.last_uri, euri)
+                    .map_err(|e| e.at(pos))?
+            };
+            let id = lookup_name_id(
+                &mut self.tables,
+                &mut self.name_cache,
+                u,
+                elocal_str,
+            )
+            .map_err(|e| e.at(pos))?;
+            self.adv(end + 1);
+            let depth = self.stack.len() as u32 + 1;
+            self.queue(XEv::SE(id, eprefix_span), depth, pos);
+            if empty {
+                self.queue(XEv::EE(id, eprefix_span), depth - 1, pos);
+                self.phase = if self.stack.is_empty() {
+                    XPhase::Epilog
+                } else {
+                    XPhase::Content
+                };
+            } else {
+                let prefix = if eprefix_span == (0, 0) {
+                    None
+                } else {
+                    Some(self.ev_buf[eprefix_span.0..eprefix_span.1].into())
+                };
+                self.stack.push(Open {
+                    id,
+                    prefix,
+                    ns_mark: self.ns.len(),
+                });
+                self.phase = XPhase::Content;
+            }
+            return Ok(P::Produced);
+        }
+
+        // Tag with one or more attributes: parse directly from `self.text`.
+        self.raw_attrs.clear();
+        let mut had_space = had_first_space;
+        loop {
+            if !had_space {
+                return Err(xml_err(
+                    "attributes must be separated by white space",
+                )
+                .at(pos));
+            }
+            let nrel = c
+                .name_span()
+                .ok_or_else(|| xml_err("a malformed attribute").at(pos))?;
+            c.ws();
+            if !c.eat("=") {
+                return Err(xml_err("an attribute without a value").at(pos));
+            }
+            c.ws();
+            let vrel = c.quoted_span().ok_or_else(|| {
+                xml_err("an attribute value without quotes").at(pos)
+            })?;
+            let nabs = (base + nrel.0, base + nrel.1);
+            let vabs = (base + vrel.0, base + vrel.1);
+            let name_str = &self.text[nabs.0..nabs.1];
+            if self
+                .raw_attrs
+                .iter()
+                .any(|&(ns, _)| &self.text[ns.0..ns.1] == name_str)
+            {
+                return Err(xml_err("an attribute given twice").at(pos));
+            }
+            self.raw_attrs.push((nabs, vabs));
+            had_space = c.ws();
+            if c.done() {
+                break;
+            }
+        }
+
+        let max_value_chars = limits.get_max_value_chars();
+        let ns_mark = self.ns.len();
+        self.ns_decls.clear();
+        self.plain_attrs.clear();
+        self.norm_open.clear();
+
+        for idx in 0..self.raw_attrs.len() {
+            let (ns, vs) = self.raw_attrs[idx];
+            let raw_bytes = &self.text.as_bytes()[vs.0..vs.1];
+            let val_span = if scan_attr_clean(raw_bytes) {
+                let v_chars = if raw_bytes.len() as u64 <= max_value_chars {
+                    raw_bytes.len() as u64
+                } else {
+                    raw_bytes
+                        .iter()
+                        .filter(|&&b| (b & 0xC0) != 0x80)
+                        .count() as u64
+                };
+                if v_chars > max_value_chars {
+                    return Err(limit(
+                        "an attribute value longer than max_value_chars",
+                    )
+                    .at(pos));
+                }
+                ValSpan::Text(vs.0, vs.1)
+            } else {
+                let v_start = self.ev_buf.len();
+                Self::normalize_into(
+                    &self.dtd,
+                    &limits,
+                    &mut self.expanded,
+                    &self.text[vs.0..vs.1],
+                    &mut self.ev_buf,
+                    0,
+                    &mut self.norm_open,
+                )
+                .map_err(|e| e.at(pos))?;
+                let v_end = self.ev_buf.len();
+                let v_bytes = &self.ev_buf.as_bytes()[v_start..v_end];
+                let v_chars = if v_bytes.len() as u64 <= max_value_chars {
+                    v_bytes.len() as u64
+                } else {
+                    v_bytes
+                        .iter()
+                        .filter(|&&b| (b & 0xC0) != 0x80)
+                        .count() as u64
+                };
+                if v_chars > max_value_chars {
+                    return Err(limit(
+                        "an attribute value longer than max_value_chars",
+                    )
+                    .at(pos));
+                }
+                ValSpan::Ev(v_start, v_end)
+            };
+            let name_str = &self.text[ns.0..ns.1];
+            if name_str == "xmlns" || name_str.starts_with("xmlns:") {
+                let p = if name_str.len() == 5 { "" } else { &name_str[6..] };
+                if !p.is_empty() && !is_ncname(p) {
+                    return Err(xml_err(
+                        "a namespace prefix that is not an NCName",
+                    )
+                    .at(pos));
+                }
+                if p == "xmlns" {
+                    return Err(
+                        xml_err("the xmlns prefix cannot be declared").at(pos),
+                    );
+                }
+                let u_span = match val_span {
+                    ValSpan::Ev(a, b) => (a, b),
+                    ValSpan::Text(a, b) => {
+                        let s = self.ev_buf.len();
+                        self.ev_buf.push_str(&self.text[a..b]);
+                        (s, self.ev_buf.len())
+                    }
+                };
+                let v = &self.ev_buf[u_span.0..u_span.1];
+                if v == XMLNS_NS {
+                    return Err(
+                        xml_err("the xmlns namespace cannot be bound").at(pos),
+                    );
+                }
+                if (p == "xml") != (v == XML_NS) {
+                    return Err(xml_err(
+                        "the xml prefix and its namespace go only with each other",
+                    )
+                    .at(pos));
+                }
+                if !p.is_empty() && v.is_empty() {
+                    return Err(xml_err(
+                        "a prefix cannot be bound to the empty URI",
+                    )
+                    .at(pos));
+                }
+                let p_span = if p.is_empty() {
+                    (0, 0)
+                } else {
+                    let ps = self.ev_buf.len();
+                    self.ev_buf.push_str(p);
+                    (ps, self.ev_buf.len())
+                };
+                self.ns_decls.push((p_span, u_span));
+            } else {
+                self.plain_attrs.push((ns, val_span));
+            }
+        }
+        if self.plain_attrs.len() as u32 > limits.get_max_attributes() {
+            return Err(limit("more attributes than max_attributes").at(pos));
+        }
+        for &(ps, us) in &self.ns_decls {
+            let p = &self.ev_buf[ps.0..ps.1];
+            let u = &self.ev_buf[us.0..us.1];
+            self.ns.push((p.into(), u.into()));
+        }
+
+        let (eprefix_str, elocal_str) =
+            split_qname(&self.text[qname.0..qname.1]).map_err(|e| e.at(pos))?;
+        let eprefix_span = if eprefix_str.is_empty() {
+            (0, 0)
+        } else {
+            let s = self.ev_buf.len();
+            self.ev_buf.push_str(eprefix_str);
+            (s, self.ev_buf.len())
+        };
+        let (euri_span, u) = if self.ns.is_empty() && eprefix_str.is_empty() {
+            ((0, 0), 0)
+        } else {
+            let euri_str = lookup_ns(&self.ns, eprefix_str)
+                .ok_or_else(|| xml_err("an undeclared prefix").at(pos))?;
+            let span = if euri_str.is_empty() || self.ns_decls.is_empty() {
+                (0, 0)
+            } else {
+                let s = self.ev_buf.len();
+                self.ev_buf.push_str(euri_str);
+                (s, self.ev_buf.len())
+            };
+            let u = lookup_uri_id(&mut self.tables, &mut self.last_uri, euri_str)
+                .map_err(|e| e.at(pos))?;
+            (span, u)
+        };
+        let id =
+            lookup_name_id(&mut self.tables, &mut self.name_cache, u, elocal_str)
+                .map_err(|e| e.at(pos))?;
+
+        self.resolved_attrs.clear();
+        for idx in 0..self.plain_attrs.len() {
+            let (ns, vs) = self.plain_attrs[idx];
+            let (p, l) =
+                split_qname(&self.text[ns.0..ns.1]).map_err(|e| e.at(pos))?;
+            let (p_span, au) = if p.is_empty() {
+                ((0, 0), 0)
+            } else {
+                let ps = self.ev_buf.len();
+                self.ev_buf.push_str(p);
+                let p_span = (ps, self.ev_buf.len());
+                let uri = lookup_ns(&self.ns, p)
+                    .ok_or_else(|| xml_err("an undeclared prefix").at(pos))?;
+                let au = lookup_uri_id(
+                    &mut self.tables,
+                    &mut self.last_uri,
+                    uri,
+                )
+                .map_err(|e| e.at(pos))?;
+                (p_span, au)
+            };
+            let aid = lookup_name_id(
+                &mut self.tables,
+                &mut self.name_cache,
+                au,
+                l,
+            )
+            .map_err(|e| e.at(pos))?;
+            if self.resolved_attrs.iter().any(|&(other, _, _)| other == aid) {
+                return Err(xml_err(
+                    "two attributes with the same expanded name",
+                )
+                .at(pos));
+            }
+            self.resolved_attrs.push((aid, p_span, vs));
+        }
+
+        self.adv(end + 1);
+        let depth = self.stack.len() as u32 + 1;
+        self.queue(XEv::SE(id, eprefix_span), depth, pos);
+        if !self.ns_decls.is_empty() {
+            let mut marked = false;
+            for idx in 0..self.ns_decls.len() {
+                let (ps, us) = self.ns_decls[idx];
+                let local = !marked
+                    && &self.ev_buf[ps.0..ps.1]
+                        == &self.ev_buf[eprefix_span.0..eprefix_span.1]
+                    && &self.ev_buf[us.0..us.1]
+                        == &self.ev_buf[euri_span.0..euri_span.1];
+                marked |= local;
+                self.queue(XEv::NS(ps, us, local), depth, pos);
+            }
+        }
+        for idx in 0..self.resolved_attrs.len() {
+            let (aid, ps, vs) = self.resolved_attrs[idx];
+            self.queue(XEv::AT(aid, ps, vs), depth, pos);
+        }
+        if empty {
+            self.ns.truncate(ns_mark);
+            self.queue(XEv::EE(id, eprefix_span), depth - 1, pos);
+            self.phase = if self.stack.is_empty() {
+                XPhase::Epilog
+            } else {
+                XPhase::Content
+            };
+        } else {
+            let prefix = if eprefix_span == (0, 0) {
+                None
+            } else {
+                Some(self.ev_buf[eprefix_span.0..eprefix_span.1].into())
+            };
+            self.stack.push(Open { id, prefix, ns_mark });
+            self.phase = XPhase::Content;
+        }
+        Ok(P::Produced)
+    }
+
     /// Attribute value normalization (XML 1.0 §3.3.3), with references
     /// expanded.
     fn normalize_into(
@@ -1925,10 +2526,7 @@ impl<'g, const N: usize> XmlReader<'g, N> {
         depth: u32,
         open: &mut Vec<String>,
     ) -> Result<()> {
-        if !raw
-            .bytes()
-            .any(|b| matches!(b, b'&' | b'<' | b'\t' | b'\n' | b'\r'))
-        {
+        if scan_attr_clean(raw.as_bytes()) {
             out.push_str(raw);
             return Ok(());
         }
@@ -2120,7 +2718,7 @@ impl<'g, const N: usize> XmlReader<'g, N> {
                 };
                 self.ns_decls.push((p_span, val_span));
             } else {
-                self.plain_attrs.push((ns, val_span));
+                self.plain_attrs.push((ns, ValSpan::Ev(val_span.0, val_span.1)));
             }
         }
         if self.plain_attrs.len() as u32 > limits.get_max_attributes() {
@@ -2299,7 +2897,13 @@ impl<'g, const N: usize> XmlReader<'g, N> {
             xml_err("an end tag with no element open").at(pos)
         })?;
         let (s, _) = self.peek();
-        let name = s[2..end].trim_end_matches(is_space);
+        let name = if end > 2
+            && !matches!(s.as_bytes()[end - 1], b' ' | b'\t' | b'\n' | b'\r')
+        {
+            &s[2..end]
+        } else {
+            s[2..end].trim_end_matches(is_space)
+        };
         let local = self
             .tables
             .local_str(open.id.uri, open.id.local)
@@ -2613,6 +3217,7 @@ impl<'g, const N: usize> XmlReader<'g, N> {
                 self.chars_ready = false;
             }
             self.ev_buf.clear();
+            self.compact_text();
             if self.phase == XPhase::Done {
                 if self.ended {
                     self.current = None;
@@ -2652,6 +3257,12 @@ impl<'g, const N: usize> XmlReader<'g, N> {
         self.events += 1;
         let this: &Self = self;
         let ev_str = |s: Span| -> &'g2 str { &this.ev_buf[s.0..s.1] };
+        let val_str = |v: ValSpan| -> &'g2 str {
+            match v {
+                ValSpan::Text(a, b) => &this.text[a..b],
+                ValSpan::Ev(a, b) => &this.ev_buf[a..b],
+            }
+        };
         let name = |id: NameId, prefix: Span| -> Name<'g2> {
             xname(&this.tables, id, ev_str(prefix))
         };
@@ -2661,7 +3272,7 @@ impl<'g, const N: usize> XmlReader<'g, N> {
             XEv::SE(id, p) => Event::StartElement(name(*id, *p)),
             XEv::EE(id, p) => Event::EndElement(name(*id, *p)),
             XEv::AT(id, p, v) => {
-                Event::Attribute(name(*id, *p), Value::Str(ev_str(*v)))
+                Event::Attribute(name(*id, *p), Value::Str(val_str(*v)))
             }
             XEv::NS(p, u, l) => Event::Namespace(NsDecl {
                 prefix: ev_str(*p),
@@ -2669,6 +3280,7 @@ impl<'g, const N: usize> XmlReader<'g, N> {
                 local_element_ns: *l,
             }),
             XEv::CH => Event::Characters(Value::Str(&this.chars)),
+            XEv::Text(s) => Event::Characters(Value::Str(&this.text[s.0..s.1])),
             XEv::CM(s) => Event::Comment(ev_str(*s)),
             XEv::PI(t, d) => Event::ProcessingInstruction {
                 target: ev_str(*t),
@@ -2694,9 +3306,11 @@ fn xname<'a>(
     let (uid, u, lid, l) = t.resolve_name(id);
     let n = Name::new(u, l);
     let n = if prefix.is_empty() { n } else { n.with_prefix(prefix) };
-    let global = match (uid, lid) {
-        (Some(uri), Some(local)) => Some(GlobalName { uri, local }),
-        _ => None,
-    };
-    n.with_ids(Some(id), global)
+    match (uid, lid) {
+        (Some(uri), Some(local)) => {
+            n.with_ids(Some(id), Some(GlobalName { uri, local }))
+                .with_pool(t.global_ref())
+        }
+        _ => n.with_ids(Some(id), None),
+    }
 }

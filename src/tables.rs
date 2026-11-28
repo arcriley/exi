@@ -540,6 +540,9 @@ impl ValueRules {
     pub const fn get_local_partitions(&self) -> bool {
         self.local_partitions
     }
+    pub const fn get_capacity(&self) -> Option<u32> {
+        self.capacity
+    }
 
     /// R4: is a literal of `chars` characters added to the tables?
     pub const fn keeps(&self, chars: u32) -> bool {
@@ -577,6 +580,10 @@ pub struct SessionTables<'a> {
     stack: Vec<Partitions>,
     names_total: u32,
     bytes_total: u64,
+    /// Writers look up values by `ValueId` (`find_value`); readers only index
+    /// forward by partition number and can skip maintaining `global_rev` /
+    /// `lp.rev`.
+    track_value_rev: bool,
 }
 
 impl<'a> SessionTables<'a> {
@@ -595,7 +602,20 @@ impl<'a> SessionTables<'a> {
             stack: Vec::new(),
             names_total: 0,
             bytes_total: 0,
+            track_value_rev: true,
         }
+    }
+
+    /// Tables for a reader: forward value lookup only, without reverse value
+    /// hash maps.
+    pub(crate) fn new_for_reader(
+        initial: &'a Initial<'a>,
+        rules: ValueRules,
+        limits: &Limits,
+    ) -> Self {
+        let mut t = Self::new(initial, rules, limits);
+        t.track_value_rev = false;
+        t
     }
     pub fn rules(&self) -> ValueRules {
         self.rules
@@ -764,17 +784,27 @@ impl<'a> SessionTables<'a> {
     pub(crate) fn local_str_by_id(&self, id: LocalId) -> &str {
         self.global().locals().resolve(id)
     }
+    pub(crate) fn resolve_name_at(
+        &self,
+        outer: bool,
+        id: NameId,
+    ) -> (Option<UriId>, &str, Option<LocalId>, &str) {
+        let g = self.global();
+        let uid = self.uri_at(outer, id.uri);
+        let u = uid.map_or("", |id| g.uris().resolve(id));
+        let lid = self.local_at(outer, id.uri, id.local);
+        let l = lid.map_or("", |id| g.locals().resolve(id));
+        (uid, u, lid, l)
+    }
     #[cfg(feature = "xml")]
     pub(crate) fn resolve_name(
         &self,
         id: NameId,
     ) -> (Option<UriId>, &str, Option<LocalId>, &str) {
-        let g = self.global();
-        let uid = self.uri_at(false, id.uri);
-        let u = uid.map_or("", |id| g.uris().resolve(id));
-        let lid = self.local_at(false, id.uri, id.local);
-        let l = lid.map_or("", |id| g.locals().resolve(id));
-        (uid, u, lid, l)
+        self.resolve_name_at(false, id)
+    }
+    pub(crate) fn global_ref(&self) -> &GlobalStrings {
+        self.initial.global
     }
     pub fn find_local(&self, uri: u32, id: LocalId) -> Option<u32> {
         find(
@@ -913,7 +943,17 @@ impl<'a> SessionTables<'a> {
         s: &str,
     ) -> Result<Option<ValueId>> {
         self.check_name_id(name)?;
-        let chars = s.chars().count().min(u32::MAX as usize) as u32;
+        let chars = if s.is_empty() {
+            0
+        } else if let Some(max_len) = self.rules.max_length {
+            if s.len() <= max_len as usize {
+                s.len() as u32
+            } else {
+                s.chars().count().min(u32::MAX as usize) as u32
+            }
+        } else {
+            1
+        };
         if !self.rules.keeps(chars) {
             return Ok(None);
         }
@@ -1026,8 +1066,8 @@ impl<K: Kind> NamePart<K> {
         NamePart { added: Vec::new(), rev: map() }
     }
     fn release(&mut self, table: &GlobalTable<K>) {
-        for id in self.added.drain(..) {
-            table.release(id);
+        if !self.added.is_empty() {
+            table.release_all(self.added.drain(..));
         }
         self.rev.clear();
     }
@@ -1104,8 +1144,8 @@ impl Partitions {
             p.prefixes.release(g.prefixes());
             p.locals.release(g.locals());
         }
-        for slot in self.slots.drain(..) {
-            g.values().release(slot.id);
+        if !self.slots.is_empty() {
+            g.values().release_all(self.slots.drain(..).map(|s| s.id));
         }
         self.global_rev.clear();
         self.local.clear();
@@ -1210,7 +1250,9 @@ impl SessionTables<'_> {
         if (slot as usize) < self.cur.slots.len() {
             // Full: remove the oldest value (R6).
             let victim = self.cur.slots[slot as usize];
-            if self.cur.global_rev.get(&victim.id) == Some(&slot) {
+            if self.track_value_rev
+                && self.cur.global_rev.get(&victim.id) == Some(&slot)
+            {
                 self.cur.global_rev.remove(&victim.id);
             }
             if let Some(lp) = self.cur.local.get_mut(&victim.name) {
@@ -1219,7 +1261,9 @@ impl SessionTables<'_> {
                     .pop_front()
                     .expect("the evicted value is its partition's oldest");
                 debug_assert_eq!(front, victim.id);
-                if lp.rev.get(&victim.id) == Some(&lp.base) {
+                if self.track_value_rev
+                    && lp.rev.get(&victim.id) == Some(&lp.base)
+                {
                     lp.rev.remove(&victim.id);
                 }
                 lp.base += 1;
@@ -1235,7 +1279,9 @@ impl SessionTables<'_> {
         if cap == Some(self.cur.next_slot) {
             self.cur.next_slot = 0;
         }
-        self.cur.global_rev.insert(id, slot);
+        if self.track_value_rev {
+            self.cur.global_rev.insert(id, slot);
+        }
         if self.rules.local_partitions {
             let lp = self.cur.local.entry(name).or_insert_with(|| LocalPart {
                 base: 0,
@@ -1244,7 +1290,9 @@ impl SessionTables<'_> {
             });
             let n = lp.base + lp.live.len() as u32;
             lp.live.push_back(id);
-            lp.rev.insert(id, n);
+            if self.track_value_rev {
+                lp.rev.insert(id, n);
+            }
         }
         self.bytes_total += len as u64;
         self.cur.bytes += len as u64;

@@ -81,15 +81,18 @@ pub struct Name<'a> {
     prefix: Option<&'a str>,
     id: Option<NameId>,
     global: Option<GlobalName>,
+    /// Address of the `GlobalStrings` that owns `global` (0 when unknown).
+    #[cfg_attr(not(feature = "dom"), allow(dead_code))]
+    pool: usize,
 }
 
 impl<'a> Name<'a> {
     pub const fn new(uri: &'a str, local: &'a str) -> Self {
-        Name { uri, local, prefix: None, id: None, global: None }
+        Name { uri, local, prefix: None, id: None, global: None, pool: 0 }
     }
     /// A name in no namespace.
     pub const fn local(local: &'a str) -> Self {
-        Name { uri: "", local, prefix: None, id: None, global: None }
+        Name { uri: "", local, prefix: None, id: None, global: None, pool: 0 }
     }
     pub const fn with_prefix(self, prefix: &'a str) -> Self {
         Name { prefix: Some(prefix), ..self }
@@ -100,7 +103,27 @@ impl<'a> Name<'a> {
         id: Option<NameId>,
         global: Option<GlobalName>,
     ) -> Self {
-        Name { id, global, ..self }
+        Name { id, global, pool: 0, ..self }
+    }
+    /// Tags `global` with the `GlobalStrings` pool it belongs to so sinks
+    /// sharing that pool can retain ids without re-hashing.
+    pub(crate) fn with_pool(
+        self,
+        pool: &crate::strings::GlobalStrings,
+    ) -> Self {
+        Name { pool: pool as *const _ as usize, ..self }
+    }
+    /// Returns `global` only when it belongs to `pool`.
+    #[cfg(feature = "dom")]
+    pub(crate) fn global_for(
+        &self,
+        pool: &crate::strings::GlobalStrings,
+    ) -> Option<GlobalName> {
+        if self.pool == (pool as *const _ as usize) {
+            self.global
+        } else {
+            None
+        }
     }
     pub const fn uri(&self) -> &'a str {
         self.uri

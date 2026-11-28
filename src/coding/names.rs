@@ -364,9 +364,16 @@ pub fn read_value<D: Decoder, T: ReadTables + ?Sized>(
             })
         }
         _ => {
-            let s = read_literal(d, ch, v - 2, limits)?;
-            let kept = t.add_value(name, &s)?;
-            out.push_str(&s);
+            let len = v - 2;
+            if len > limits.get_max_value_chars() {
+                return Err(Error::new(
+                    ErrorKind::Limit,
+                    "literal longer than max_value_chars",
+                ));
+            }
+            let start = out.len();
+            read_chars(d, ch, len, out)?;
+            let kept = t.add_value(name, &out[start..])?;
             Ok(ValueRead::Literal(kept))
         }
     }

@@ -906,6 +906,7 @@ struct Inner {
     entries: Vec<Entry>,
     index: HashMap<u32, Ids, FxBuildHasher>,
     free_slots: [Vec<u32>; 32],
+    free_mask: u32,
     slotless: Vec<u32>,
     live_strings: u32,
     live_bytes: u64,
@@ -928,6 +929,7 @@ impl Inner {
             entries: Vec::new(),
             index: HashMap::with_hasher(FxBuildHasher),
             free_slots: Default::default(),
+            free_mask: 0,
             slotless: Vec::new(),
             live_strings: 0,
             live_bytes: 0,
@@ -1001,7 +1003,11 @@ impl Inner {
 
     fn release_chunk(&mut self, chunk: u32) {
         self.chunks[chunk as usize] = None;
-        for class in self.free_slots.iter_mut() {
+        let mut mask = self.free_mask;
+        while mask != 0 {
+            let cls = mask.trailing_zeros() as usize;
+            mask &= mask - 1;
+            let class = &mut self.free_slots[cls];
             let entries = &mut self.entries;
             let slotless = &mut self.slotless;
             class.retain(|&id| {
@@ -1013,6 +1019,9 @@ impl Inner {
                     true
                 }
             });
+            if class.is_empty() {
+                self.free_mask &= !(1u32 << cls);
+            }
         }
         if self.current == chunk {
             self.current = NO_CHUNK;
@@ -1028,7 +1037,11 @@ impl Inner {
             if chunk == self.current {
                 // Keep the chunk being appended to, empty: forget its
                 // free slots.
-                for class in self.free_slots.iter_mut() {
+                let mut mask = self.free_mask;
+                while mask != 0 {
+                    let cls = mask.trailing_zeros() as usize;
+                    mask &= mask - 1;
+                    let class = &mut self.free_slots[cls];
                     let entries = &mut self.entries;
                     let slotless = &mut self.slotless;
                     class.retain(|&id| {
@@ -1040,6 +1053,9 @@ impl Inner {
                             true
                         }
                     });
+                    if class.is_empty() {
+                        self.free_mask &= !(1u32 << cls);
+                    }
                 }
                 self.write_pos = 0;
             } else {
@@ -1110,12 +1126,20 @@ impl Inner {
         len: u32,
     ) -> Result<(u32, u32, u32, u32)> {
         let need = len + 1;
-        for class in class_needed(need)..32 {
+        let first_class = class_needed(need);
+        let mut avail =
+            self.free_mask & (!0u32).checked_shl(first_class as u32).unwrap_or(0);
+        while avail != 0 {
+            let class = avail.trailing_zeros() as usize;
+            avail &= avail - 1;
             if let Some(pos) = self.free_slots[class]
                 .iter()
                 .position(|&id| self.entries[id as usize].cap >= need)
             {
                 let id = self.free_slots[class].swap_remove(pos);
+                if self.free_slots[class].is_empty() {
+                    self.free_mask &= !(1u32 << class);
+                }
                 let e = self.entries[id as usize];
                 return Ok((id, e.chunk, e.start, e.cap));
             }
@@ -1217,8 +1241,117 @@ impl Inner {
         self.index_remove(Self::key(cfg, e.hash), id);
         self.live_strings -= 1;
         self.live_bytes -= e.len as u64 + 1;
-        self.free_slots[class_of(e.cap)].push(id);
+        let last_in_chunk =
+            self.chunks[e.chunk as usize].as_ref().expect("chunk").live == 1;
+        if last_in_chunk {
+            self.entries[id as usize].chunk = NO_CHUNK;
+            self.slotless.push(id);
+        } else {
+            let cls = class_of(e.cap);
+            self.free_slots[cls].push(id);
+            self.free_mask |= 1u32 << cls;
+        }
         self.chunk_dec(e.chunk);
+    }
+
+    fn release_all(
+        &mut self,
+        cfg: &GlobalConfig,
+        ids: impl IntoIterator<Item = u32>,
+    ) {
+        let mut freed = Vec::new();
+        for id in ids {
+            let e = &mut self.entries[id as usize];
+            assert!(e.refs > 0, "release of a freed string id");
+            e.refs -= 1;
+            if e.refs == 0 {
+                self.live_strings -= 1;
+                self.live_bytes -= e.len as u64 + 1;
+                self.chunks[e.chunk as usize].as_mut().expect("chunk").live -=
+                    1;
+                freed.push(id);
+            }
+        }
+        if freed.is_empty() {
+            return;
+        }
+        if self.live_strings == 0 {
+            // Table is now empty: clear index and all dead chunks in one pass.
+            self.index.clear();
+            let mut mask = self.free_mask;
+            while mask != 0 {
+                let cls = mask.trailing_zeros() as usize;
+                mask &= mask - 1;
+                for id in self.free_slots[cls].drain(..) {
+                    self.entries[id as usize].chunk = NO_CHUNK;
+                    self.slotless.push(id);
+                }
+            }
+            self.free_mask = 0;
+            for id in freed {
+                self.entries[id as usize].chunk = NO_CHUNK;
+                self.slotless.push(id);
+            }
+            let cur = self.current;
+            for (idx, slot) in self.chunks.iter_mut().enumerate() {
+                if idx as u32 == cur {
+                    if slot.is_some() {
+                        self.write_pos = 0;
+                    }
+                } else {
+                    *slot = None;
+                }
+            }
+            return;
+        }
+        let mut dead_chunks = Vec::new();
+        for id in freed {
+            let e = self.entries[id as usize];
+            self.index_remove(Self::key(cfg, e.hash), id);
+            let chunk_live = self.chunks[e.chunk as usize]
+                .as_ref()
+                .map_or(0, |c| c.live);
+            if chunk_live == 0 {
+                self.entries[id as usize].chunk = NO_CHUNK;
+                self.slotless.push(id);
+                if self.chunks[e.chunk as usize].is_some()
+                    && !dead_chunks.contains(&e.chunk)
+                {
+                    dead_chunks.push(e.chunk);
+                }
+            } else {
+                let cls = class_of(e.cap);
+                self.free_slots[cls].push(id);
+                self.free_mask |= 1u32 << cls;
+            }
+        }
+        for chunk in dead_chunks {
+            if chunk == self.current {
+                let mut mask = self.free_mask;
+                while mask != 0 {
+                    let cls = mask.trailing_zeros() as usize;
+                    mask &= mask - 1;
+                    let class = &mut self.free_slots[cls];
+                    let entries = &mut self.entries;
+                    let slotless = &mut self.slotless;
+                    class.retain(|&id| {
+                        if entries[id as usize].chunk == chunk {
+                            entries[id as usize].chunk = NO_CHUNK;
+                            slotless.push(id);
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                    if class.is_empty() {
+                        self.free_mask &= !(1u32 << cls);
+                    }
+                }
+                self.write_pos = 0;
+            } else {
+                self.release_chunk(chunk);
+            }
+        }
     }
 
     fn stats(&self) -> TableStats {
@@ -1276,6 +1409,12 @@ impl<K: Kind> GlobalTable<K> {
     pub(crate) fn release(&self, id: StrId<K>) {
         let cfg = self.cfg;
         self.inner().release(&cfg, id.0)
+    }
+
+    /// Drops references for a batch of ids in one pass.
+    pub(crate) fn release_all(&self, ids: impl IntoIterator<Item = StrId<K>>) {
+        let cfg = self.cfg;
+        self.inner().release_all(&cfg, ids.into_iter().map(|id| id.0));
     }
 
     /// The string of a live id. The caller must hold a reference for as

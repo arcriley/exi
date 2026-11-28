@@ -72,6 +72,7 @@
 //! # Ok::<(), exi::Error>(())
 //! ```
 
+mod arena;
 mod io;
 pub mod raw;
 
@@ -83,11 +84,15 @@ use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::ptr::{self, NonNull};
 
+use hashbrown::HashSet;
+use rustc_hash::FxBuildHasher;
+
 use crate::strings::{GlobalStrings, Local, Prefix, StrId, Uri};
 use crate::{
     AsName, Doctype, Error, ErrorKind, GlobalName, Name, OwnedValue, Result,
     Value,
 };
+use arena::NodeArena;
 use raw::*;
 
 const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
@@ -154,16 +159,79 @@ enum Declare {
     No,
 }
 
+/// Distinct global string ids held once per document (released on drop).
+/// Uses a small bitset for dense ids `< 16384` (3-instruction hot-path check)
+/// and a hash set for higher ids.
+struct IdSet {
+    bits: Vec<u64>,
+    big: HashSet<u32, FxBuildHasher>,
+    held: Vec<u32>,
+}
+
+const BITSET_LIMIT: usize = 16384;
+
+impl IdSet {
+    fn new() -> Self {
+        IdSet {
+            bits: Vec::new(),
+            big: HashSet::with_hasher(FxBuildHasher),
+            held: Vec::new(),
+        }
+    }
+
+    /// Marks `id` as held by this document; returns `true` if it was absent.
+    #[inline]
+    fn insert(&mut self, id: u32) -> bool {
+        let idx = id as usize;
+        if idx < BITSET_LIMIT {
+            let word = idx >> 6;
+            let bit = 1u64 << (idx & 63);
+            if word < self.bits.len() && (self.bits[word] & bit) != 0 {
+                return false;
+            }
+            return self.insert_bit_slow(id, word, bit);
+        }
+        self.insert_big(id)
+    }
+
+    #[cold]
+    fn insert_bit_slow(&mut self, id: u32, word: usize, bit: u64) -> bool {
+        if word >= self.bits.len() {
+            self.bits.resize(word + 1, 0);
+        }
+        self.bits[word] |= bit;
+        self.held.push(id);
+        true
+    }
+
+    #[cold]
+    fn insert_big(&mut self, id: u32) -> bool {
+        if self.big.insert(id) {
+            self.held.push(id);
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// The document's heap block. `raw` is first, so a `*mut RawDoc` is a
 /// `*mut DocInner`.
 #[repr(C)]
 pub(crate) struct DocInner<'g> {
     pub raw: RawDoc,
     pub strings: &'g GlobalStrings,
+    arena: NodeArena,
     /// Slot pointers (null when freed), parallel to `gens`.
     ptrs: Vec<*mut RawCommon>,
     gens: Vec<u32>,
     free: Vec<u32>,
+    /// Slots whose nodes own an external heap allocation (`EXI_DTD_NODE`,
+    /// elements with `nsDef`, or `NodeBox` with `Text`/`Typed`/`Name`/`Pi`).
+    heap_nodes: Vec<u32>,
+    held_uris: IdSet,
+    held_locals: IdSet,
+    held_prefixes: IdSet,
     /// The number of the next generated prefix (`ns1`, `ns2`, …).
     ns_count: u32,
     /// True once any non-empty default namespace (`xmlns="..."`) has been
@@ -189,19 +257,45 @@ impl Drop for Document<'_> {
     fn drop(&mut self) {
         let d = self.inner.as_ptr();
         // SAFETY: the block and every node in the slots are ours, freed
-        // once here. Nodes are freed without unlinking: the whole tree
-        // goes.
+        // once here. External heap payloads and retained strings are
+        // released before freeing the arena chunks.
         unsafe {
-            let strings = (*d).strings;
-            for &p in (*d).ptrs.iter().skip(1) {
-                if !p.is_null() {
-                    if (*p).r#type == EXI_ELEMENT_NODE {
-                        free_ns_list((*(p as *mut RawNode)).nsDef);
+            {
+                let inner = &mut *d;
+                let strings = inner.strings;
+                for slot in inner.heap_nodes.drain(..) {
+                    let p = inner.ptrs[slot as usize];
+                    if p.is_null() {
+                        continue;
                     }
-                    drop_box(p, strings);
+                    match (*p).r#type {
+                        EXI_ELEMENT_NODE => {
+                            let el = p as *mut RawNode;
+                            let ns = core::mem::replace(
+                                &mut (*el).nsDef,
+                                ptr::null_mut(),
+                            );
+                            free_ns_list(ns);
+                        }
+                        EXI_DTD_NODE => {
+                            inner.ptrs[slot as usize] = ptr::null_mut();
+                            drop_node_payload(p);
+                        }
+                        _ => drop_node_payload(p),
+                    }
                 }
+                for id in inner.held_uris.held.drain(..) {
+                    strings.uris().release(StrId::from_raw(id));
+                }
+                for id in inner.held_locals.held.drain(..) {
+                    strings.locals().release(StrId::from_raw(id));
+                }
+                for id in inner.held_prefixes.held.drain(..) {
+                    strings.prefixes().release(StrId::from_raw(id));
+                }
+                inner.arena.drop_all(&inner.ptrs);
+                free_ns_list(inner.raw.oldNs);
             }
-            free_ns_list((*d).raw.oldNs);
             drop(Box::from_raw(d));
         }
     }
@@ -243,9 +337,14 @@ impl<'g> Document<'g> {
         let inner = Box::new(DocInner {
             raw: RawDoc::blank(),
             strings,
+            arena: NodeArena::new(),
             ptrs: Vec::new(),
             gens: Vec::new(),
             free: Vec::new(),
+            heap_nodes: Vec::new(),
+            held_uris: IdSet::new(),
+            held_locals: IdSet::new(),
+            held_prefixes: IdSet::new(),
             ns_count: 0,
             has_default_ns: false,
             url: None,
@@ -481,6 +580,10 @@ impl<'g> Document<'g> {
         self.p(n)
     }
 
+    pub(crate) fn has_default_ns(&self) -> bool {
+        self.d().has_default_ns
+    }
+
     pub(crate) fn reserve_nodes(&mut self, additional: usize) {
         let d = self.dm();
         d.ptrs.reserve(additional);
@@ -501,32 +604,57 @@ impl<'g> Document<'g> {
 
     fn alloc_node(&mut self, kind: core::ffi::c_int) -> *mut RawCommon {
         let slot = self.reserve_slot();
+        let doc = self.doc_ptr();
+        let d = self.dm();
         let p = if kind == EXI_ELEMENT_NODE {
-            Box::into_raw(Box::new(ElemBox {
-                raw: RawNode::blank(kind, self.doc_ptr()),
+            d.arena.alloc_elem(ElemBox {
+                raw: RawNode::blank(kind, doc),
                 slot,
                 want_prefix: NO_ID,
-            })) as *mut RawCommon
+            })
         } else {
-            Box::into_raw(Box::new(NodeBox {
-                raw: RawNode::blank(kind, self.doc_ptr()),
+            d.arena.alloc_node(NodeBox {
+                raw: RawNode::blank(kind, doc),
                 x: Extra::new(slot),
-            })) as *mut RawCommon
+            })
         };
-        self.dm().ptrs[slot as usize] = p;
+        d.ptrs[slot as usize] = p;
         p
     }
 
     fn alloc_attr(&mut self) -> *mut RawCommon {
         let slot = self.reserve_slot();
-        let b = Box::new(AttrBox {
-            raw: RawAttr::blank(self.doc_ptr()),
+        let doc = self.doc_ptr();
+        let d = self.dm();
+        let p = d.arena.alloc_attr(AttrBox {
+            raw: RawAttr::blank(doc),
             slot,
             want_prefix: NO_ID,
         });
-        let p = Box::into_raw(b) as *mut RawCommon;
-        self.dm().ptrs[slot as usize] = p;
+        d.ptrs[slot as usize] = p;
         p
+    }
+
+    /// Allocates an attribute and its child text node contiguously in the
+    /// arena (used by `DocumentBuilder::attribute_ev`).
+    fn alloc_attr_and_text(&mut self) -> (*mut RawCommon, *mut RawCommon) {
+        let a_slot = self.reserve_slot();
+        let t_slot = self.reserve_slot();
+        let doc = self.doc_ptr();
+        let d = self.dm();
+        let mut text_raw = RawNode::blank(EXI_TEXT_NODE, doc);
+        text_raw.name = TEXT_NAME.as_ptr();
+        let (ap, tp) = d.arena.alloc_attr_and_node(
+            AttrBox {
+                raw: RawAttr::blank(doc),
+                slot: a_slot,
+                want_prefix: NO_ID,
+            },
+            NodeBox { raw: text_raw, x: Extra::new(t_slot) },
+        );
+        d.ptrs[a_slot as usize] = ap;
+        d.ptrs[t_slot as usize] = tp;
+        (ap, tp)
     }
 
     fn alloc_dtd(
@@ -542,7 +670,9 @@ impl<'g> Document<'g> {
             ids,
         });
         let p = Box::into_raw(b) as *mut RawCommon;
-        self.dm().ptrs[slot as usize] = p;
+        let d = self.dm();
+        d.ptrs[slot as usize] = p;
+        d.heap_nodes.push(slot);
         p
     }
 
@@ -562,76 +692,121 @@ impl<'g> Document<'g> {
         p
     }
 
-    /// Sets the node's name from `name`, holding its strings.
-    fn set_name(&mut self, p: *mut RawCommon, name: Name<'_>) -> Result<()> {
-        let s = self.d().strings;
-        let uri = s.uris().intern_id(name.uri())?;
-        let local = match s.locals().intern_id(name.local_name()) {
-            Ok(l) => l,
-            Err(e) => {
-                s.uris().release(uri);
-                return Err(e);
-            }
-        };
-        // SAFETY: the caller supplies a live element or attribute.
-        unsafe { Self::install_name_ids(p, s, s, uri, local) };
-        Ok(())
+    fn alloc_value_ref_raw(&mut self, value: &Value<'_>) -> *mut RawCommon {
+        let p = self.alloc_node(EXI_TEXT_NODE);
+        // SAFETY: `p` is new.
+        unsafe { (*p).name = TEXT_NAME.as_ptr() };
+        self.set_value(p, value);
+        p
     }
 
-    /// Sets the node's name when `name.global()` is known to belong to
-    /// `self.strings()`, retaining its ids directly without hashing.
-    fn set_name_trusted(
-        &mut self,
-        p: *mut RawCommon,
-        name: Name<'_>,
-    ) -> Result<()> {
-        if let Some(g) = name.global() {
-            let s = self.d().strings;
-            s.uris().retain(g.uri);
-            s.locals().retain(g.local);
-            // SAFETY: `g` came from `s` and we just retained both ids.
-            unsafe { Self::install_name_ids(p, s, s, g.uri, g.local) };
-            Ok(())
-        } else {
-            self.set_name(p, name)
+    #[inline]
+    fn hold_uri(&mut self, id: StrId<Uri>) {
+        let d = self.dm();
+        if d.held_uris.insert(id.index()) {
+            d.strings.uris().retain(id);
         }
     }
 
-    /// Installs the already-retained name ids of a live element or
-    /// attribute, releasing any previous ids from `old_strings`.
+    #[inline]
+    fn hold_local(&mut self, id: StrId<Local>) {
+        let d = self.dm();
+        if d.held_locals.insert(id.index()) {
+            d.strings.locals().retain(id);
+        }
+    }
+
+    #[inline]
+    fn hold_prefix(&mut self, id: StrId<Prefix>) {
+        let d = self.dm();
+        if d.held_prefixes.insert(id.index()) {
+            d.strings.prefixes().retain(id);
+        }
+    }
+
+    fn intern_uri(&mut self, s: &str) -> Result<StrId<Uri>> {
+        let tbl = self.d().strings.uris();
+        if let Some(id) = tbl.get(s) {
+            self.hold_uri(id);
+            return Ok(id);
+        }
+        let id = tbl.intern_id(s)?;
+        if !self.dm().held_uris.insert(id.index()) {
+            tbl.release(id);
+        }
+        Ok(id)
+    }
+
+    fn intern_local(&mut self, s: &str) -> Result<StrId<Local>> {
+        let tbl = self.d().strings.locals();
+        if let Some(id) = tbl.get(s) {
+            self.hold_local(id);
+            return Ok(id);
+        }
+        let id = tbl.intern_id(s)?;
+        if !self.dm().held_locals.insert(id.index()) {
+            tbl.release(id);
+        }
+        Ok(id)
+    }
+
+    fn intern_prefix(&mut self, s: &str) -> Result<StrId<Prefix>> {
+        let tbl = self.d().strings.prefixes();
+        if let Some(id) = tbl.get(s) {
+            self.hold_prefix(id);
+            return Ok(id);
+        }
+        let id = tbl.intern_id(s)?;
+        if !self.dm().held_prefixes.insert(id.index()) {
+            tbl.release(id);
+        }
+        Ok(id)
+    }
+
+    /// Sets the node's name from `name`, holding its strings on the document.
+    fn set_name(&mut self, p: *mut RawCommon, name: Name<'_>) -> Result<()> {
+        let uri = self.intern_uri(name.uri())?;
+        let local = self.intern_local(name.local_name())?;
+        let s = self.d().strings;
+        // SAFETY: the caller supplies a live element or attribute.
+        unsafe { Self::install_name_ids(p, s, uri, local) };
+        Ok(())
+    }
+
+    /// Sets the node's name from global ids already verified to belong
+    /// to `self.strings()`, retaining each distinct id at most once per
+    /// document.
+    fn set_name_global(&mut self, p: *mut RawCommon, g: GlobalName) {
+        self.hold_uri(g.uri);
+        self.hold_local(g.local);
+        let s = self.d().strings;
+        // SAFETY: `g` belongs to `s` and is held by `self`.
+        unsafe { Self::install_name_ids(p, s, g.uri, g.local) };
+    }
+
+    /// Installs the name ids of a live element or attribute.
     unsafe fn install_name_ids(
         p: *mut RawCommon,
         strings: &GlobalStrings,
-        old_strings: &GlobalStrings,
         uri: StrId<Uri>,
         local: StrId<Local>,
     ) {
         // SAFETY: `p` is a live element or attribute. The name pointer
-        // points into `strings`, alive while the node holds `local`.
+        // points into `strings`, alive while the document holds `local`.
         unsafe {
-            let (old_u, old_l) = match (*p).r#type {
+            match (*p).r#type {
                 EXI_ATTRIBUTE_NODE => {
                     let a = p as *mut RawAttr;
-                    let old = ((*a).uriId, (*a).localId);
                     (*a).uriId = uri.index();
                     (*a).localId = local.index();
-                    old
                 }
                 _ => {
                     let n = p as *mut RawNode;
-                    let old = ((*n).uriId, (*n).localId);
                     (*n).uriId = uri.index();
                     (*n).localId = local.index();
-                    old
                 }
-            };
+            }
             (*p).name = strings.locals().resolve(local).as_ptr();
-            if old_u != NO_ID {
-                old_strings.uris().release(StrId::from_raw(old_u));
-            }
-            if old_l != NO_ID {
-                old_strings.locals().release(StrId::from_raw(old_l));
-            }
         }
     }
 
@@ -642,16 +817,12 @@ impl<'g> Document<'g> {
         p: *mut RawCommon,
         prefix: Option<&str>,
     ) -> Result<()> {
-        let s = self.d().strings;
         let new_id = match prefix.filter(|p| !p.is_empty()) {
-            Some(pre) => s.prefixes().intern_id(pre)?.index(),
+            Some(pre) => self.intern_prefix(pre)?.index(),
             None => NO_ID,
         };
         // SAFETY: a live element or attribute.
-        let old = unsafe { swap_want_prefix_id(p, new_id) };
-        if old != NO_ID {
-            s.prefixes().release(StrId::from_raw(old));
-        }
+        unsafe { swap_want_prefix_id(p, new_id) };
         Ok(())
     }
 
@@ -662,19 +833,15 @@ impl<'g> Document<'g> {
         p: *mut RawCommon,
         id: Option<StrId<Prefix>>,
     ) {
-        let s = self.d().strings;
         let new_id = match id {
             Some(pid) => {
-                s.prefixes().retain(pid);
+                self.hold_prefix(pid);
                 pid.index()
             }
             None => NO_ID,
         };
         // SAFETY: a live element or attribute.
-        let old = unsafe { swap_want_prefix_id(p, new_id) };
-        if old != NO_ID {
-            s.prefixes().release(StrId::from_raw(old));
-        }
+        unsafe { swap_want_prefix_id(p, new_id) };
     }
 
     fn want_prefix_str(&self, p: *mut RawCommon) -> Option<&'g str> {
@@ -887,9 +1054,9 @@ impl<'g> Document<'g> {
 
     /// Sets the text of a text, comment or PI node.
     fn set_text(&mut self, p: *mut RawCommon, s: &str) {
-        // SAFETY: `p` is a live node of this document with a `content`
+        // SAFETY: `p` is a live `NodeBox` of this document with a `content`
         // field. Its payload owns the NUL-terminated bytes (inline or
-        // heap-allocated), and the box address never moves while live.
+        // heap-allocated), and the arena address never moves while live.
         unsafe {
             if (*p).r#type == EXI_PI_NODE {
                 let data = cstr(s);
@@ -912,7 +1079,10 @@ impl<'g> Document<'g> {
             } else {
                 let text = cstr(s);
                 (*(p as *mut RawNode)).content = text.as_ptr() as *mut u8;
-                extra_mut(p).payload = Payload::Text(text);
+                let x = extra_mut(p);
+                let slot = x.slot;
+                x.payload = Payload::Text(text);
+                self.dm().heap_nodes.push(slot);
             }
         }
     }
@@ -920,13 +1090,73 @@ impl<'g> Document<'g> {
     fn set_typed(&mut self, p: *mut RawCommon, v: OwnedValue) {
         match v {
             OwnedValue::Str(s) => self.set_text(p, &s),
+            OwnedValue::Bool(b) => unsafe {
+                (*(p as *mut RawNode)).content = ptr::null_mut();
+                extra_mut(p).payload = Payload::Bool(b);
+            },
+            OwnedValue::BoolDigit(b) => unsafe {
+                (*(p as *mut RawNode)).content = ptr::null_mut();
+                extra_mut(p).payload = Payload::BoolDigit(b);
+            },
+            OwnedValue::Int(i) => unsafe {
+                (*(p as *mut RawNode)).content = ptr::null_mut();
+                extra_mut(p).payload = Payload::Int(i);
+            },
+            OwnedValue::Float(f) => unsafe {
+                (*(p as *mut RawNode)).content = ptr::null_mut();
+                extra_mut(p).payload = Payload::Float(f);
+            },
+            OwnedValue::Decimal(d) => unsafe {
+                (*(p as *mut RawNode)).content = ptr::null_mut();
+                extra_mut(p).payload = Payload::Decimal {
+                    negative: d.negative,
+                    fraction_digits: d.fraction_digits,
+                    integral: d.integral,
+                    fraction: d.fraction,
+                };
+            },
             v => {
                 // SAFETY: as in `set_text`.
                 unsafe {
                     (*(p as *mut RawNode)).content = ptr::null_mut();
-                    extra_mut(p).payload = Payload::Typed(Box::new(v));
+                    let x = extra_mut(p);
+                    let slot = x.slot;
+                    x.payload = Payload::Typed(Box::new(v));
+                    self.dm().heap_nodes.push(slot);
                 }
             }
+        }
+    }
+
+    fn set_value(&mut self, p: *mut RawCommon, v: &Value<'_>) {
+        match *v {
+            Value::Str(s) => self.set_text(p, s),
+            Value::Bool(b) => unsafe {
+                (*(p as *mut RawNode)).content = ptr::null_mut();
+                extra_mut(p).payload = Payload::Bool(b);
+            },
+            Value::BoolDigit(b) => unsafe {
+                (*(p as *mut RawNode)).content = ptr::null_mut();
+                extra_mut(p).payload = Payload::BoolDigit(b);
+            },
+            Value::Int(i) => unsafe {
+                (*(p as *mut RawNode)).content = ptr::null_mut();
+                extra_mut(p).payload = Payload::Int(i);
+            },
+            Value::Float(f) => unsafe {
+                (*(p as *mut RawNode)).content = ptr::null_mut();
+                extra_mut(p).payload = Payload::Float(f);
+            },
+            Value::Decimal(d) => unsafe {
+                (*(p as *mut RawNode)).content = ptr::null_mut();
+                extra_mut(p).payload = Payload::Decimal {
+                    negative: d.negative,
+                    fraction_digits: d.fraction_digits,
+                    integral: d.integral,
+                    fraction: d.fraction,
+                };
+            },
+            _ => self.set_typed(p, v.to_owned()),
         }
     }
 
@@ -1028,7 +1258,10 @@ impl<'g> Document<'g> {
         unsafe {
             (*p).name = pair.0.as_ptr();
             (*(p as *mut RawNode)).content = pair.1.as_ptr() as *mut u8;
-            extra_mut(p).payload = Payload::Pi(pair);
+            let x = extra_mut(p);
+            let slot = x.slot;
+            x.payload = Payload::Pi(pair);
+            self.dm().heap_nodes.push(slot);
         }
         self.id(p)
     }
@@ -1050,7 +1283,10 @@ impl<'g> Document<'g> {
         // SAFETY: as `new_pi`.
         unsafe {
             (*p).name = b.as_ptr();
-            extra_mut(p).payload = Payload::Name(b);
+            let x = extra_mut(p);
+            let slot = x.slot;
+            x.payload = Payload::Name(b);
+            self.dm().heap_nodes.push(slot);
         }
         self.id(p)
     }
@@ -1544,7 +1780,8 @@ impl<'g> Document<'g> {
             .with_ids(
                 None,
                 Some(GlobalName { uri: uri_id, local: local_id }),
-            );
+            )
+            .with_pool(s);
             if !ns.is_null() && !(*ns).prefix.is_null() {
                 name = name.with_prefix(str_at((*ns).prefix));
             }
@@ -1636,11 +1873,7 @@ impl<'g> Document<'g> {
         unsafe {
             match (*p).r#type {
                 EXI_TEXT_NODE | EXI_CDATA_SECTION_NODE => {
-                    let x = extra(p);
-                    Some(match x.typed() {
-                        Some(v) => v.as_value(),
-                        None => Value::Str(x.text()),
-                    })
+                    Some(extra(p).as_value())
                 }
                 EXI_ATTRIBUTE_NODE => {
                     let c = (*p).children;
@@ -1687,16 +1920,12 @@ impl<'g> Document<'g> {
                 EXI_TEXT_NODE
                 | EXI_CDATA_SECTION_NODE
                 | EXI_COMMENT_NODE
-                | EXI_PI_NODE => {
-                    let x = extra(p);
-                    match x.typed() {
-                        Some(v) => out.push_str(
-                            &crate::engine::lexical_string(&v.as_value())
-                                .unwrap_or_default(),
-                        ),
-                        None => out.push_str(x.text()),
-                    }
-                }
+                | EXI_PI_NODE => match extra(p).as_value() {
+                    Value::Str(s) => out.push_str(s),
+                    v => out.push_str(
+                        &crate::engine::lexical_string(&v).unwrap_or_default(),
+                    ),
+                },
                 EXI_ELEMENT_NODE | EXI_DOCUMENT_NODE | EXI_ATTRIBUTE_NODE => {
                     let mut c = (*p).children;
                     while !c.is_null() {
@@ -2229,37 +2458,68 @@ impl<'g> Document<'g> {
                 self.dm().has_default_ns = true;
             }
             for (node, name, xml_field) in nodes {
+                let kind = (*node).r#type;
                 let slot = node_slot(node) as usize;
                 let source = from.dm();
                 source.ptrs[slot] = ptr::null_mut();
                 source.gens[slot] = source.gens[slot].wrapping_add(1);
                 source.free.push(slot as u32);
                 let mine = self.reserve_slot();
+                if kind != EXI_DTD_NODE {
+                    NodeArena::transfer_node(
+                        &mut from.dm().arena,
+                        &mut self.dm().arena,
+                        node,
+                    );
+                }
                 self.dm().ptrs[mine as usize] = node;
                 set_node_slot(node, mine);
                 (*node).doc = self.doc_ptr();
+                let needs_heap = match kind {
+                    EXI_DTD_NODE => true,
+                    EXI_ELEMENT_NODE => {
+                        !(*(node as *const RawNode)).nsDef.is_null()
+                    }
+                    EXI_ATTRIBUTE_NODE => false,
+                    _ => extra(node).has_heap_payload(),
+                };
+                if needs_heap {
+                    self.dm().heap_nodes.push(mine);
+                }
                 if let Some((uri, local, want)) = name {
                     let (uid, lid) = (uri.id(), local.id());
-                    core::mem::forget(uri);
-                    core::mem::forget(local);
-                    Self::install_name_ids(
-                        node,
-                        strings,
-                        from_strings,
-                        uid,
-                        lid,
-                    );
+                    if self.dm().held_uris.insert(uid.index()) {
+                        core::mem::forget(uri);
+                    }
+                    if self.dm().held_locals.insert(lid.index()) {
+                        core::mem::forget(local);
+                    }
+                    Self::install_name_ids(node, strings, uid, lid);
                     let new_w = match want {
                         Some(h) => {
                             let id = h.id().index();
-                            core::mem::forget(h);
+                            if self.dm().held_prefixes.insert(id) {
+                                core::mem::forget(h);
+                            }
                             id
                         }
                         None => NO_ID,
                     };
-                    let old_w = swap_want_prefix_id(node, new_w);
-                    if old_w != NO_ID {
-                        from_strings.prefixes().release(StrId::from_raw(old_w));
+                    swap_want_prefix_id(node, new_w);
+                } else if matches!(
+                    kind,
+                    EXI_ELEMENT_NODE | EXI_ATTRIBUTE_NODE
+                ) {
+                    let (u, l) = raw_ids(node);
+                    if u != NO_ID {
+                        self.hold_uri(StrId::from_raw(u));
+                    }
+                    if l != NO_ID {
+                        self.hold_local(StrId::from_raw(l));
+                    }
+                    let w = want_prefix_id(node);
+                    if w != NO_ID {
+                        self.hold_prefix(StrId::from_raw(w));
                     }
                 }
                 if let Some(field) = xml_field {
@@ -2338,9 +2598,14 @@ impl<'g> Document<'g> {
                         node = (*el).properties.cast();
                         continue;
                     }
-                    free_ns_list((*el).nsDef);
+                    let ns = core::mem::replace(
+                        &mut (*el).nsDef,
+                        ptr::null_mut(),
+                    );
+                    free_ns_list(ns);
                 }
-                if (*node).r#type == EXI_DTD_NODE
+                let kind = (*node).r#type;
+                if kind == EXI_DTD_NODE
                     && (*self.doc_ptr()).intSubset == node.cast()
                 {
                     (*self.doc_ptr()).intSubset = ptr::null_mut();
@@ -2352,11 +2617,13 @@ impl<'g> Document<'g> {
                 }
                 let slot = node_slot(node) as usize;
                 let d = self.dm();
-                let strings = d.strings;
                 d.ptrs[slot] = ptr::null_mut();
                 d.gens[slot] = d.gens[slot].wrapping_add(1);
                 d.free.push(slot as u32);
-                drop_box(node, strings);
+                drop_node_payload(node);
+                if kind != EXI_DTD_NODE {
+                    d.arena.free_slot(node);
+                }
                 if done {
                     break;
                 }
@@ -2529,12 +2796,11 @@ impl<'g> Document<'g> {
                     let e = self.alloc_node(EXI_ELEMENT_NODE);
                     let (u, l) = ((*s).uriId, (*s).localId);
                     if same && u != NO_ID && l != NO_ID {
-                        let dst = self.d().strings;
                         let (uid, lid) =
                             (StrId::from_raw(u), StrId::from_raw(l));
-                        dst.uris().retain(uid);
-                        dst.locals().retain(lid);
-                        Self::install_name_ids(e, dst, dst, uid, lid);
+                        self.hold_uri(uid);
+                        self.hold_local(lid);
+                        Self::install_name_ids(e, self.d().strings, uid, lid);
                     } else {
                         let uri = if u == NO_ID {
                             ""
@@ -2580,12 +2846,11 @@ impl<'g> Document<'g> {
                     let a = self.alloc_attr();
                     let (u, l) = ((*sa).uriId, (*sa).localId);
                     if same && u != NO_ID && l != NO_ID {
-                        let dst = self.d().strings;
                         let (uid, lid) =
                             (StrId::from_raw(u), StrId::from_raw(l));
-                        dst.uris().retain(uid);
-                        dst.locals().retain(lid);
-                        Self::install_name_ids(a, dst, dst, uid, lid);
+                        self.hold_uri(uid);
+                        self.hold_local(lid);
+                        Self::install_name_ids(a, self.d().strings, uid, lid);
                     } else {
                         let uri = if u == NO_ID {
                             ""
@@ -2605,13 +2870,10 @@ impl<'g> Document<'g> {
                     a
                 }
                 EXI_TEXT_NODE | EXI_CDATA_SECTION_NODE => {
-                    let x = extra(src);
                     let n = self.alloc_node(EXI_TEXT_NODE);
                     (*n).name = TEXT_NAME.as_ptr();
-                    match x.typed() {
-                        Some(v) => self.set_typed(n, v.clone()),
-                        None => self.set_text(n, x.text()),
-                    }
+                    let val = extra(src).as_value();
+                    self.set_value(n, &val);
                     return Ok(n);
                 }
                 EXI_COMMENT_NODE => {
@@ -3060,6 +3322,8 @@ impl<'g> Document<'g> {
             }
             if last.is_null() {
                 (*el).nsDef = new;
+                let slot = node_slot(el as *mut RawCommon);
+                self.dm().heap_nodes.push(slot);
             } else {
                 (*last).next = new;
             }

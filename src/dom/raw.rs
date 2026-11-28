@@ -30,8 +30,8 @@ use alloc::boxed::Box;
 use core::ffi::{c_int, c_void};
 use core::ptr;
 
-use crate::OwnedValue;
-use crate::strings::{GlobalStrings, Held, Prefix, StrId, Uri};
+use crate::strings::{Held, Prefix, Uri};
+use crate::{Decimal, Float, OwnedValue, Value};
 
 /// `xmlElementType`: the `type` field. The numbers are libxml2's.
 pub type ExiElementType = c_int;
@@ -205,14 +205,26 @@ pub(crate) struct Extra {
     pub payload: Payload,
 }
 
-/// Inline short text, a heap text buffer, a typed EXI value, an
-/// entity-ref name, or a PI `(target, data)` pair.
+/// Inline short text, inline scalar typed values, a heap text buffer,
+/// a boxed compound typed value, an entity-ref name, or a PI `(target,
+/// data)` pair.
 pub(crate) enum Payload {
     None,
     /// Short NUL-terminated UTF-8 text stored inline in the node box
     /// (`len as usize <= INLINE_MAX`, `buf[len as usize] == 0`).
     Inline { len: u8, buf: [u8; INLINE_MAX + 1] },
     Text(Box<[u8]>),
+    Bool(bool),
+    BoolDigit(bool),
+    Int(i64),
+    Float(Float),
+    Decimal {
+        negative: bool,
+        fraction_digits: u8,
+        integral: u64,
+        fraction: u64,
+    },
+    /// Compound or oversized typed EXI value.
     Typed(Box<OwnedValue>),
     /// Backing buffer for an entity-ref name (keeps `RawNode::name` alive).
     Name(#[allow(dead_code)] Box<[u8]>),
@@ -237,11 +249,40 @@ impl Extra {
         }
     }
 
-    pub fn typed(&self) -> Option<&OwnedValue> {
+    /// The node's value (for text/CDATA nodes): inline scalar values and
+    /// text borrow directly without allocating.
+    pub fn as_value(&self) -> Value<'_> {
         match &self.payload {
-            Payload::Typed(v) => Some(v),
-            _ => None,
+            Payload::Bool(b) => Value::Bool(*b),
+            Payload::BoolDigit(b) => Value::BoolDigit(*b),
+            Payload::Int(i) => Value::Int(*i),
+            Payload::Float(f) => Value::Float(*f),
+            Payload::Decimal {
+                negative,
+                fraction_digits,
+                integral,
+                fraction,
+            } => Value::Decimal(Decimal {
+                negative: *negative,
+                integral: *integral,
+                fraction: *fraction,
+                fraction_digits: *fraction_digits,
+            }),
+            Payload::Typed(v) => v.as_value(),
+            _ => Value::Str(self.text()),
         }
+    }
+
+    /// True when the payload owns a separate heap allocation that must be
+    /// dropped before freeing the arena chunk.
+    pub fn has_heap_payload(&self) -> bool {
+        matches!(
+            self.payload,
+            Payload::Text(_)
+                | Payload::Typed(_)
+                | Payload::Name(_)
+                | Payload::Pi(_)
+        )
     }
 }
 
@@ -508,49 +549,23 @@ pub(crate) unsafe fn extra_mut<'a>(p: *mut RawCommon) -> &'a mut Extra {
     unsafe { &mut (*(p as *mut NodeBox)).x }
 }
 
-/// Releases any interned name and prefix ids held by `p` and frees its
-/// box (not its children).
+/// Drops any external heap allocation owned by `p` (idempotent:
+/// replaces `Payload` with `Payload::None`, frees `DtdBox` for DTDs).
+/// Does not free `p`'s arena slot or release document-retained string ids.
 ///
 /// # Safety
 ///
-/// `p` is a live node owned by a document using `strings`, unlinked,
-/// never used again.
-pub(crate) unsafe fn drop_box(p: *mut RawCommon, strings: &GlobalStrings) {
-    // SAFETY: the box was made with `Box::into_raw` matching its `type`.
+/// `p` is a live node owned by the dropping document (for `EXI_DTD_NODE`,
+/// `p` is never used again after this call).
+pub(crate) unsafe fn drop_node_payload(p: *mut RawCommon) {
+    // SAFETY: each box is `repr(C)` matching `(*p).r#type`.
     unsafe {
         match (*p).r#type {
-            EXI_ELEMENT_NODE => {
-                let n = p as *mut ElemBox;
-                let (u, l, w) =
-                    ((*n).raw.uriId, (*n).raw.localId, (*n).want_prefix);
-                if u != NO_ID {
-                    strings.uris().release(StrId::from_raw(u));
-                }
-                if l != NO_ID {
-                    strings.locals().release(StrId::from_raw(l));
-                }
-                if w != NO_ID {
-                    strings.prefixes().release(StrId::from_raw(w));
-                }
-                drop(Box::from_raw(n));
-            }
-            EXI_ATTRIBUTE_NODE => {
-                let a = p as *mut AttrBox;
-                let (u, l, w) =
-                    ((*a).raw.uriId, (*a).raw.localId, (*a).want_prefix);
-                if u != NO_ID {
-                    strings.uris().release(StrId::from_raw(u));
-                }
-                if l != NO_ID {
-                    strings.locals().release(StrId::from_raw(l));
-                }
-                if w != NO_ID {
-                    strings.prefixes().release(StrId::from_raw(w));
-                }
-                drop(Box::from_raw(a));
-            }
+            EXI_ELEMENT_NODE | EXI_ATTRIBUTE_NODE => {}
             EXI_DTD_NODE => drop(Box::from_raw(p as *mut DtdBox)),
-            _ => drop(Box::from_raw(p as *mut NodeBox)),
+            _ => {
+                extra_mut(p).payload = Payload::None;
+            }
         }
     }
 }

@@ -43,7 +43,10 @@ use crate::{Error, ErrorKind, Event, EventMeta, Name, NsDecl, Result, Value};
 /// ```
 pub struct DocumentBuilder<'g> {
     doc: Document<'g>,
-    stack: Vec<NodeId>,
+    stack: Vec<(NodeId, *mut RawNode)>,
+    /// Set if the caller borrowed `document_mut` and may have removed an open
+    /// element from the tree.
+    edited: bool,
     /// Last attribute appended to the open element (NULL when unknown or
     /// invalidated by `document_mut`), for O(1) attribute appends.
     last_attr: *mut RawAttr,
@@ -52,8 +55,6 @@ pub struct DocumentBuilder<'g> {
     text: String,
     line: u32,
     ignore_blanks: bool,
-    /// True when incoming `Name::global()` ids come from `doc.strings()`.
-    same_strings: bool,
     ended: bool,
 }
 
@@ -71,12 +72,12 @@ impl<'g> DocumentBuilder<'g> {
         DocumentBuilder {
             doc: Document::new(strings),
             stack: Vec::new(),
+            edited: false,
             last_attr: ptr::null_mut(),
             pending: false,
             text: String::new(),
             line: 0,
             ignore_blanks: false,
-            same_strings: false,
             ended: false,
         }
     }
@@ -140,6 +141,7 @@ impl<'g> DocumentBuilder<'g> {
     /// # Ok::<(), exi::Error>(())
     /// ```
     pub fn document_mut(&mut self) -> &mut Document<'g> {
+        self.edited = true;
         self.last_attr = ptr::null_mut();
         &mut self.doc
     }
@@ -159,7 +161,7 @@ impl<'g> DocumentBuilder<'g> {
     /// # Ok::<(), exi::Error>(())
     /// ```
     pub fn current(&self) -> Option<NodeId> {
-        self.stack.last().copied().filter(|&id| self.doc.contains(id))
+        self.stack.last().map(|&(id, _)| id).filter(|&id| self.doc.contains(id))
     }
 
     /// The document, after its end.
@@ -235,15 +237,17 @@ impl<'g> DocumentBuilder<'g> {
         self.event(ev)
     }
 
+    #[inline]
     fn open_element(&self) -> Result<Option<*mut RawNode>> {
-        self.stack
-            .last()
-            .map(|&id| {
-                self.doc.live_ptr(id).map(|p| p.cast()).ok_or_else(|| {
-                    Error::new(ErrorKind::State, "an open element was removed")
-                })
-            })
-            .transpose()
+        let Some(&(id, ptr)) = self.stack.last() else {
+            return Ok(None);
+        };
+        if !self.edited {
+            return Ok(Some(ptr));
+        }
+        self.doc.live_ptr(id).map(|p| Some(p.cast())).ok_or_else(|| {
+            Error::new(ErrorKind::State, "an open element was removed")
+        })
     }
 
     /// Chooses the open element's namespace, once its declarations are
@@ -313,26 +317,42 @@ impl<'g> DocumentBuilder<'g> {
         self.flush_to(open)?;
         self.settle_el(open)?;
         let p = self.doc.alloc_node(EXI_ELEMENT_NODE);
-        if self.same_strings {
-            self.doc.set_name_trusted(p, name)?;
+        if let Some(g) = name.global_for(self.doc.strings()) {
+            self.doc.set_name_global(p, g);
         } else {
             self.doc.set_name(p, name)?;
         }
-        if name.prefix().is_some() {
+        let has_prefix = name.prefix().is_some();
+        if has_prefix {
             self.doc.want_prefix(p, name.prefix())?;
         }
+        let el = p as *mut RawNode;
         let parent =
             open.unwrap_or_else(|| self.doc.doc_ptr().cast()) as *mut RawCommon;
         // SAFETY: a new element appended to the open element or the
         // document.
-        unsafe {
-            (*(p as *mut RawNode)).line =
-                self.line.min(u16::MAX as u32) as u16;
+        let need_settle = unsafe {
+            (*el).line = self.line.min(u16::MAX as u32) as u16;
             append_raw(parent, p);
-        }
-        self.stack.push(self.doc.id(p));
+            if name.uri().is_empty() {
+                self.doc.has_default_ns()
+            } else if !has_prefix
+                && let Some(par) = open
+                && (*par).uriId == (*el).uriId
+                && !(*par).ns.is_null()
+                && (*(*par).ns).prefix.is_null()
+            {
+                // Same default namespace as parent; `ns_ev` will re-enable
+                // `pending` if this element declares namespaces of its own.
+                (*el).ns = (*par).ns;
+                false
+            } else {
+                true
+            }
+        };
+        self.stack.push((self.doc.id(p), el));
         self.last_attr = ptr::null_mut();
-        self.pending = true;
+        self.pending = need_settle;
         Ok(())
     }
 
@@ -353,6 +373,7 @@ impl<'g> DocumentBuilder<'g> {
             // SAFETY: the open element.
             unsafe { (*el).ns = ns };
         }
+        self.pending = true;
         Ok(())
     }
 
@@ -367,9 +388,9 @@ impl<'g> DocumentBuilder<'g> {
         let el = open.ok_or_else(|| {
             Error::new(ErrorKind::State, "an attribute outside an element")
         })?;
-        let a = self.doc.alloc_attr();
-        if self.same_strings {
-            self.doc.set_name_trusted(a, name)?;
+        let (a, tp) = self.doc.alloc_attr_and_text();
+        if let Some(g) = name.global_for(self.doc.strings()) {
+            self.doc.set_name_global(a, g);
         } else {
             self.doc.set_name(a, name)?;
         }
@@ -389,11 +410,10 @@ impl<'g> DocumentBuilder<'g> {
             }
         }
         self.last_attr = attr_ptr;
-        self.doc.fix_attr_ns(attr_ptr, super::Declare::Here)?;
-        let tp = match v {
-            Value::Str(text) => self.doc.alloc_text_raw(text),
-            _ => self.doc.alloc_value_raw(v.to_owned()),
-        };
+        if !name.uri().is_empty() {
+            self.doc.fix_attr_ns(attr_ptr, super::Declare::Here)?;
+        }
+        self.doc.set_value(tp, v);
         // SAFETY: a new text node under the new attribute.
         unsafe { append_raw(a, tp) };
         Ok(())
@@ -404,17 +424,17 @@ impl<'g> DocumentBuilder<'g> {
         open: Option<*mut RawNode>,
         v: &Value<'_>,
     ) -> Result<()> {
-        if open.is_none() {
+        let Some(el) = open else {
             return Ok(()); // whitespace around the root element
-        }
+        };
         self.settle_el(open)?;
         match v {
             Value::Str(s) => self.text.push_str(s),
             v => {
                 self.flush_to(open)?;
-                let tp = self.doc.alloc_value_raw(v.to_owned());
+                let tp = self.doc.alloc_value_ref_raw(v);
                 // SAFETY: a new text node appended to the live open element.
-                unsafe { append_raw(open.unwrap() as *mut RawCommon, tp) };
+                unsafe { append_raw(el as *mut RawCommon, tp) };
             }
         }
         Ok(())
@@ -431,9 +451,9 @@ impl<'g> DocumentBuilder<'g> {
             ));
         }
         let open = self.open_element()?;
-        if open.is_none() {
+        let Some(el) = open else {
             return Ok(());
-        }
+        };
         self.settle_el(open)?;
         if !self.text.is_empty() {
             self.text.push_str(s);
@@ -446,7 +466,7 @@ impl<'g> DocumentBuilder<'g> {
         }
         let tp = self.doc.alloc_text_raw(s);
         // SAFETY: `tp` is a new text node appended to the live open element.
-        unsafe { append_raw(open.unwrap() as *mut RawCommon, tp) };
+        unsafe { append_raw(el as *mut RawCommon, tp) };
         Ok(())
     }
 }
@@ -471,20 +491,20 @@ impl EventSink for DocumentBuilder<'_> {
                     Error::new(ErrorKind::State, "an end with no element open")
                 })?;
                 if !name.is("", "") {
-                    let matched = if self.same_strings
-                        && let Some(g) = name.global()
-                    {
-                        // SAFETY: `el` is a live open element.
-                        unsafe {
-                            (*el).uriId == g.uri.index()
-                                && (*el).localId == g.local.index()
-                        }
-                    } else {
-                        let id = *self.stack.last().expect("open element");
-                        self.doc
-                            .name(id)
-                            .is_some_and(|n| n.is(name.uri(), name.local_name()))
-                    };
+                    let matched =
+                        if let Some(g) = name.global_for(self.doc.strings()) {
+                            // SAFETY: `el` is a live open element.
+                            unsafe {
+                                (*el).uriId == g.uri.index()
+                                    && (*el).localId == g.local.index()
+                            }
+                        } else {
+                            let (id, _) =
+                                *self.stack.last().expect("open element");
+                            self.doc.name(id).is_some_and(|n| {
+                                n.is(name.uri(), name.local_name())
+                            })
+                        };
                     if !matched {
                         return Err(Error::new(
                             ErrorKind::State,
@@ -635,7 +655,6 @@ impl<'g> Document<'g> {
         use crate::xml::{XmlConfig, XmlReader};
         let set = GrammarSet::schemaless();
         let g = set.attach(strings)?;
-        b.same_strings = core::ptr::eq(b.doc.strings(), strings);
         b.doc.reserve_nodes((xml.len() / 32).min(8192));
         let mut x: XmlReader = XmlReader::new(
             XmlConfig::new()

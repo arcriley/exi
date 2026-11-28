@@ -166,6 +166,80 @@ pub fn read_uint_big<D: Decoder>(
     Ok(())
 }
 
+/// Decodes an Unsigned Integer directly into `i64` without allocating
+/// when it fits `0..=i64::MAX`, falling back to decimal digits only
+/// when it exceeds `i64::MAX`.
+pub(crate) fn read_uint_or_big<D: Decoder>(
+    d: &mut D,
+    ch: Channel,
+    max_octets: u32,
+) -> Result<core::result::Result<i64, String>> {
+    let mut stack = [0u8; 10];
+    let mut len = 0usize;
+    let mut v = 0u64;
+    let mut shift = 0u32;
+    let mut overflow = false;
+    loop {
+        if len as u32 >= max_octets {
+            return Err(err(
+                ErrorKind::Limit,
+                "unsigned integer longer than max_integer_octets",
+            ));
+        }
+        let b = d.nbit(ch, 8)? as u8;
+        let g = b & 0x7F;
+        stack[len] = g;
+        if !overflow && g != 0 {
+            if shift >= 63 || (shift > 56 && (g as u64) >> (63 - shift) != 0) {
+                overflow = true;
+            } else {
+                v |= (g as u64) << shift;
+            }
+        }
+        len += 1;
+        if b & 0x80 == 0 {
+            if !overflow {
+                return Ok(Ok(v as i64));
+            }
+            let mut out = String::new();
+            groups_to_decimal(&stack[..len], &mut out);
+            return Ok(Err(out));
+        }
+        if len == stack.len() {
+            let mut groups = Vec::with_capacity(len + 4);
+            groups.extend_from_slice(&stack);
+            read_uint_groups(d, ch, max_octets, &mut groups)?;
+            if !overflow && groups[len..].iter().all(|&x| x == 0) {
+                return Ok(Ok(v as i64));
+            }
+            let mut out = String::new();
+            groups_to_decimal(&groups, &mut out);
+            return Ok(Err(out));
+        }
+        shift += 7;
+    }
+}
+
+/// Decodes a signed Integer directly into `i64` without allocating when
+/// it fits, falling back to decimal digits only when outside `i64`.
+pub(crate) fn read_int_or_big<D: Decoder>(
+    d: &mut D,
+    ch: Channel,
+    max_octets: u32,
+) -> Result<core::result::Result<i64, String>> {
+    let negative = read_bool(d, ch)?;
+    match read_uint_or_big(d, ch, max_octets)? {
+        Ok(m) => Ok(Ok(if negative { !m } else { m })),
+        Err(mut digits) => {
+            if negative {
+                decimal_add_one(&mut digits);
+                digits.insert(0, '-');
+            }
+            Ok(Err(digits))
+        }
+    }
+}
+
 /// Writes an Unsigned Integer given as decimal digits, for values
 /// beyond `u64`.
 ///

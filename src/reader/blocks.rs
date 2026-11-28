@@ -12,7 +12,7 @@
 
 use alloc::string::String;
 
-use super::{Out, Reader, input_view, owned_value};
+use super::{Out, Reader, input_view, out_val};
 use crate::coding::{Decoder, body::BodyDecoder};
 use crate::engine::{self, Probe, err};
 use crate::grammar::Terminal;
@@ -245,37 +245,35 @@ impl<'g, const N: usize> Reader<'g, N> {
         let mut text = core::mem::take(&mut self.dec.text);
         text.clear();
         let Some((value, used)) = ('decode: {
-            let Reader { ring, spill, spilling, sess, block, .. } = self;
+            let Reader { ring, spill, spilling, sess, block, str_buf, .. } =
+                self;
             let z = block
                 .as_ref()
                 .filter(|_| inflated)
                 .map(|b| &b.z.out[b.z.pos..]);
             let (a, b) = input_view(ring, spill.data(), *spilling, z, n);
             let sess = sess.as_mut().expect("a block has a session");
-            if !final_input {
-                let mut d = BodyDecoder::new(Coding::ByteAligned, a, b, 0);
-                let mut probe = Probe::new(&sess.tables);
-                match engine::decode_value(
-                    &sess.st, &mut d, &mut probe, slot, name, &mut text,
-                ) {
-                    Ok(_) => {}
-                    Err(e) if e.kind() == ErrorKind::Truncated => {
-                        break 'decode None;
-                    }
-                    Err(e) => return Err(e),
-                }
-                text.clear();
-            }
             let mut d = BodyDecoder::new(Coding::ByteAligned, a, b, 0);
-            let v = engine::decode_value(
+            let v = match engine::decode_value(
                 &sess.st,
                 &mut d,
                 &mut sess.tables,
                 slot,
                 name,
                 &mut text,
-            )?;
-            Some((owned_value(&sess.tables, v, &text), d.bit_position()))
+            ) {
+                Ok(v) => v,
+                Err(e) if !final_input && e.kind() == ErrorKind::Truncated => {
+                    break 'decode None;
+                }
+                Err(e) => return Err(e),
+            };
+            let can_pin_hit = sess.tables.rules().get_capacity().is_none()
+                && !sess.st.in_sc();
+            Some((
+                out_val(&sess.tables, v, &text, str_buf, false, can_pin_hit),
+                d.bit_position(),
+            ))
         }) else {
             self.dec.text = text;
             self.spill_if_full();

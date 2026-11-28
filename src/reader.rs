@@ -87,8 +87,9 @@ use crate::coding::Decoder;
 #[cfg(feature = "compression")]
 use crate::coding::block::BlockRead;
 use crate::coding::body::BodyDecoder;
+use crate::coding::names::ValueRead;
 use crate::engine::{
-    self, DVal, Decoded, Probe, Slot, State, Top, check_options, err,
+    self, DVal, Decoded, Probe, Slot, State, Top, TryTables, check_options, err,
 };
 use crate::error::Position;
 use crate::event::{Doctype, Event, EventMeta, NsDecl};
@@ -97,7 +98,9 @@ use crate::header::parse_header_split;
 use crate::input::InputRing;
 use crate::name::{GlobalName, Name};
 use crate::stream::{EventSink, EventSource, Status, Step};
+use crate::strings::ValueId;
 use crate::tables::SessionTables;
+use crate::value::Value;
 use crate::value::{OwnedValue, ValueFlags};
 use crate::{Coding, ErrorKind, Limits, NameId, Options, Result};
 
@@ -495,6 +498,9 @@ pub struct Reader<'g, const N: usize = 4096> {
     skip_to: Option<u32>,
     /// Decoded events not yet returned.
     queue: VecDeque<(Out, EventMeta)>,
+    /// Literal strings referenced by queued `OutVal::Lit` events, cleared
+    /// whenever `queue` empties.
+    str_buf: String,
     /// Pre-compression and compression: the block being read, and how
     /// many events at the front of the queue belong to blocks whose
     /// values are all read.
@@ -531,6 +537,39 @@ struct Session<'g> {
     tables: SessionTables<'g>,
 }
 
+/// A value carried by `Out`: string-table hits and single-event literals
+/// stay zero-copy without allocating a `Box<str>`.
+#[derive(Debug, Default)]
+pub(super) enum OutVal {
+    #[default]
+    None,
+    /// A string value held in `SessionTables` / `GlobalStrings::values()`.
+    Hit(ValueId),
+    /// A string literal held in `Reader::dec.text` (non-queued fast path).
+    DecText,
+    /// A string literal copied into `Reader::str_buf` (queued path).
+    Lit(usize, usize),
+    /// A non-string typed value or QName.
+    Typed(OwnedValue),
+}
+
+impl OutVal {
+    fn as_value<'a>(
+        &'a self,
+        t: &'a SessionTables<'_>,
+        dec_text: &'a str,
+        str_buf: &'a str,
+    ) -> Value<'a> {
+        match self {
+            OutVal::None => Value::Str(""),
+            OutVal::Hit(id) => Value::Str(t.global_value_text(*id)),
+            OutVal::DecText => Value::Str(dec_text),
+            OutVal::Lit(a, b) => Value::Str(&str_buf[*a..*b]),
+            OutVal::Typed(v) => v.as_value(),
+        }
+    }
+}
+
 /// The event `next` returns, in numbers and owned data, until the next
 /// call.
 #[derive(Debug, Default)]
@@ -541,8 +580,8 @@ enum Out {
     ED,
     SE(NameId, Option<u32>),
     EE(NameId, Option<u32>),
-    AT(NameId, Option<u32>, OwnedValue),
-    CH(OwnedValue),
+    AT(NameId, Option<u32>, OutVal),
+    CH(OutVal),
     NS(u32, u32, bool),
     CM(String),
     PI(String, String),
@@ -607,15 +646,46 @@ fn input_view<'a, const N: usize>(
     if n <= a.len() { (&a[..n], &[]) } else { (a, &b[..n - a.len()]) }
 }
 
-/// A decoded value as the event carries it.
-fn owned_value(t: &SessionTables<'_>, v: DVal, text: &str) -> OwnedValue {
+/// A decoded value as the event carries it, avoiding `Box<str>` allocations
+/// for string-table hits and single-event literals.
+pub(super) fn out_val(
+    t: &SessionTables<'_>,
+    v: DVal,
+    text: &str,
+    str_buf: &mut String,
+    can_borrow_dec: bool,
+    can_pin_hit: bool,
+) -> OutVal {
     match v {
-        DVal::Str(r) => OwnedValue::Str(engine::value_str(t, &r, text).into()),
-        DVal::QName(id, p) => OwnedValue::QName(engine::owned_name(t, id, p)),
-        DVal::Nil(b) => OwnedValue::Bool(b),
-        DVal::Typed(v) => v,
+        DVal::Str(r) => match r {
+            ValueRead::Hit(id) | ValueRead::Literal(Some(id))
+                if can_pin_hit =>
+            {
+                OutVal::Hit(id)
+            }
+            ValueRead::Hit(id) => {
+                let s = t.global_value_text(id);
+                let a = str_buf.len();
+                str_buf.push_str(s);
+                OutVal::Lit(a, str_buf.len())
+            }
+            ValueRead::Literal(_) => {
+                if can_borrow_dec {
+                    OutVal::DecText
+                } else {
+                    let a = str_buf.len();
+                    str_buf.push_str(text);
+                    OutVal::Lit(a, str_buf.len())
+                }
+            }
+        },
+        DVal::QName(id, p) => {
+            OutVal::Typed(OwnedValue::QName(engine::owned_name(t, id, p)))
+        }
+        DVal::Nil(b) => OutVal::Typed(OwnedValue::Bool(b)),
+        DVal::Typed(v) => OutVal::Typed(v),
         // A value still in its channel.
-        DVal::None => OwnedValue::Str("".into()),
+        DVal::None => OutVal::None,
     }
 }
 
@@ -625,21 +695,20 @@ fn name<'a>(
     id: NameId,
     prefix: Option<u32>,
 ) -> Name<'a> {
-    let n = Name::new(
-        t.uri_str_at(outer, id.uri).unwrap_or(""),
-        t.local_str_at(outer, id.uri, id.local).unwrap_or(""),
-    );
+    let (uid, u, lid, l) = t.resolve_name_at(outer, id);
+    let n = Name::new(u, l);
     // The empty prefix is the default namespace: no prefix.
     let n = match prefix.and_then(|p| t.prefix_str_at(outer, id.uri, p)) {
         Some(p) if !p.is_empty() => n.with_prefix(p),
         _ => n,
     };
-    let global =
-        match (t.uri_at(outer, id.uri), t.local_at(outer, id.uri, id.local)) {
-            (Some(uri), Some(local)) => Some(GlobalName { uri, local }),
-            _ => None,
-        };
-    n.with_ids(Some(id), global)
+    match (uid, lid) {
+        (Some(uri), Some(local)) => {
+            n.with_ids(Some(id), Some(GlobalName { uri, local }))
+                .with_pool(t.global_ref())
+        }
+        _ => n.with_ids(Some(id), None),
+    }
 }
 
 impl<'g, const N: usize> Reader<'g, N> {
@@ -690,6 +759,7 @@ impl<'g, const N: usize> Reader<'g, N> {
             depth_out: 0,
             skip_to: None,
             queue: VecDeque::new(),
+            str_buf: String::new(),
             #[cfg(feature = "compression")]
             block: None,
             #[cfg(feature = "compression")]
@@ -1135,6 +1205,7 @@ impl<'g, const N: usize> Reader<'g, N> {
         self.depth_out = 0;
         self.skip_to = None;
         self.queue.clear();
+        self.str_buf.clear();
         #[cfg(feature = "compression")]
         {
             self.block = None;
@@ -1333,8 +1404,11 @@ impl<'g, const N: usize> Reader<'g, N> {
             };
         }
         self.sess = None;
-        let (st, tables) =
-            engine::new_session(opts, self.cfg.grammars, self.cfg.limits);
+        let (st, tables) = engine::new_reader_session(
+            opts,
+            self.cfg.grammars,
+            self.cfg.limits,
+        );
         self.sess = Some(Session { st, tables });
         self.depth_out = 0;
         self.sc_collect = false;
@@ -1404,17 +1478,35 @@ impl<'g, const N: usize> Reader<'g, N> {
             let (a, b) = input_view(ring, spill.data(), *spilling, z, n);
             let sess = sess.as_mut().expect("checked above");
             if !final_input {
-                // Probe with a counting view before touching `sess.tables`,
-                // so a truncated event leaves the session intact for NeedInput.
+                // Try single-pass decode directly on `sess.tables`. Hits and
+                // string values cannot leave partial state on `Truncated`;
+                // only new URI/local/prefix additions trigger the 2-pass probe.
                 let mut d = BodyDecoder::new(coding, a, b, bit);
-                let mut probe = Probe::new(&sess.tables);
+                let mut tt = TryTables::new(&mut sess.tables);
                 dec.clear();
-                match engine::decode(&sess.st, &mut d, &mut probe, dec, defer) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == ErrorKind::Truncated => {
+                match engine::decode(&sess.st, &mut d, &mut tt, dec, defer) {
+                    Ok(()) => break 'decode Some(d.bit_position()),
+                    Err(e)
+                        if e.kind() == ErrorKind::Truncated
+                            && !tt.need_probe =>
+                    {
                         break 'decode None;
                     }
-                    Err(e) => return Err(e),
+                    Err(e) if !tt.need_probe => return Err(e),
+                    Err(_) => {
+                        let mut d = BodyDecoder::new(coding, a, b, bit);
+                        let mut probe = Probe::new(&sess.tables);
+                        dec.clear();
+                        match engine::decode(
+                            &sess.st, &mut d, &mut probe, dec, defer,
+                        ) {
+                            Ok(()) => {}
+                            Err(e) if e.kind() == ErrorKind::Truncated => {
+                                break 'decode None;
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
                 }
             }
             let mut d = BodyDecoder::new(coding, a, b, bit);
@@ -1474,16 +1566,31 @@ impl<'g, const N: usize> Reader<'g, N> {
     /// Moves the grammar state for the decoded event and fills
     /// `self.out`.
     fn apply(&mut self) -> Result<()> {
+        let direct = self.queue.is_empty() && !self.collecting && !self.blocks();
         let sess = self.sess.as_mut().expect("body has a session");
         let dec = &mut self.dec;
+        let str_buf = &mut self.str_buf;
         let term = dec
             .term
             .ok_or_else(|| err(ErrorKind::Internal, "no terminal decoded"))?;
         let code = dec.code.ok_or_else(|| {
             err(ErrorKind::Internal, "no event code decoded")
         })?;
-        let value = |t: &SessionTables<'_>, dec: &mut Decoded| -> OwnedValue {
-            owned_value(t, core::mem::take(&mut dec.value), &dec.text)
+        let can_pin_hit = direct
+            || (sess.tables.rules().get_capacity().is_none()
+                && !sess.st.in_sc());
+        let value = |t: &SessionTables<'_>,
+                     dec: &mut Decoded,
+                     str_buf: &mut String|
+         -> OutVal {
+            out_val(
+                t,
+                core::mem::take(&mut dec.value),
+                &dec.text,
+                str_buf,
+                direct,
+                can_pin_hit,
+            )
         };
         self.out = match term {
             Terminal::SE(_) | Terminal::SeUri(_) | Terminal::SeAny => {
@@ -1563,11 +1670,11 @@ impl<'g, const N: usize> Reader<'g, N> {
                     }
                     _ => sess.st.on_at(term, code, id)?,
                 }
-                Out::AT(id, p, value(&sess.tables, dec))
+                Out::AT(id, p, value(&sess.tables, dec, str_buf))
             }
             Terminal::CH => {
                 sess.st.on_ch(code)?;
-                Out::CH(value(&sess.tables, dec))
+                Out::CH(value(&sess.tables, dec, str_buf))
             }
             Terminal::EE => {
                 let f = sess.st.on_ee()?;
@@ -1664,25 +1771,30 @@ impl<'g, const N: usize> Reader<'g, N> {
         }
     }
 
-    /// Adds a decoded event to the queue. With `Preserve.prefixes` an
-    /// SE waits for its NS events: the one marked `local_element_ns`
-    /// gives the element its prefix.
-    fn enqueue(&mut self, out: Out, pos: Position) {
-        let sess = self.sess.as_mut();
-        let mut depth = sess.as_ref().map_or(0, |s| s.st.depth());
+    fn event_meta(&self, out: &Out, pos: Position) -> EventMeta {
+        let sess = self.sess.as_ref();
+        let mut depth = sess.map_or(0, |s| s.st.depth());
         if matches!(out, Out::SC) {
             // SC belongs to the element it follows; the grammars have
             // just moved that element aside, so it is not counted yet.
             depth += 1;
         }
-        let lexical = sess
-            .as_ref()
-            .is_some_and(|s| s.st.lexical() && s.st.schema.is_some());
+        let lexical =
+            sess.is_some_and(|s| s.st.lexical() && s.st.schema.is_some());
         let flags = if lexical && matches!(out, Out::AT(..) | Out::CH(..)) {
             ValueFlags::LEXICAL
         } else {
             ValueFlags::empty()
         };
+        EventMeta { depth, position: pos, flags }
+    }
+
+    /// Adds a decoded event to the queue. With `Preserve.prefixes` an
+    /// SE waits for its NS events: the one marked `local_element_ns`
+    /// gives the element its prefix.
+    fn enqueue(&mut self, out: Out, pos: Position) {
+        let meta = self.event_meta(&out, pos);
+        let sess = self.sess.as_mut();
         let prefixes = sess.as_ref().is_some_and(|s| s.st.prefixes());
         if self.collecting {
             if let Out::NS(_, p, true) = out {
@@ -1707,7 +1819,7 @@ impl<'g, const N: usize> Reader<'g, N> {
             self.collecting = true;
             self.collect_at = self.queue.len();
         }
-        self.queue.push_back((out, EventMeta { depth, position: pos, flags }));
+        self.queue.push_back((out, meta));
     }
 
     fn fail(&mut self, e: crate::Error, pos: Position) -> crate::Error {
@@ -1721,6 +1833,9 @@ impl<'g, const N: usize> Reader<'g, N> {
                 ErrorKind::State,
                 "the reader is poisoned by an earlier error",
             ));
+        }
+        if self.queue.is_empty() {
+            self.str_buf.clear();
         }
         let mut outer = false;
         let meta = loop {
@@ -1755,6 +1870,17 @@ impl<'g, const N: usize> Reader<'g, N> {
                 true if self.phase == Phase::End => self.collecting = false,
                 true if self.suppress => self.suppress = false,
                 true => {
+                    let prefixes =
+                        self.sess.as_ref().is_some_and(|s| s.st.prefixes());
+                    if self.queue.is_empty()
+                        && !self.collecting
+                        && !self.blocks()
+                        && !(prefixes && matches!(self.out, Out::SE(..)))
+                    {
+                        let meta = self.event_meta(&self.out, pos);
+                        self.depth_out = meta.depth;
+                        break meta;
+                    }
                     let out = core::mem::take(&mut self.out);
                     let is_ed = matches!(out, Out::ED);
                     self.enqueue(out, pos);
@@ -1775,10 +1901,13 @@ impl<'g, const N: usize> Reader<'g, N> {
             Out::ED => Event::EndDocument,
             Out::SE(id, p) => Event::StartElement(name(t, outer, *id, *p)),
             Out::EE(id, p) => Event::EndElement(name(t, false, *id, *p)),
-            Out::AT(id, p, v) => {
-                Event::Attribute(name(t, false, *id, *p), v.as_value())
-            }
-            Out::CH(v) => Event::Characters(v.as_value()),
+            Out::AT(id, p, v) => Event::Attribute(
+                name(t, false, *id, *p),
+                v.as_value(t, &this.dec.text, &this.str_buf),
+            ),
+            Out::CH(v) => Event::Characters(
+                v.as_value(t, &this.dec.text, &this.str_buf),
+            ),
             Out::NS(u, p, l) => Event::Namespace(NsDecl {
                 prefix: t.prefix_str_at(outer, *u, *p).unwrap_or(""),
                 uri: t.uri_str_at(outer, *u).unwrap_or(""),

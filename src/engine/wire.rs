@@ -141,6 +141,64 @@ impl ReadTables for Probe<'_, '_> {
     }
 }
 
+/// Single-pass [`ReadTables`] wrapper used on streaming input when
+/// `!final_input`: delegates hits and value additions directly to
+/// `SessionTables`, and signals `need_probe` only if an event tries to
+/// add a new URI, local name, or prefix (so a subsequent `Truncated`
+/// can never leave partial name-table mutations behind).
+pub(crate) struct TryTables<'p, 'a> {
+    t: &'p mut SessionTables<'a>,
+    pub need_probe: bool,
+}
+
+impl<'p, 'a> TryTables<'p, 'a> {
+    pub fn new(t: &'p mut SessionTables<'a>) -> Self {
+        TryTables { t, need_probe: false }
+    }
+}
+
+impl ReadTables for TryTables<'_, '_> {
+    fn uri_count(&self) -> u32 {
+        self.t.uri_count()
+    }
+    fn add_uri(&mut self, _: &str) -> Result<u32> {
+        self.need_probe = true;
+        Err(err(ErrorKind::Truncated, "probe needed for new URI"))
+    }
+    fn local_count(&self, uri: u32) -> u32 {
+        self.t.local_count(uri)
+    }
+    fn add_local(&mut self, _: u32, _: &str) -> Result<u32> {
+        self.need_probe = true;
+        Err(err(ErrorKind::Truncated, "probe needed for new local name"))
+    }
+    fn prefix_count(&self, uri: u32) -> u32 {
+        self.t.prefix_count(uri)
+    }
+    fn add_prefix(&mut self, _: u32, _: &str) -> Result<u32> {
+        self.need_probe = true;
+        Err(err(ErrorKind::Truncated, "probe needed for new prefix"))
+    }
+    fn rules(&self) -> ValueRules {
+        self.t.rules()
+    }
+    fn local_value_count(&self, name: NameId) -> u32 {
+        self.t.local_value_count(name)
+    }
+    fn global_value_count(&self) -> u32 {
+        self.t.global_value_count()
+    }
+    fn local_value(&self, name: NameId, n: u32) -> Option<ValueId> {
+        self.t.local_value(name, n)
+    }
+    fn global_value(&self, n: u32) -> Option<ValueId> {
+        self.t.global_value(n)
+    }
+    fn add_value(&mut self, name: NameId, s: &str) -> Result<Option<ValueId>> {
+        self.t.add_value(name, s)
+    }
+}
+
 // Reading events and values
 
 /// A decoded value, before names are turned into strings.
@@ -425,10 +483,9 @@ fn read_value_charset<D: Decoder, T: ReadTables + ?Sized>(
             "literal longer than max_value_chars",
         ));
     }
-    let mut s = String::new();
-    read_restricted_chars(d, ch, len, set, &mut s)?;
-    let kept = t.add_value(name, &s)?;
-    out.push_str(&s);
+    let start = out.len();
+    read_restricted_chars(d, ch, len, set, out)?;
+    let kept = t.add_value(name, &out[start..])?;
     Ok(ValueRead::Literal(kept))
 }
 
@@ -465,19 +522,15 @@ fn decode_typed<D: Decoder>(
             if digit { OwnedValue::BoolDigit(v) } else { OwnedValue::Bool(v) }
         }
         Representation::Integer(IntegerRep::Signed) => {
-            let mut s = String::new();
-            read_int_big(d, ch, oct, &mut s)?;
-            match s.parse::<i64>() {
+            match read_int_or_big(d, ch, oct)? {
                 Ok(v) => OwnedValue::Int(v),
-                Err(_) => OwnedValue::BigInt(s.into()),
+                Err(s) => OwnedValue::BigInt(s.into()),
             }
         }
         Representation::Integer(IntegerRep::Unsigned) => {
-            let mut s = String::new();
-            read_uint_big(d, ch, oct, &mut s)?;
-            match s.parse::<i64>() {
+            match read_uint_or_big(d, ch, oct)? {
                 Ok(v) => OwnedValue::Int(v),
-                Err(_) => OwnedValue::BigInt(s.into()),
+                Err(s) => OwnedValue::BigInt(s.into()),
             }
         }
         Representation::Integer(IntegerRep::Bounded { min, max }) => {

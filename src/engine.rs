@@ -61,8 +61,8 @@ mod wire;
 pub(crate) use wire::decode_value;
 
 pub(crate) use wire::{
-    DVal, Decoded, Prepared, Probe, decode, emit_value, lexical_string,
-    owned_name, prepare, value_str,
+    DVal, Decoded, Prepared, Probe, TryTables, decode, emit_value,
+    lexical_string, owned_name, prepare, value_str,
 };
 
 pub(crate) const XSI_NIL: NameId = NameId { uri: 2, local: 0 };
@@ -154,6 +154,20 @@ pub(crate) fn new_session<'g>(
         .capacity(opts.value_partition_capacity())
         .max_length(opts.value_max_length());
     let tables = SessionTables::new(grammars.initial(), rules, &limits);
+    (State::new(opts, grammars, limits), tables)
+}
+
+/// Starts a reader stream without reverse value-lookup hash maps.
+pub(crate) fn new_reader_session<'g>(
+    opts: Options,
+    grammars: &'g Grammars<'g>,
+    limits: Limits,
+) -> (State<'g>, SessionTables<'g>) {
+    let rules = ValueRules::unbounded()
+        .capacity(opts.value_partition_capacity())
+        .max_length(opts.value_max_length());
+    let tables =
+        SessionTables::new_for_reader(grammars.initial(), rules, &limits);
     (State::new(opts, grammars, limits), tables)
 }
 

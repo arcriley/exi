@@ -851,9 +851,13 @@ fn main() {
             Kind::ExiDomShared { noblanks } => {
                 // Warm pool table capacity once so shared-pool measures per-doc tree heap.
                 exi_dom_shared(&strings, xml, noblanks, false);
+                // Chunks kept from earlier trees would be reused unseen:
+                // start from an empty cache so the whole tree is counted.
+                exi::dom::release_cache();
                 row.heap = measure_heap(|| exi_dom_shared(&strings, xml, noblanks, true));
             }
             Kind::ExiDomFresh => {
+                exi::dom::release_cache();
                 row.heap = measure_heap(|| exi_dom_fresh(xml, true));
             }
             #[cfg(unix)]

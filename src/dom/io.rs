@@ -237,6 +237,17 @@ impl<'g> DocumentBuilder<'g> {
         self.event(ev)
     }
 
+    /// Whether nothing has been built yet, so a whole document may be
+    /// parsed into a new tree instead.
+    #[cfg(feature = "xml")]
+    fn is_fresh(&self) -> bool {
+        self.stack.is_empty()
+            && !self.ended
+            && self.text.is_empty()
+            && self.doc.d().raw.children.is_null()
+            && self.doc.d().raw.intSubset.is_null()
+    }
+
     #[inline]
     fn open_element(&self) -> Result<Option<*mut RawNode>> {
         let Some(&(id, ptr)) = self.stack.last() else {
@@ -653,6 +664,13 @@ impl<'g> Document<'g> {
     ) -> Result<Document<'g>> {
         use crate::grammar::GrammarSet;
         use crate::xml::{XmlConfig, XmlReader};
+        // Most documents go straight into a tree; the rest, and every
+        // error, take the streaming reader (`dom::parse`).
+        if b.is_fresh() {
+            if let Some(doc) = super::parse::parse(strings, xml, b.ignore_blanks) {
+                return Ok(doc);
+            }
+        }
         let set = GrammarSet::schemaless();
         let g = set.attach(strings)?;
         b.doc.reserve_nodes((xml.len() / 32).min(8192));
@@ -680,6 +698,18 @@ impl<'g> Document<'g> {
                 }
             }
         }
+    }
+
+    /// The direct parser alone: `None` where [`parse_xml`](Self::parse_xml)
+    /// would use the streaming reader. For tests that compare the two.
+    #[doc(hidden)]
+    #[cfg(feature = "xml")]
+    pub fn parse_xml_direct(
+        strings: &'g GlobalStrings,
+        xml: &[u8],
+        ignore_blanks: bool,
+    ) -> Option<Document<'g>> {
+        super::parse::parse(strings, xml, ignore_blanks)
     }
 
     /// Writes the document's events to `sink` (`xmlDocDump` for any

@@ -53,9 +53,119 @@ const _: () = {
     assert!(size_of::<NodeBox>().is_multiple_of(8));
 };
 
-/// The layout of a chunk of `words` 8-byte words.
-fn chunk_layout(words: usize) -> Layout {
-    Layout::from_size_align(words * 8, 8).expect("arena chunk size")
+/// A block of `bytes` (a multiple of 8), 8-aligned and not zeroed.
+/// Full-size blocks come from the thread's cache when it has one.
+fn block_alloc(bytes: usize) -> *mut u8 {
+    #[cfg(feature = "std")]
+    if bytes == MAX_CHUNK_BYTES {
+        if let Some(p) = cache::take() {
+            return p;
+        }
+    }
+    let layout = Layout::from_size_align(bytes, 8).expect("arena chunk size");
+    // SAFETY: `bytes > 0`.
+    let p = unsafe { alloc::alloc::alloc(layout) };
+    if p.is_null() {
+        alloc::alloc::handle_alloc_error(layout);
+    }
+    p
+}
+
+/// Frees a block from [`block_alloc`]; full-size blocks go to the
+/// thread's cache while it has room.
+///
+/// # Safety
+///
+/// `p` came from `block_alloc(bytes)` and is not used again.
+unsafe fn block_free(p: *mut u8, bytes: usize) {
+    #[cfg(feature = "std")]
+    if bytes == MAX_CHUNK_BYTES && cache::give(p) {
+        return;
+    }
+    let layout = Layout::from_size_align(bytes, 8).expect("arena chunk size");
+    // SAFETY: the caller's contract.
+    unsafe { alloc::alloc::dealloc(p, layout) };
+}
+
+/// Freed full-size chunks kept for the next documents on the thread.
+///
+/// Building a tree writes every byte of its chunks. Memory the
+/// allocator has just returned to the system comes back as fresh pages,
+/// and the kernel faults in and zeroes each one: for a 24 MiB tree that
+/// costs more than parsing the document. Keeping freed chunks, as
+/// mimalloc or jemalloc keep freed spans, lets the next document reuse
+/// pages that are already mapped. At most [`CACHE_BYTES`] are kept per
+/// thread; [`release_cache`] returns them.
+#[cfg(feature = "std")]
+mod cache {
+    use super::MAX_CHUNK_BYTES;
+    use core::alloc::Layout;
+    use std::cell::RefCell;
+    use std::vec::Vec;
+
+    pub const CACHE_BYTES: usize = 32 << 20;
+
+    struct Blocks(Vec<*mut u8>);
+
+    impl Drop for Blocks {
+        fn drop(&mut self) {
+            free(&mut self.0);
+        }
+    }
+
+    fn free(blocks: &mut Vec<*mut u8>) {
+        let layout = Layout::from_size_align(MAX_CHUNK_BYTES, 8).unwrap();
+        for p in blocks.drain(..) {
+            // SAFETY: every cached block is a full-size block from the
+            // global allocator, owned by the cache alone.
+            unsafe { alloc::alloc::dealloc(p, layout) };
+        }
+    }
+
+    std::thread_local! {
+        static BLOCKS: RefCell<Blocks> = const { RefCell::new(Blocks(Vec::new())) };
+    }
+
+    pub fn take() -> Option<*mut u8> {
+        BLOCKS.try_with(|b| b.borrow_mut().0.pop()).ok().flatten()
+    }
+
+    /// Keeps `p` if there is room; `false` when the caller must free it.
+    pub fn give(p: *mut u8) -> bool {
+        BLOCKS
+            .try_with(|b| {
+                let mut b = b.borrow_mut();
+                if (b.0.len() + 1) * MAX_CHUNK_BYTES > CACHE_BYTES {
+                    return false;
+                }
+                b.0.push(p);
+                true
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn release() {
+        let _ = BLOCKS.try_with(|b| free(&mut b.borrow_mut().0));
+    }
+}
+
+/// Returns the memory this thread keeps for building trees to the
+/// allocator. A dropped document's large chunks (256 KiB each, up to
+/// 32 MiB per thread) are kept for the next document, because reusing
+/// mapped pages is faster than having the system fault in fresh ones.
+///
+/// ```
+/// use exi::dom::Document;
+/// # use exi::strings::{GlobalConfig, GlobalStrings};
+/// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+/// let xml = format!("<r>{}</r>", "<e a='1'>text</e>".repeat(20_000));
+/// drop(Document::parse_xml(&strings, xml.as_bytes())?); // its chunks are kept
+/// exi::dom::release_cache();                          // and now freed
+/// # Ok::<(), exi::Error>(())
+/// ```
+#[cfg(feature = "std")]
+pub fn release_cache() {
+    cache::release();
 }
 
 /// A chunk of at least `min_bytes`, not zeroed: every node is written
@@ -63,12 +173,7 @@ fn chunk_layout(words: usize) -> Layout {
 /// chunk first would only double the memory traffic of building a tree.
 fn alloc_chunk(min_bytes: usize) -> *mut ChunkHeader {
     let words = min_bytes.div_ceil(8);
-    let layout = chunk_layout(words);
-    // SAFETY: `layout` has a non-zero size (`words * 8 >= HDR_BYTES`).
-    let hdr = unsafe { alloc::alloc::alloc(layout) } as *mut ChunkHeader;
-    if hdr.is_null() {
-        alloc::alloc::handle_alloc_error(layout);
-    }
+    let hdr = block_alloc(words * 8) as *mut ChunkHeader;
     // SAFETY: `hdr` is freshly allocated with `words * 8 >= HDR_BYTES` bytes
     // and 8-byte alignment.
     unsafe {
@@ -90,10 +195,10 @@ fn alloc_chunk(min_bytes: usize) -> *mut ChunkHeader {
 /// `hdr` came from [`alloc_chunk`], has `live == 0` and `!has_owner`, and
 /// is never used again.
 unsafe fn free_chunk(hdr: *mut ChunkHeader) {
-    // SAFETY: `hdr` was allocated by `alloc_chunk` with this layout.
+    // SAFETY: `hdr` came from `alloc_chunk`, `cap_u64s` words long.
     unsafe {
         let words = (*hdr).cap_u64s;
-        alloc::alloc::dealloc(hdr as *mut u8, chunk_layout(words));
+        block_free(hdr as *mut u8, words * 8);
     }
 }
 
@@ -172,13 +277,10 @@ impl NodeArena {
         // The same growth schedule as node chunks: 4 KiB doubling to
         // 256 KiB.
         let n = self.text.len();
-        let cap = (4096usize << n.min(6)).min(MAX_CHUNK_BYTES).max(need);
-        let layout = Layout::from_size_align(cap, 1).expect("text chunk size");
-        // SAFETY: `cap > 0`.
-        let base = unsafe { alloc::alloc::alloc(layout) };
-        if base.is_null() {
-            alloc::alloc::handle_alloc_error(layout);
-        }
+        let cap = (4096usize << n.min(6))
+            .min(MAX_CHUNK_BYTES)
+            .max(need.next_multiple_of(8));
+        let base = block_alloc(cap);
         self.text.push((base, cap));
         self.text_pos = need;
         base
@@ -187,13 +289,8 @@ impl NodeArena {
     /// Frees every text chunk.
     fn drop_text(&mut self) {
         for (base, cap) in self.text.drain(..) {
-            // SAFETY: allocated by `text_slow` with this layout.
-            unsafe {
-                alloc::alloc::dealloc(
-                    base,
-                    Layout::from_size_align(cap, 1).expect("text chunk size"),
-                )
-            };
+            // SAFETY: from `block_alloc(cap)` in `text_slow`.
+            unsafe { block_free(base, cap) };
         }
     }
 

@@ -74,9 +74,13 @@
 
 mod arena;
 mod io;
+#[cfg(feature = "xml")]
+mod parse;
 pub mod raw;
 
 pub use io::{DocEvents, DocumentBuilder};
+#[cfg(feature = "std")]
+pub use arena::release_cache;
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -584,6 +588,7 @@ impl<'g> Document<'g> {
         self.d().has_default_ns
     }
 
+    #[cfg(feature = "xml")]
     pub(crate) fn reserve_nodes(&mut self, additional: usize) {
         let d = self.dm();
         d.ptrs.reserve(additional);

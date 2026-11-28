@@ -600,3 +600,25 @@ fn all_with_group_and_wildcard() {
     assert!(fits(&set, "<r><c>3</c><a>1</a><b>2</b></r>"));
     assert!(fits(&set, "<r><b>2</b><c>3</c></r>"));
 }
+
+#[test]
+fn recursive_type_survives_compiled_grammar_reload() {
+    let source = schema(
+        "",
+        r#"
+        <xs:complexType name="Tree">
+          <xs:sequence><xs:element name="leaf" type="Tree" minOccurs="0" maxOccurs="unbounded"/></xs:sequence>
+          <xs:attribute name="label" type="xs:string" use="required"/>
+        </xs:complexType>
+        <xs:element name="tree" type="Tree"/>
+    "#,
+    );
+    let set = GrammarSet::from_xsd(&source).unwrap();
+    let loaded = GrammarSet::from_exig(&set.to_exig().unwrap()).unwrap();
+    assert!(fits(
+        &loaded,
+        "<tree label='r'><leaf label='a'/><leaf label='b'><leaf label='c'/></leaf></tree>"
+    ));
+    assert!(!fits(&loaded, "<tree label='r'><leaf/></tree>"));
+    assert!(!fits(&loaded, "<tree label='r'><other label='x'/></tree>"));
+}

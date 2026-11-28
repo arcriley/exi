@@ -2299,6 +2299,37 @@ mod tests {
 
     use super::*;
 
+    include!("../../tests/support/cases.rs");
+
+    fn rejects_reference(edit: impl FnOnce(&mut Doc), detail: &str) {
+        let grammar = exig_grammars().unwrap();
+        let bytes = include_bytes!("../../fixtures/input/complex.exig");
+        let mut doc = read_doc(&grammar, bytes, Limits::new()).unwrap();
+        edit(&mut doc);
+        let wire = write_doc(&grammar, &doc).unwrap();
+        let error = GrammarSet::from_exig(&wire).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Schema);
+        assert!(error.detail().contains(detail), "{error}");
+    }
+
+    cases!(rejects_reference;
+        missing_element_type(|d| d.elements[0].2 = u32::MAX, "type"),
+        missing_element_name(|d| d.elements[0].1 = u32::MAX, "name number"),
+        missing_element_uri(|d| d.elements[0].0 = u32::MAX, "name number"),
+        missing_attribute_set(|d| {
+            d.shared = None;
+            d.types[0].attrs = Some((true, vec![]));
+        }, "attribute set"),
+        missing_base_type(|d| {
+            let ty = d.types.iter_mut().find(|t| t.name.is_some()).unwrap();
+            ty.base = Some(u32::MAX);
+        }, "base"),
+        missing_global_element(|d| {
+            d.all_global = false;
+            d.globals = vec![u32::MAX];
+        }, "element declaration"),
+    );
+
     #[test]
     fn attribute_set_must_be_zero() {
         let mut ty = Node {

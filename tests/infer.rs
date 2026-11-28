@@ -434,3 +434,37 @@ fn nothing_learned() {
     assert!(l.schemas().is_empty());
     assert_eq!(l.grammars().unwrap_err().kind(), exi::ErrorKind::State);
 }
+
+#[test]
+fn adding_examples_widens_values_and_relaxes_presence() {
+    let mut inference =
+        SchemaInference::new().fit(Fit::General).max_enumeration(0);
+    let first = b"<r code='1'><n>2</n></r>";
+    let second = b"<r><n>2.5</n><n>3</n></r>";
+    let third = b"<r><n>unknown</n></r>";
+    inference.document(first).unwrap();
+    inference.document(second).unwrap();
+    for (set, documents) in [
+        (
+            inference.grammars().unwrap(),
+            vec![first.as_slice(), second.as_slice()],
+        ),
+        {
+            inference.document(third).unwrap();
+            (
+                inference.grammars().unwrap(),
+                vec![first.as_slice(), second.as_slice(), third.as_slice()],
+            )
+        },
+    ] {
+        let strings = GlobalStrings::new(GlobalConfig::new()).unwrap();
+        let g = set.attach(&strings).unwrap();
+        for xml in documents {
+            assert!(
+                encode(&g, xml).is_ok(),
+                "{}",
+                String::from_utf8_lossy(xml)
+            );
+        }
+    }
+}

@@ -1462,3 +1462,120 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod partition_tests {
+    use super::*;
+    use crate::strings::GlobalConfig;
+
+    include!("../tests/support/cases.rs");
+
+    fn value_window(
+        capacity: Option<u32>,
+        length: Option<u32>,
+        text: &str,
+        admitted: bool,
+    ) {
+        let global = GlobalStrings::new(GlobalConfig::new()).unwrap();
+        let init = InitialEntries::schemaless().attach(&global).unwrap();
+        let rules =
+            ValueRules::unbounded().capacity(capacity).max_length(length);
+        let mut tables = SessionTables::new(&init, rules, &Limits::new());
+        let name = tables.add_name("", "reading").unwrap();
+        let other = tables.add_name("", "other").unwrap();
+        let result = tables.add_value(name, text).unwrap();
+        assert_eq!(result.is_some(), admitted);
+        if let Some(id) = result {
+            assert_eq!(tables.local_value(name, 0), Some(id));
+            assert_eq!(tables.global_value(0), Some(id));
+            assert_eq!(tables.find_value_str(name, text), ValueHit::Local(0));
+            assert_eq!(
+                tables.find_value_str(other, text),
+                ValueHit::Global(0)
+            );
+        } else {
+            assert_eq!(tables.local_value_count(name), 0);
+            assert_eq!(tables.global_value_count(), 0);
+            assert!(global.values().get(text).is_none());
+        }
+        drop(tables);
+        assert!(global.values().get(text).is_none());
+    }
+
+    macro_rules! admission {
+        ($module:ident, $capacity:expr, $enabled:expr) => {
+            mod $module {
+                use super::*;
+                cases!(value_window;
+                    empty($capacity, None, "", false),
+                    zero_max($capacity, Some(0), "a", false),
+                    scalar($capacity, Some(1), "😀", $enabled),
+                    two_scalars($capacity, Some(1), "é界", false),
+                    ascii_limit($capacity, Some(16), "0123456789abcdef", $enabled),
+                    unicode_limit($capacity, Some(16), "0123456789abcde😀", $enabled),
+                    above_limit($capacity, Some(16), "0123456789abcdef😀", false),
+                    no_length_cap($capacity, None, "0123456789abcdef😀", $enabled),
+                );
+            }
+        };
+    }
+    admission!(disabled, Some(0), false);
+    admission!(single_slot, Some(1), true);
+    admission!(small_window, Some(4), true);
+    admission!(word_window, Some(64), true);
+    admission!(unbounded, None, true);
+
+    fn eviction(capacity: u32) {
+        let global = GlobalStrings::new(GlobalConfig::new()).unwrap();
+        let init = InitialEntries::schemaless().attach(&global).unwrap();
+        let rules = ValueRules::unbounded().capacity(Some(capacity));
+        let mut tables = SessionTables::new(&init, rules, &Limits::new());
+        let names = [
+            tables.add_name("", "first").unwrap(),
+            tables.add_name("", "second").unwrap(),
+        ];
+        let total = capacity * 3;
+        for i in 0..total {
+            tables
+                .add_value(names[i as usize % 2], &alloc::format!("value{i}"))
+                .unwrap();
+        }
+        assert_eq!(tables.global_value_count(), capacity);
+        for i in 0..total {
+            let value = alloc::format!("value{i}");
+            let local = tables.local_value(names[i as usize % 2], i / 2);
+            if i < total - capacity {
+                assert!(local.is_none());
+                assert!(global.values().get(&value).is_none());
+            } else {
+                let id = local.unwrap();
+                assert_eq!(tables.global_value(i % capacity), Some(id));
+                assert_eq!(global.values().resolve(id), value);
+            }
+        }
+    }
+    cases!(eviction; evict_one(1), evict_four(4), evict_word(64), evict_word_plus_one(65));
+
+    #[test]
+    fn predefined_wire_indexes() {
+        let global = GlobalStrings::new(GlobalConfig::new()).unwrap();
+        let init = InitialEntries::builtin_types().attach(&global).unwrap();
+        let tables =
+            SessionTables::new(&init, ValueRules::unbounded(), &Limits::new());
+        for (i, uri) in ["", XML_NS, XSI_NS, XSD_NS].into_iter().enumerate() {
+            assert_eq!(tables.uri_str(i as u32), Some(uri));
+            assert_eq!(tables.find_uri_str(uri), Some(i as u32));
+        }
+        assert_eq!(tables.prefix_str(0, 0), Some(""));
+        assert_eq!(tables.prefix_str(1, 0), Some("xml"));
+        assert_eq!(tables.prefix_str(2, 0), Some("xsi"));
+        for (i, name) in
+            ["base", "id", "lang", "space"].into_iter().enumerate()
+        {
+            assert_eq!(tables.local_str(1, i as u32), Some(name));
+        }
+        assert_eq!(tables.local_str(2, 0), Some("nil"));
+        assert_eq!(tables.local_str(2, 1), Some("type"));
+        assert_eq!(tables.local_count(3), 46);
+    }
+}

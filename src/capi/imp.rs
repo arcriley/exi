@@ -558,7 +558,7 @@ any_reader!(E64 X64 64, E256 X256 256, E1K X1K 1024, E4K X4K 4096, E16K X16K 163
 pub(super) struct Scratch {
     buffers: Vec<Vec<u8>>,
     used: usize,
-    values: Vec<Box<[exi_value]>>,
+    values: Vec<Vec<exi_value>>,
     ns: exi_nsdecl,
 }
 
@@ -692,7 +692,7 @@ impl Scratch {
             }
             Value::List(items) => {
                 out.r#type = EXI_V_LIST;
-                let list: Box<[exi_value]> =
+                let list: Vec<exi_value> =
                     items.iter().map(|x| self.value(x, false)).collect();
                 out.u.list =
                     exi_list { items: list.as_ptr(), count: list.len() };
@@ -1376,5 +1376,74 @@ pub(super) fn status_text(s: exi_status) -> &'static core::ffi::CStr {
         EXI_E_BUFFER_FULL => c"output buffer full",
         EXI_E_UNENCODABLE => c"event fits no production",
         _ => c"unknown status",
+    }
+}
+
+#[cfg(test)]
+mod event_tests {
+    use super::*;
+    use crate::OwnedEvent;
+
+    include!("../../tests/support/cases.rs");
+
+    fn round_trip(event: Event<'_>) {
+        let mut scratch = Scratch::default();
+        let wire = event_to(&mut scratch, &event, 3, false);
+        assert_eq!(wire.depth, 3);
+        // SAFETY: scratch keeps all pointers in wire live until the
+        // call returns.
+        let decoded = unsafe { with_event(&wire, |event| event.to_owned()) };
+        assert_eq!(decoded, Some(event.to_owned()));
+    }
+
+    cases!(round_trip;
+        start_document(Event::StartDocument), end_document(Event::EndDocument),
+        start_element(Event::StartElement(Name::new("urn:test", "item").with_prefix("p"))),
+        end_element(Event::EndElement(Name::new("", "item"))),
+        attribute(Event::Attribute(Name::new("", "count"), Value::Int(2))),
+        characters(Event::Characters(Value::Str("é"))),
+        namespace(Event::Namespace(NsDecl {prefix: "p", uri: "urn:test", local_element_ns: true})),
+        comment(Event::Comment("example")),
+        processing_instruction(Event::ProcessingInstruction {target: "p", data: "example"}),
+        doctype(Event::Doctype(Doctype { name: "r", public_id: "", system_id: "r.dtd", text: "" })),
+        entity(Event::EntityReference("external")),
+        self_contained(Event::SelfContained),
+    );
+
+    #[test]
+    fn lexical_event_keeps_the_original_text() {
+        let mut scratch = Scratch::default();
+        let wire = event_to(
+            &mut scratch,
+            &Event::Characters(Value::Str("+0042")),
+            1,
+            true,
+        );
+        assert_eq!(wire.value.flags, EXI_VF_LEXICAL);
+        // SAFETY: scratch owns the encoded string.
+        let event = unsafe { with_event(&wire, |event| event.to_owned()) };
+        assert_eq!(
+            event,
+            Some(OwnedEvent::Characters(OwnedValue::Str("+0042".into())))
+        );
+    }
+
+    #[test]
+    fn namespace_requires_one_declaration() {
+        let mut scratch = Scratch::default();
+        let event = Event::Namespace(NsDecl {
+            prefix: "",
+            uri: "urn:test",
+            local_element_ns: true,
+        });
+        let mut wire = event_to(&mut scratch, &event, 1, false);
+        wire.ns_count = 0;
+        // SAFETY: the original pointers are live and only the count
+        // changed.
+        assert!(unsafe { with_event(&wire, |_| ()) }.is_none());
+        wire.ns_count = 1;
+        wire.ns = core::ptr::null();
+        // SAFETY: with_event checks for a missing declaration.
+        assert!(unsafe { with_event(&wire, |_| ()) }.is_none());
     }
 }

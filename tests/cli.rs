@@ -196,3 +196,54 @@ fn canonical_through_pipes() {
     assert!(err(&["encode", "--canonical", "--cookie"], b).contains("cookie"));
     assert!(err(&["encode", "--canonical", "-c", "compression"], b).contains("pre-compression"));
 }
+
+include!("support/cases.rs");
+
+fn rejected_command(args: &[&str], message: &str) {
+    assert!(err(args, b"").contains(message));
+}
+
+cases!(rejected_command;
+    missing_option_value(&["encode", "--coding"], "--coding needs a value"),
+    invalid_level(&["encode", "--level", "x"], "--level needs a number"),
+    invalid_top(&["xhtml5", "--top", "x"], "--top needs a number"),
+    invalid_enumeration_cap(&["infer", "--max-enum", "x"], "--max-enum needs a number"),
+    extra_input(&["decode", "first.exi", "second.exi"], "give one input file"),
+    empty_exi_header(&["decode"], "the input ends inside the EXI header"),
+    compile_missing_input(&["compile"], "give the .xsd files to compile"),
+    compile_missing_output(&["compile", "fixtures/input/reading.xsd"], "give the output file"),
+    infer_missing_input(&["infer"], "give one or more example documents"),
+    digest_missing_input(&["digest"], "give an .exig file, or .xsd files"),
+);
+
+#[test]
+fn compile_and_print_grammar_through_pipes() {
+    let bytes = ok(&["compile", "fixtures/input/reading.xsd", "-o", "-"], b"");
+    let grammar = exi::grammar::GrammarSet::from_exig(&bytes).unwrap();
+    assert_eq!(grammar.to_exig().unwrap(), bytes);
+    let text = String::from_utf8(ok(&["exig"], &bytes)).unwrap();
+    assert!(text.contains(r#"<grammars xmlns="urn:exig:draft-1""#));
+    assert!(text.contains("<local>reading</local>"));
+}
+
+#[test]
+fn infer_schema_from_stdin() {
+    let text = ok(&["infer", "--max-enum=3", "-"], b"<reading>21</reading>");
+    assert!(exi::grammar::GrammarSet::from_xsd(&text).is_ok());
+    assert!(String::from_utf8(text).unwrap().contains("name=\"reading\""));
+}
+
+#[test]
+fn features_names_the_built_codings() {
+    let output = String::from_utf8(ok(&["features"], b"")).unwrap();
+    assert!(output.contains("codings: byte-aligned"));
+    assert!(output.contains("bit-packed"));
+}
+
+#[test]
+fn info_reports_bare_cookie_and_missing_options() {
+    let stream = ok(&["encode", "--bare", "--cookie", "-c", "byte"], b"<a/>");
+    let info = String::from_utf8(ok(&["info"], &stream)).unwrap();
+    assert!(info.contains("cookie: yes\nheader: 40 bits"));
+    assert!(info.contains("agreed out of band"));
+}

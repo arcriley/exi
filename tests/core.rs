@@ -65,7 +65,7 @@ fn schemaless_byte_aligned_chunked_and_skip_element() {
     let mut w = Writer::new(
         Vec::new(),
         WriterConfig::new(opts.clone(), &grammars)
-            .header(Header::WithOptions { cookie: true }),
+            .header(Header::Bare { cookie: true }),
     )
     .unwrap();
     w.event(&Event::Doctype(Doctype {
@@ -102,7 +102,9 @@ fn schemaless_byte_aligned_chunked_and_skip_element() {
     assert!(bytes.starts_with(b"$EXI"));
 
     // Complete read, 1 byte at a time.
-    let mut r = Reader::<64>::new(ReaderConfig::new(&grammars)).unwrap();
+    let mut r =
+        Reader::<64>::new(ReaderConfig::new(&grammars).options(opts.clone()))
+            .unwrap();
     let events = read_all(&mut r, &bytes, 1).unwrap();
     assert!(matches!(events.first(), Some(OwnedEvent::StartDocument)));
     assert!(matches!(events.last(), Some(OwnedEvent::EndDocument)));
@@ -117,7 +119,9 @@ fn schemaless_byte_aligned_chunked_and_skip_element() {
 
     // Mid-stream skip_element over the self-contained <skip> subtree
     // across 1-byte feeds.
-    let mut r = Reader::<64>::new(ReaderConfig::new(&grammars)).unwrap();
+    let mut r =
+        Reader::<64>::new(ReaderConfig::new(&grammars).options(opts.clone()))
+            .unwrap();
     let mut skipping = false;
     let mut texts = Vec::new();
     for b in bytes.chunks(1) {
@@ -357,8 +361,8 @@ fn chunked_skip(coding: Coding) -> exi::Result<()> {
     let opts = Options::builder().coding(coding).block_size(1).build()?;
     let mut w = Writer::new(
         Vec::new(),
-        WriterConfig::new(opts, &grammars)
-            .header(Header::WithOptions { cookie: false }),
+        WriterConfig::new(opts.clone(), &grammars)
+            .header(Header::Bare { cookie: false }),
     )?;
     w.start_element("root")?;
     w.start_element("drop")?;
@@ -375,7 +379,9 @@ fn chunked_skip(coding: Coding) -> exi::Result<()> {
     let bytes = w.into_sink();
 
     for truncate in [false, true] {
-        let mut r = Reader::<64>::new(ReaderConfig::new(&grammars))?;
+        let mut r = Reader::<64>::new(
+            ReaderConfig::new(&grammars).options(opts.clone()),
+        )?;
         let mut input = bytes.iter();
         let mut feed = |r: &mut Reader<'_, 64>| {
             if let Some(byte) = input.next() {
@@ -446,8 +452,11 @@ fn independent_documents_on_reused_codec() -> exi::Result<()> {
     let set = GrammarSet::schemaless();
     let grammars = set.attach(&strings)?;
     let opts = Options::builder().coding(Coding::ByteAligned).build()?;
-    let mut w =
-        Writer::new(Vec::new(), WriterConfig::new(opts.clone(), &grammars))?;
+    let mut w = Writer::new(
+        Vec::new(),
+        WriterConfig::new(opts.clone(), &grammars)
+            .header(Header::Bare { cookie: false }),
+    )?;
     let mut r = Reader::<64>::new(ReaderConfig::new(&grammars).options(opts))?;
     let mut first = None;
     for _ in 0..2 {
@@ -509,8 +518,11 @@ fn buffer_and_commit_while_an_event_spills() -> exi::Result<()> {
     let grammars = set.attach(&strings)?;
     let opts = Options::builder().coding(Coding::ByteAligned).build()?;
     let text = "y".repeat(300); // larger than the 64-octet ring
-    let mut w =
-        Writer::new(Vec::new(), WriterConfig::new(opts.clone(), &grammars))?;
+    let mut w = Writer::new(
+        Vec::new(),
+        WriterConfig::new(opts.clone(), &grammars)
+            .header(Header::Bare { cookie: false }),
+    )?;
     w.start_element("r")?;
     for _ in 0..2 {
         w.start_element("a")?;
@@ -520,7 +532,8 @@ fn buffer_and_commit_while_an_event_spills() -> exi::Result<()> {
     w.end_element()?;
     w.end_document()?;
     let bytes = w.into_sink();
-    let mut r = Reader::<64>::new(ReaderConfig::new(&grammars))?;
+    let mut r =
+        Reader::<64>::new(ReaderConfig::new(&grammars).options(opts.clone()))?;
     let events = read_committed(&mut r, &bytes)?;
     let long = OwnedEvent::Characters(OwnedValue::Str(text.into()));
     assert_eq!(events.iter().filter(|e| **e == long).count(), 2);
@@ -540,7 +553,11 @@ fn skip_element_keeps_the_string_tables() -> exi::Result<()> {
         .preserve(Preserve::PREFIXES)
         .self_contained(true)
         .build()?;
-    let mut w = Writer::new(Vec::new(), WriterConfig::new(opts, &grammars))?;
+    let mut w = Writer::new(
+        Vec::new(),
+        WriterConfig::new(opts.clone(), &grammars)
+            .header(Header::Bare { cookie: false }),
+    )?;
     w.start_element("r")?;
     w.start_element("skip")?;
     w.attribute("k", "v")?;
@@ -562,7 +579,8 @@ fn skip_element_keeps_the_string_tables() -> exi::Result<()> {
     let bytes = w.into_sink();
 
     for (skipped, depth) in [("skip", 1), ("sc", 2), ("in", 2)] {
-        let mut r: Reader = Reader::new(ReaderConfig::new(&grammars))?;
+        let mut r: Reader =
+            Reader::new(ReaderConfig::new(&grammars).options(opts.clone()))?;
         r.feed(&bytes);
         r.end_input();
         let mut names = Vec::new();
@@ -663,7 +681,8 @@ fn xmlns_attribute_after_flush_keeps_the_prefix() -> exi::Result<()> {
     for flush in [false, true] {
         let mut w = Writer::new(
             Vec::new(),
-            WriterConfig::new(opts.clone(), &grammars),
+            WriterConfig::new(opts.clone(), &grammars)
+                .header(Header::Bare { cookie: false }),
         )?;
         w.start_element(exi::Name::new("urn:a", "el").with_prefix("p"))?;
         if flush {
@@ -672,7 +691,9 @@ fn xmlns_attribute_after_flush_keeps_the_prefix() -> exi::Result<()> {
         w.attribute(xmlns, "urn:a")?;
         w.end_element()?;
         w.end_document()?;
-        let mut r = Reader::<64>::new(ReaderConfig::new(&grammars))?;
+        let mut r = Reader::<64>::new(
+            ReaderConfig::new(&grammars).options(opts.clone()),
+        )?;
         seen.push(read_all(&mut r, &w.into_sink(), 64)?);
     }
     let el = OwnedName::new("urn:a", "el").with_prefix("p");
@@ -685,7 +706,11 @@ fn xmlns_attribute_after_flush_keeps_the_prefix() -> exi::Result<()> {
 /// header, or `ReaderConfig::options` for a bare one, never the
 /// previous stream's. Input that ends inside a later stream is
 /// truncated.
-#[cfg(all(feature = "bit-packed", feature = "compression"))]
+#[cfg(all(
+    feature = "bit-packed",
+    feature = "compression",
+    any(not(feature = "bare-header-only"), feature = "header-options")
+))]
 #[test]
 fn streams_with_mixed_headers_and_codings() -> exi::Result<()> {
     let strings = GlobalStrings::new(GlobalConfig::new())?;
@@ -765,7 +790,9 @@ fn write_doc(canonical: bool, events: &[Ev<'_>]) -> exi::Result<Vec<u8>> {
     let set = GrammarSet::schemaless();
     let grammars = set.attach(&strings)?;
     let opts = Options::builder().coding(Coding::ByteAligned).build()?;
-    let cfg = WriterConfig::new(opts, &grammars).canonical(canonical);
+    let cfg = WriterConfig::new(opts, &grammars)
+        .header(Header::Bare { cookie: false })
+        .canonical(canonical);
     let mut w = Writer::new(Vec::new(), cfg)?;
     let space =
         exi::Name::new("http://www.w3.org/XML/1998/namespace", "space")

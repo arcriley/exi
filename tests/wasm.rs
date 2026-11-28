@@ -42,12 +42,24 @@ fn have_target(target: &str) -> bool {
         })
 }
 
+fn wasm_cargo() -> Command {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let mut command = Command::new(cargo);
+    command.current_dir(root());
+    // The host coverage driver can inject instrumentation via either
+    // Rust flags or a wrapper. The Wasm target lacks that runtime.
+    if std::env::var_os("CARGO_LLVM_COV").is_some() {
+        command.env_remove("RUSTC_WRAPPER");
+        command.env_remove("CARGO_ENCODED_RUSTFLAGS");
+        command.env_remove("RUSTFLAGS");
+    }
+    command
+}
+
 fn build_wasm(profile_name: &str, target: &str, features: &str) -> PathBuf {
     let manifest = root().join("tests/wasm/Cargo.toml");
     let target_dir = root().join("target/wasm-test").join(profile_name);
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-    let out = Command::new(cargo)
-        .current_dir(root())
+    let out = wasm_cargo()
         .args([
             "build",
             "--manifest-path",
@@ -78,9 +90,7 @@ fn build_wasm(profile_name: &str, target: &str, features: &str) -> PathBuf {
 fn build_emscripten(profile_name: &str, features: &str) -> PathBuf {
     let manifest = root().join("tests/wasm/Cargo.toml");
     let target_dir = root().join("target/wasm-test").join(profile_name);
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-    let out = Command::new(cargo)
-        .current_dir(root())
+    let out = wasm_cargo()
         .args([
             "rustc",
             "--manifest-path",

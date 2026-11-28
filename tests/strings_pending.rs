@@ -13,14 +13,16 @@
 
 use exi::grammar::GrammarSet;
 use exi::strings::{GlobalConfig, GlobalStrings};
-use exi::{Coding, EventSink, Options, Writer, WriterConfig};
+use exi::{Coding, EventSink, Header, Options, Writer, WriterConfig};
 
 /// A writer whose session has interned one value.
 fn writer_with_a_value<'g>(
     g: &'g exi::grammar::Grammars<'g>,
 ) -> exi::Result<Writer<'g, Vec<u8>>> {
     let opts = Options::builder().coding(Coding::ByteAligned).build()?;
-    let mut w = Writer::new(Vec::new(), WriterConfig::new(opts, g))?;
+    let config =
+        WriterConfig::new(opts, g).header(Header::Bare { cookie: false });
+    let mut w = Writer::new(Vec::new(), config)?;
     w.start_element("a")?;
     w.text("v")?;
     w.end_element()?;
@@ -63,3 +65,39 @@ fn oversized_reservation_keeps_its_chunk() -> exi::Result<()> {
     assert_eq!(strings.values().stats().chunks, chunks - 1);
     Ok(())
 }
+
+include!("support/cases.rs");
+
+fn shared_ids(count: usize) {
+    let strings =
+        GlobalStrings::new(GlobalConfig::new().chunk_bytes(64)).unwrap();
+    let table = strings.values();
+    let texts: Vec<_> =
+        (0..count).map(|i| format!("reading-{i}-😀")).collect();
+    let first: Vec<_> =
+        texts.iter().map(|s| table.intern(s).unwrap()).collect();
+    let other: Vec<_> =
+        texts.iter().rev().map(|s| table.intern(s).unwrap()).collect();
+
+    for (a, b) in first.iter().zip(other.iter().rev()) {
+        assert_eq!(a.id(), b.id());
+        assert_eq!(a.as_str(), b.as_str());
+        assert_eq!(table.refs(a.id()), 2);
+    }
+    assert_eq!(table.stats().strings as usize, count);
+
+    drop(first);
+    for entry in &other {
+        assert_eq!(table.refs(entry.id()), 1);
+        assert_eq!(table.get(entry.as_str()), Some(entry.id()));
+    }
+    drop(other);
+    assert_eq!(table.stats().strings, 0);
+    for text in texts {
+        assert!(table.get(&text).is_none());
+    }
+}
+cases!(shared_ids;
+    first_id(1), before_word_boundary(63), at_word_boundary(64), across_word_boundary(65),
+    two_words(128), across_two_words(129), across_many_words(1025),
+);

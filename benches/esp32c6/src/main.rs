@@ -34,7 +34,7 @@ use exi::{BinaryKind, Value, grammar::GrammarSet};
 use exi_esp32c6::{
     MAX_DOCUMENT, SENSOR_TEMPERATURE, decode, decode_reading_with,
     decode_sensor_with, encode, encode_sensor, fill_samples, from_hex,
-    grammar, options, sensor_grammar, sensor_options, write_reading,
+    grammar, options, reply, sensor_grammar, sensor_options, write_reading,
     write_sensor,
 };
 #[cfg(feature = "extended")]
@@ -560,17 +560,7 @@ fn main() -> ! {
             .unwrap();
             continue;
         };
-        let result =
-            decode(&attached, &opts, &input[..len]).and_then(|value| {
-                let next = value.checked_add(1).ok_or_else(|| {
-                    exi::Error::new(
-                        exi::ErrorKind::Value,
-                        "reading cannot be incremented",
-                    )
-                })?;
-                encode(&attached, &opts, next, &mut output)
-            });
-        match result {
+        match reply(&attached, &opts, &input[..len], &mut output) {
             Ok(len) => {
                 write!(usb, "EXI ").unwrap();
                 for byte in &output[..len] {

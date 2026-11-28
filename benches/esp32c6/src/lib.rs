@@ -73,7 +73,13 @@ pub fn sensor_grammar() -> Result<GrammarSet> {
 }
 
 pub fn options() -> Result<Options> {
-    Options::builder().coding(Coding::ByteAligned).strict(true).build()
+    reading_options(Coding::ByteAligned)
+}
+
+/// The `<reading>` options in another coding. Bit-packed needs the
+/// `extended` feature.
+pub fn reading_options(coding: Coding) -> Result<Options> {
+    Options::builder().coding(coding).strict(true).build()
 }
 
 pub fn sensor_options(coding: Coding) -> Result<Options> {
@@ -159,6 +165,38 @@ pub fn decode_reading_with<const N: usize>(
         return Err(bad());
     }
     Ok(reading)
+}
+
+/// The serial reply: the request's reading plus one, encoded into `out`.
+/// Returns its length, or `ErrorKind::Value` when the reading cannot be
+/// incremented.
+///
+/// ```
+/// use exi::strings::{GlobalConfig, GlobalStrings};
+/// use exi_esp32c6::{MAX_DOCUMENT, decode, encode, grammar, options, reply};
+///
+/// let strings = GlobalStrings::new(GlobalConfig::device())?;
+/// let set = grammar()?;
+/// let g = set.attach(&strings)?;
+/// let opts = options()?;
+/// let mut request = [0; MAX_DOCUMENT];
+/// let mut response = [0; MAX_DOCUMENT];
+/// let len = encode(&g, &opts, 21, &mut request)?;
+/// let len = reply(&g, &opts, &request[..len], &mut response)?;
+/// assert_eq!(decode(&g, &opts, &response[..len])?, 22);
+/// # Ok::<(), exi::Error>(())
+/// ```
+pub fn reply(
+    grammars: &Grammars<'_>,
+    opts: &Options,
+    request: &[u8],
+    out: &mut [u8],
+) -> Result<usize> {
+    let value = decode(grammars, opts, request)?;
+    let next = value.checked_add(1).ok_or_else(|| {
+        Error::new(ErrorKind::Value, "reading cannot be incremented")
+    })?;
+    encode(grammars, opts, next, out)
 }
 
 pub fn encode_sensor(
@@ -439,6 +477,42 @@ mod tests {
         assert_eq!(&bytes[..len], b"\x80\0\0\x15");
         assert!(decode(&g, &opts, &bytes[..len - 1]).is_err());
         assert!(decode(&g, &opts, &bytes[..len + 1]).is_err());
+        Ok(())
+    }
+
+    /// Bit-packed packs the event code and the sign into bits.
+    #[cfg(feature = "extended")]
+    #[test]
+    fn readings_bit_packed() -> Result<()> {
+        let set = grammar()?;
+        let strings = GlobalStrings::new(GlobalConfig::device())?;
+        let g = set.attach(&strings)?;
+        let opts = reading_options(Coding::BitPacked)?;
+        let mut bytes = [0; MAX_DOCUMENT];
+        for reading in [i64::MIN, -21, 0, 21, i64::MAX] {
+            let len = encode(&g, &opts, reading, &mut bytes)?;
+            assert_eq!(decode(&g, &opts, &bytes[..len])?, reading);
+        }
+        let len = encode(&g, &opts, 21, &mut bytes)?;
+        assert_eq!(&bytes[..len], [0x80, 0x05, 0x40]);
+        Ok(())
+    }
+
+    #[test]
+    fn reply_at_integer_limit() -> Result<()> {
+        let set = grammar()?;
+        let strings = GlobalStrings::new(GlobalConfig::device())?;
+        let g = set.attach(&strings)?;
+        let opts = options()?;
+        let mut request = [0; MAX_DOCUMENT];
+        let mut response = [0; MAX_DOCUMENT];
+        let len = encode(&g, &opts, i64::MAX, &mut request)?;
+        let err =
+            reply(&g, &opts, &request[..len], &mut response).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::Value);
+        let len = encode(&g, &opts, i64::MAX - 1, &mut request)?;
+        let len = reply(&g, &opts, &request[..len], &mut response)?;
+        assert_eq!(decode(&g, &opts, &response[..len])?, i64::MAX);
         Ok(())
     }
 

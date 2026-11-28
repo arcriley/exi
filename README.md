@@ -123,6 +123,10 @@ cargo test --all-features                 # everything
 cargo build --lib --no-default-features   # the no_std engine
 ```
 
+The [browser suite](tests/wasm/README.md) runs the
+[ESP32-C6 reading codec](benches/esp32c6/README.md) in WebAssembly through Playwright.
+Run it separately from `cargo test`.
+
 The C tests need a C compiler, and use valgrind and libxml2 when they are installed.
 To make the EXIficient reference files again (Java 11 or later):
 

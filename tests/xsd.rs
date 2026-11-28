@@ -177,6 +177,8 @@ fn integer_and_boolean_representations() {
         restrict("v4096", "int", &range(0, 4095)), // 4096 values: n-bit
         restrict("v4097", "int", &range(0, 4096)), // one more: unsigned
         restrict("shifted", "int", &range(-2048, 2047)), // 4096 values below zero
+        restrict("shifted1", "int", &range(-2049, 2047)), // one more: signed
+        restrict("plus", "int", r#"<xs:minInclusive value="+10"/><xs:maxInclusive value="+20"/>"#),
         restrict("wide", "int", &range(-5000, 0)), // signed
         restrict("excl", "int", r#"<xs:minExclusive value="-1"/><xs:maxExclusive value="4096"/>"#),
         restrict("plain", "boolean", ""),
@@ -188,6 +190,8 @@ fn integer_and_boolean_representations() {
         ("v4096", "boundedInteger"),
         ("v4097", "unsignedInteger"),
         ("shifted", "boundedInteger"),
+        ("shifted1", "integer"),
+        ("plus", "boundedInteger"), // a leading + is part of the lexical form
         ("wide", "integer"),
         ("excl", "boundedInteger"),
         ("plain", "boolean"),

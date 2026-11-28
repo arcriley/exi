@@ -336,7 +336,7 @@ impl Args {
 fn preserve(list: &str) -> Res<Preserve> {
     let mut p = Preserve::empty();
     for w in list.split(',').map(str::trim).filter(|w| !w.is_empty()) {
-        p = p | match w {
+        p |= match w {
             "comments" => Preserve::COMMENTS,
             "pis" => Preserve::PIS,
             "dtd" => Preserve::DTD,

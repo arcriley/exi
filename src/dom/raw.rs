@@ -229,8 +229,11 @@ pub(crate) enum Payload {
     /// Backing buffer for an entity-ref name (keeps `RawNode::name` alive).
     Name(#[allow(dead_code)] Box<[u8]>),
     /// Processing instruction `(target, data)`, both NUL-terminated.
-    Pi(Box<(Box<[u8]>, Box<[u8]>)>),
+    Pi(Box<PiText>),
 }
+
+/// A processing instruction's target and data.
+pub(crate) type PiText = (Box<[u8]>, Box<[u8]>);
 
 impl Extra {
     pub fn new(slot: u32) -> Self {

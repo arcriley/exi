@@ -1055,7 +1055,7 @@ impl<'a> Cur<'a> {
         let start = self.i;
         let r = self.rest();
         let bytes = r.as_bytes();
-        let Some(&first) = bytes.first() else { return None };
+        let &first = bytes.first()?;
         let n = if first.is_ascii_alphabetic() || first == b'_' || first == b':'
         {
             let mut k = 1;
@@ -2483,10 +2483,10 @@ impl<'g, const N: usize> XmlReader<'g, N> {
             for idx in 0..self.ns_decls.len() {
                 let (ps, us) = self.ns_decls[idx];
                 let local = !marked
-                    && &self.ev_buf[ps.0..ps.1]
-                        == &self.ev_buf[eprefix_span.0..eprefix_span.1]
-                    && &self.ev_buf[us.0..us.1]
-                        == &self.ev_buf[euri_span.0..euri_span.1];
+                    && self.ev_buf[ps.0..ps.1]
+                        == self.ev_buf[eprefix_span.0..eprefix_span.1]
+                    && self.ev_buf[us.0..us.1]
+                        == self.ev_buf[euri_span.0..euri_span.1];
                 marked |= local;
                 self.queue(XEv::NS(ps, us, local), depth, pos);
             }
@@ -2858,10 +2858,10 @@ impl<'g, const N: usize> XmlReader<'g, N> {
             for idx in 0..self.ns_decls.len() {
                 let (ps, us) = self.ns_decls[idx];
                 let local = !marked
-                    && &self.ev_buf[ps.0..ps.1]
-                        == &self.ev_buf[eprefix_span.0..eprefix_span.1]
-                    && &self.ev_buf[us.0..us.1]
-                        == &self.ev_buf[euri_span.0..euri_span.1];
+                    && self.ev_buf[ps.0..ps.1]
+                        == self.ev_buf[eprefix_span.0..eprefix_span.1]
+                    && self.ev_buf[us.0..us.1]
+                        == self.ev_buf[euri_span.0..euri_span.1];
                 marked |= local;
                 self.queue(XEv::NS(ps, us, local), depth, pos);
             }

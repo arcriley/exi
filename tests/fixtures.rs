@@ -79,7 +79,7 @@ fn options(f: &Fixture) -> Options {
         ("lexical", Preserve::LEXICAL_VALUES),
     ] {
         if has(o) {
-            p = p | flag;
+            p |= flag;
         }
     }
     let mut b = Options::builder()

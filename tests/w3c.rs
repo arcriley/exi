@@ -86,7 +86,7 @@ impl Case {
             ('x', Preserve::PREFIXES),
         ] {
             if self.preserve.contains(c) {
-                p = p | flag;
+                p |= flag;
             }
         }
         let mut b = Options::builder()

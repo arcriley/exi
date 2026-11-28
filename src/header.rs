@@ -764,7 +764,7 @@ fn read_options_doc(
                                 if i == 5 {
                                     break;
                                 }
-                                p = p | flags[i];
+                                p |= flags[i];
                                 at = i + 1;
                             }
                             b = b.preserve(p);

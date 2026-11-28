@@ -209,7 +209,7 @@ pub(super) unsafe fn options_from(
         (EXI_PRESERVE_PIS, Preserve::PIS),
     ] {
         if o.preserve & bit != 0 {
-            p = p | f;
+            p |= f;
         }
     }
     let opt_u32 = |v: u64| -> core::result::Result<

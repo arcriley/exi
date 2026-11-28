@@ -238,7 +238,7 @@ pub(crate) struct DocInner<'g> {
     /// declared or adopted in this document. When false, elements in no
     /// namespace cannot inherit a default namespace.
     has_default_ns: bool,
-    url: Option<Box<[u8]>>,
+    url: Option<CBuf>,
     /// Storage the C API keeps per document (typed value views).
     pub(crate) c_scratch: Option<Box<dyn core::any::Any>>,
 }
@@ -659,8 +659,8 @@ impl<'g> Document<'g> {
 
     fn alloc_dtd(
         &mut self,
-        name: Box<[u8]>,
-        ids: [Box<[u8]>; 3],
+        name: CBuf,
+        ids: [CBuf; 3],
     ) -> *mut RawCommon {
         let slot = self.reserve_slot();
         let b = Box::new(DtdBox {
@@ -806,7 +806,7 @@ impl<'g> Document<'g> {
                     (*n).localId = local.index();
                 }
             }
-            (*p).name = strings.locals().resolve(local).as_ptr();
+            (*p).name = strings.locals().resolve_cstr(local);
         }
     }
 
@@ -1076,6 +1076,11 @@ impl<'g> Document<'g> {
                     _ => unreachable!(),
                 };
                 (*(p as *mut RawNode)).content = ptr;
+            } else if s.len() <= arena::TEXT_MAX {
+                let ptr = self.dm().arena.alloc_text(s.as_bytes());
+                (*(p as *mut RawNode)).content = ptr;
+                extra_mut(p).payload =
+                    Payload::Arena { ptr, len: s.len() as u32 };
             } else {
                 let text = cstr(s);
                 (*(p as *mut RawNode)).content = text.as_ptr() as *mut u8;
@@ -2475,6 +2480,20 @@ impl<'g> Document<'g> {
                 self.dm().ptrs[mine as usize] = node;
                 set_node_slot(node, mine);
                 (*node).doc = self.doc_ptr();
+                // Text in the source's text arena is freed with the
+                // source: the node takes a copy of its own.
+                if !matches!(
+                    kind,
+                    EXI_DTD_NODE | EXI_ELEMENT_NODE | EXI_ATTRIBUTE_NODE
+                ) {
+                    let x = extra_mut(node);
+                    if let Payload::Arena { .. } = x.payload {
+                        let text = cstr(x.text());
+                        (*(node as *mut RawNode)).content =
+                            text.as_ptr() as *mut u8;
+                        x.payload = Payload::Text(text);
+                    }
+                }
                 let needs_heap = match kind {
                     EXI_DTD_NODE => true,
                     EXI_ELEMENT_NODE => {
@@ -2530,11 +2549,11 @@ impl<'g> Document<'g> {
                 let b = &mut *ns.cast::<NsBox<'g>>();
                 b.raw.context = self.doc_ptr();
                 if let Some((uri, prefix)) = names {
-                    b.raw.href = uri.as_str().as_ptr();
+                    b.raw.href = uri.as_cptr();
                     b.raw.uriId = uri.id().index();
                     b.raw.prefix = prefix
                         .as_ref()
-                        .map_or(ptr::null(), |h| h.as_str().as_ptr());
+                        .map_or(ptr::null(), |h| h.as_cptr());
                     b.uri = uri;
                     b.prefix = prefix;
                 }
@@ -3345,8 +3364,8 @@ impl<'g> Document<'g> {
         let raw = RawNs {
             next: ptr::null_mut(),
             r#type: EXI_NAMESPACE_DECL,
-            href: u.as_str().as_ptr(),
-            prefix: p.as_ref().map_or(ptr::null(), |h| h.as_str().as_ptr()),
+            href: u.as_cptr(),
+            prefix: p.as_ref().map_or(ptr::null(), |h| h.as_cptr()),
             _private: ptr::null_mut(),
             context: self.doc_ptr(),
             uriId: u.id().index(),

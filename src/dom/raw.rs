@@ -213,7 +213,10 @@ pub(crate) enum Payload {
     /// Short NUL-terminated UTF-8 text stored inline in the node box
     /// (`len as usize <= INLINE_MAX`, `buf[len as usize] == 0`).
     Inline { len: u8, buf: [u8; INLINE_MAX + 1] },
-    Text(Box<[u8]>),
+    /// NUL-terminated UTF-8 text in the document's text arena
+    /// (`ptr[len] == 0`), owned by the arena, not the node.
+    Arena { ptr: *const u8, len: u32 },
+    Text(CBuf),
     Bool(bool),
     BoolDigit(bool),
     Int(i64),
@@ -227,13 +230,13 @@ pub(crate) enum Payload {
     /// Compound or oversized typed EXI value.
     Typed(Box<OwnedValue>),
     /// Backing buffer for an entity-ref name (keeps `RawNode::name` alive).
-    Name(#[allow(dead_code)] Box<[u8]>),
+    Name(#[allow(dead_code)] CBuf),
     /// Processing instruction `(target, data)`, both NUL-terminated.
     Pi(Box<PiText>),
 }
 
 /// A processing instruction's target and data.
-pub(crate) type PiText = (Box<[u8]>, Box<[u8]>);
+pub(crate) type PiText = (CBuf, CBuf);
 
 impl Extra {
     pub fn new(slot: u32) -> Self {
@@ -245,6 +248,16 @@ impl Extra {
             Payload::Inline { len, buf } => {
                 // SAFETY: written from a `&str` in `set_text`.
                 unsafe { core::str::from_utf8_unchecked(&buf[..*len as usize]) }
+            }
+            Payload::Arena { ptr, len } => {
+                // SAFETY: written from a `&str` in `set_text`; the arena
+                // outlives every node that points into it.
+                unsafe {
+                    core::str::from_utf8_unchecked(core::slice::from_raw_parts(
+                        *ptr,
+                        *len as usize,
+                    ))
+                }
             }
             Payload::Text(text) => text_of(text),
             Payload::Pi(pair) => text_of(&pair.1),
@@ -317,9 +330,9 @@ pub(crate) struct AttrBox {
 pub(crate) struct DtdBox {
     pub raw: RawDtd,
     pub slot: u32,
-    pub name: Box<[u8]>,
+    pub name: CBuf,
     /// Public ID, system ID and internal subset, NUL-terminated.
-    pub ids: [Box<[u8]>; 3],
+    pub ids: [CBuf; 3],
 }
 
 #[repr(C)]
@@ -329,12 +342,42 @@ pub(crate) struct NsBox<'g> {
     pub prefix: Option<Held<'g, Prefix>>,
 }
 
+/// A heap byte buffer that the tree points into (`name`, `content`,
+/// `href`). It is owned through a raw pointer, not a `Box`: moving a
+/// `Box` asserts unique access to its bytes, which would invalidate the
+/// tree's pointers into them every time the buffer moved into a payload
+/// or struct.
+pub(crate) struct CBuf(ptr::NonNull<[u8]>);
+
+impl CBuf {
+    pub fn as_ptr(&self) -> *const u8 {
+        self.0.as_ptr().cast()
+    }
+}
+
+impl core::ops::Deref for CBuf {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        // SAFETY: the buffer is ours and alive until `drop`.
+        unsafe { self.0.as_ref() }
+    }
+}
+
+impl Drop for CBuf {
+    fn drop(&mut self) {
+        // SAFETY: made from `Box::into_raw` in `cstr`, freed once here.
+        drop(unsafe { Box::from_raw(self.0.as_ptr()) });
+    }
+}
+
 /// A NUL-terminated copy of `s`.
-pub(crate) fn cstr(s: &str) -> Box<[u8]> {
+pub(crate) fn cstr(s: &str) -> CBuf {
     let mut v = alloc::vec::Vec::with_capacity(s.len() + 1);
     v.extend_from_slice(s.as_bytes());
     v.push(0);
-    v.into_boxed_slice()
+    let b: Box<[u8]> = v.into_boxed_slice();
+    // SAFETY: `Box::into_raw` is never null.
+    CBuf(unsafe { ptr::NonNull::new_unchecked(Box::into_raw(b)) })
 }
 
 /// The text of a buffer made by [`cstr`].

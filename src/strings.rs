@@ -569,6 +569,11 @@ impl<'g, K: Kind> Held<'g, K> {
     pub fn as_str(&self) -> &str {
         self.table.resolve(self.id)
     }
+    /// The string as a C string, NUL included (see
+    /// `GlobalTable::resolve_cstr`).
+    pub(crate) fn as_cptr(&self) -> *const u8 {
+        self.table.resolve_cstr(self.id)
+    }
     /// The table this handle belongs to, so a session can check that a
     /// handle comes from its own global tables.
     pub fn table(&self) -> &'g GlobalTable<K> {
@@ -953,6 +958,16 @@ impl Inner {
                 e.len as usize,
             )
         }
+    }
+
+    /// A pointer to the entry's bytes and the NUL after them, made from
+    /// the chunk's own pointer, so C-style readers may read the NUL.
+    fn cptr(&self, e: &Entry) -> *const u8 {
+        let c = self.chunks[e.chunk as usize]
+            .as_ref()
+            .expect("live entry has a chunk");
+        // SAFETY: `start` lies inside the chunk.
+        unsafe { c.ptr.as_ptr().add(e.start as usize) }
     }
 
     fn find(&self, cfg: &GlobalConfig, s: &[u8], h: u32) -> Option<u32> {
@@ -1429,6 +1444,17 @@ impl<K: Kind> GlobalTable<K> {
         // SAFETY: interned bytes always come from a &str or from
         // push_str/push_char.
         unsafe { core::str::from_utf8_unchecked(inner.bytes(e)) }
+    }
+
+    /// The string of a live id as a C string: its bytes followed by the
+    /// NUL every entry has. A pointer taken from [`resolve`](Self::resolve)
+    /// covers the bytes only, so reading its NUL is outside it. The
+    /// caller must hold a reference for as long as it uses the result.
+    pub(crate) fn resolve_cstr(&self, id: StrId<K>) -> *const u8 {
+        let inner = self.inner_ref();
+        let e = &inner.entries[id.0 as usize];
+        debug_assert!(e.refs > 0, "resolve of a freed string id");
+        inner.cptr(e)
     }
 
     /// Interns `s` and returns the id with one reference that the

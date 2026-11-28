@@ -18,8 +18,8 @@
 //! is still alive (`has_owner`). When a document with no adopted nodes is
 //! dropped, every chunk it allocated is freed directly in `O(chunks)`.
 
-use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::alloc::Layout;
 use core::mem::{align_of, size_of};
 use core::ptr;
 
@@ -53,10 +53,22 @@ const _: () = {
     assert!(size_of::<NodeBox>().is_multiple_of(8));
 };
 
+/// The layout of a chunk of `words` 8-byte words.
+fn chunk_layout(words: usize) -> Layout {
+    Layout::from_size_align(words * 8, 8).expect("arena chunk size")
+}
+
+/// A chunk of at least `min_bytes`, not zeroed: every node is written
+/// whole with `ptr::write` before anything reads it, so filling the
+/// chunk first would only double the memory traffic of building a tree.
 fn alloc_chunk(min_bytes: usize) -> *mut ChunkHeader {
     let words = min_bytes.div_ceil(8);
-    let buf: Box<[u64]> = alloc::vec![0u64; words].into_boxed_slice();
-    let hdr = Box::into_raw(buf) as *mut ChunkHeader;
+    let layout = chunk_layout(words);
+    // SAFETY: `layout` has a non-zero size (`words * 8 >= HDR_BYTES`).
+    let hdr = unsafe { alloc::alloc::alloc(layout) } as *mut ChunkHeader;
+    if hdr.is_null() {
+        alloc::alloc::handle_alloc_error(layout);
+    }
     // SAFETY: `hdr` is freshly allocated with `words * 8 >= HDR_BYTES` bytes
     // and 8-byte alignment.
     unsafe {
@@ -78,13 +90,10 @@ fn alloc_chunk(min_bytes: usize) -> *mut ChunkHeader {
 /// `hdr` came from [`alloc_chunk`], has `live == 0` and `!has_owner`, and
 /// is never used again.
 unsafe fn free_chunk(hdr: *mut ChunkHeader) {
-    // SAFETY: `hdr` was created from `Box::<[u64]>::into_raw` with `cap_u64s`.
+    // SAFETY: `hdr` was allocated by `alloc_chunk` with this layout.
     unsafe {
         let words = (*hdr).cap_u64s;
-        drop(Box::from_raw(ptr::slice_from_raw_parts_mut(
-            hdr as *mut u64,
-            words,
-        )));
+        alloc::alloc::dealloc(hdr as *mut u8, chunk_layout(words));
     }
 }
 
@@ -108,7 +117,16 @@ pub(crate) struct NodeArena {
     free_elem: Vec<(*mut ElemBox, *mut ChunkHeader)>,
     free_attr: Vec<(*mut AttrBox, *mut ChunkHeader)>,
     free_node: Vec<(*mut NodeBox, *mut ChunkHeader)>,
+    /// Byte chunks `(start, capacity)` for text too long to store inline;
+    /// the last is the active one.
+    text: Vec<(*mut u8, usize)>,
+    /// Next free byte in the active text chunk.
+    text_pos: usize,
 }
+
+/// Text up to this many bytes goes in the text arena; longer text gets
+/// a heap buffer of its own.
+pub(crate) const TEXT_MAX: usize = 4096;
 
 impl NodeArena {
     pub fn new() -> Self {
@@ -119,6 +137,63 @@ impl NodeArena {
             free_elem: Vec::new(),
             free_attr: Vec::new(),
             free_node: Vec::new(),
+            text: Vec::new(),
+            text_pos: 0,
+        }
+    }
+
+    /// A NUL-terminated copy of `s` (at most [`TEXT_MAX`] bytes), alive
+    /// until the document is dropped. Text is never moved or freed
+    /// alone: a node that stops using it leaves it in place, and a node
+    /// adopted by another document copies its text out first.
+    #[inline]
+    pub fn alloc_text(&mut self, s: &[u8]) -> *mut u8 {
+        debug_assert!(s.len() <= TEXT_MAX);
+        let need = s.len() + 1;
+        let p = match self.text.last() {
+            Some(&(base, cap)) if self.text_pos + need <= cap => {
+                // SAFETY: `text_pos + need <= cap` bytes of this chunk.
+                let p = unsafe { base.add(self.text_pos) };
+                self.text_pos += need;
+                p
+            }
+            _ => self.text_slow(need),
+        };
+        // SAFETY: `p` has `need` writable bytes that `s` does not overlap.
+        unsafe {
+            ptr::copy_nonoverlapping(s.as_ptr(), p, s.len());
+            *p.add(s.len()) = 0;
+        }
+        p
+    }
+
+    #[cold]
+    fn text_slow(&mut self, need: usize) -> *mut u8 {
+        // The same growth schedule as node chunks: 4 KiB doubling to
+        // 256 KiB.
+        let n = self.text.len();
+        let cap = (4096usize << n.min(6)).min(MAX_CHUNK_BYTES).max(need);
+        let layout = Layout::from_size_align(cap, 1).expect("text chunk size");
+        // SAFETY: `cap > 0`.
+        let base = unsafe { alloc::alloc::alloc(layout) };
+        if base.is_null() {
+            alloc::alloc::handle_alloc_error(layout);
+        }
+        self.text.push((base, cap));
+        self.text_pos = need;
+        base
+    }
+
+    /// Frees every text chunk.
+    fn drop_text(&mut self) {
+        for (base, cap) in self.text.drain(..) {
+            // SAFETY: allocated by `text_slow` with this layout.
+            unsafe {
+                alloc::alloc::dealloc(
+                    base,
+                    Layout::from_size_align(cap, 1).expect("text chunk size"),
+                )
+            };
         }
     }
 
@@ -315,6 +390,9 @@ impl NodeArena {
     /// (`nsDef`, `Payload::Text`/`Pi`/`Name`/`Typed`, `DtdBox`) has been
     /// dropped.
     pub unsafe fn drop_all(&mut self, ptrs: &[*mut RawCommon]) {
+        // Adopted nodes copied their text out, so no other document uses
+        // these chunks.
+        self.drop_text();
         // SAFETY: fast path when no nodes crossed document boundaries.
         unsafe {
             if !self.adopted_out && self.foreign.is_empty() {

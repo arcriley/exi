@@ -528,6 +528,33 @@ fn adopt_between_string_tables() {
     assert_eq!(b.global_name(moved), b.lookup_name("urn:a", "b"));
 }
 
+/// Text longer than a node holds inline lives in the document's text
+/// arena; an adopted node takes its own copy, so it outlives the source.
+#[test]
+fn adopted_long_text_outlives_its_document() {
+    let s = strings();
+    let long = "x".repeat(100);
+    let huge = "y".repeat(5000); // past the arena: a heap buffer
+    let xml = format!(r#"<a><b k="{long}">{long}<!--{long}--><c>{huge}</c></b></a>"#);
+    let mut a = Document::parse_xml(&s, xml.as_bytes()).unwrap();
+    let mut b = Document::parse_xml(&s, b"<z/>").unwrap();
+    let node = a.first_element_child(a.root().unwrap()).unwrap();
+    let moved = b.adopt(&mut a, node).unwrap();
+    drop(a); // frees a's text arena
+    b.append_child(b.root().unwrap(), moved).unwrap();
+    assert_eq!(
+        b.to_xml().unwrap(),
+        format!(r#"<z><b k="{long}">{long}<!--{long}--><c>{huge}</c></b></z>"#)
+    );
+    // The C view reads the same text through `content`.
+    let text = b.first_child(moved).unwrap();
+    // SAFETY: reading a live text node of a borrowed document.
+    let content = unsafe {
+        std::ffi::CStr::from_ptr((*b.raw(text).cast::<exi::dom::raw::RawNode>()).content.cast())
+    };
+    assert_eq!(content.to_str().unwrap(), long);
+}
+
 /// A typed tree from a strict stream, edited and written to a strict writer again. Text
 /// set on a typed node is a string until the writer parses it for the node's type, so a
 /// good edit encodes and a bad one is `Unencodable`, never stale octets.

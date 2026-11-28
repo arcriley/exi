@@ -8,12 +8,13 @@
 // are welcome only if this notice remains unchanged clearly
 // communicating that changes are made under these same conditions.
 //
-//! Compiles `tests/wasm` (`exi-wasm-test`) to `wasm32-unknown-unknown` in both
-//! byte-aligned and bit-packed configurations with `exig` enabled, then runs
-//! the compiled `.wasm` modules against repository EXI and EXIG fixtures.
+//! Compiles `tests/wasm` (`exi-wasm-test`) to `wasm32-unknown-unknown` and
+//! `wasm32-unknown-emscripten` in both byte-aligned and bit-packed
+//! configurations with `exig` enabled, then runs the compiled modules
+//! against repository EXI and EXIG fixtures via Node.js.
 //!
-//! Needs the `wasm32-unknown-unknown` target and `node` on `PATH`; skipped
-//! cleanly when either is missing.
+//! Needs `node` on `PATH` and the respective Rust target (`emcc` as well for
+//! Emscripten); each test is skipped cleanly when its prerequisites are missing.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -56,6 +57,7 @@ fn build_wasm(profile_name: &str, target: &str, features: &str) -> PathBuf {
             "--locked",
             "--offline",
             "--release",
+            "--lib",
             "--target",
             target,
             "--features",
@@ -73,20 +75,85 @@ fn build_wasm(profile_name: &str, target: &str, features: &str) -> PathBuf {
     target_dir.join(format!("{target}/release/exi_wasm_test.wasm"))
 }
 
-fn run_node_suite(byte_wasm: &Path, bit_wasm: &Path) {
+fn build_emscripten(profile_name: &str, features: &str) -> PathBuf {
+    let manifest = root().join("tests/wasm/Cargo.toml");
+    let target_dir = root().join("target/wasm-test").join(profile_name);
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let out = Command::new(cargo)
+        .current_dir(root())
+        .args([
+            "rustc",
+            "--manifest-path",
+        ])
+        .arg(&manifest)
+        .args([
+            "--locked",
+            "--offline",
+            "--release",
+            "--bin",
+            "exi-wasm-emscripten",
+            "--target",
+            "wasm32-unknown-emscripten",
+            "--features",
+            features,
+            "--target-dir",
+        ])
+        .arg(&target_dir)
+        .args([
+            "--",
+            "-C",
+            "link-arg=-sMODULARIZE=1",
+            "-C",
+            "link-arg=-sEXPORT_NAME=createExiModule",
+            "-C",
+            "link-arg=-sEXPORTED_FUNCTIONS=_alloc_buf,_free_buf,_encode_reading,_decode_reading,_reading,_wasm_parse_exi_schemaless,_wasm_parse_exig,_wasm_parse_exi_with_exig",
+            "-C",
+            "link-arg=-sEXPORTED_RUNTIME_METHODS=HEAPU8",
+        ])
+        .output()
+        .expect("cargo runs");
+    assert!(
+        out.status.success(),
+        "building emscripten wasm ({features}):\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    target_dir.join("wasm32-unknown-emscripten/release/exi-wasm-emscripten.js")
+}
+
+fn run_node_suite(byte_module: &Path, bit_module: &Path) {
     let script = r#"
 const fs = require("node:fs");
+const path = require("node:path");
 const assert = require("node:assert/strict");
 
-async function load(wasmPath) {
-    const bytes = fs.readFileSync(wasmPath);
-    const { instance } = await WebAssembly.instantiate(bytes, {});
-    const w = instance.exports;
+async function load(modulePath) {
+    let w;
+    let heapBytes;
+    if (modulePath.endsWith(".js")) {
+        const createModule = require(path.resolve(modulePath));
+        const m = await createModule();
+        w = {
+            alloc_buf: m._alloc_buf,
+            free_buf: m._free_buf,
+            encode_reading: m._encode_reading,
+            decode_reading: m._decode_reading,
+            reading: m._reading,
+            wasm_parse_exi_schemaless: m._wasm_parse_exi_schemaless,
+            wasm_parse_exig: m._wasm_parse_exig,
+            wasm_parse_exi_with_exig: m._wasm_parse_exi_with_exig,
+        };
+        heapBytes = () => m.HEAPU8;
+    } else {
+        const bytes = fs.readFileSync(modulePath);
+        const { instance } = await WebAssembly.instantiate(bytes, {});
+        w = instance.exports;
+        heapBytes = () => new Uint8Array(w.memory.buffer);
+    }
     const withBuf = (data, fn) => {
         const ptr = w.alloc_buf(data.length);
         try {
             if (data.length > 0) {
-                new Uint8Array(w.memory.buffer, ptr, data.length).set(data);
+                heapBytes().subarray(ptr, ptr + data.length).set(data);
             }
             return fn(ptr, data.length);
         } finally {
@@ -177,8 +244,8 @@ async function load(wasmPath) {
         .arg("-e")
         .arg(script)
         .arg(root())
-        .arg(byte_wasm)
-        .arg(bit_wasm)
+        .arg(byte_module)
+        .arg(bit_module)
         .output()
         .expect("node runs");
     assert!(
@@ -220,11 +287,7 @@ fn wasm_emscripten_exi_and_exig() {
         eprintln!("skipping wasm_emscripten_exi_and_exig: node not found on PATH");
         return;
     }
-    let byte_wasm = build_wasm("emscripten-byte-aligned", "wasm32-unknown-emscripten", "exig");
-    let bit_wasm = build_wasm(
-        "emscripten-bit-packed",
-        "wasm32-unknown-emscripten",
-        "exig,bit-packed",
-    );
-    run_node_suite(&byte_wasm, &bit_wasm);
+    let byte_js = build_emscripten("emscripten-byte-aligned", "exig");
+    let bit_js = build_emscripten("emscripten-bit-packed", "exig,bit-packed");
+    run_node_suite(&byte_js, &bit_js);
 }

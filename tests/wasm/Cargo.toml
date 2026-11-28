@@ -7,6 +7,11 @@ publish = false
 [lib]
 crate-type = ["cdylib"]
 
+[[bin]]
+name = "exi-wasm-emscripten"
+path = "src/bin/emscripten.rs"
+required-features = ["exig"]
+
 [features]
 bit-packed = ["exi/bit-packed"]
 exig = ["exi/exig"]

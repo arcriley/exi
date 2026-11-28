@@ -9,6 +9,7 @@ crate-type = ["cdylib"]
 
 [features]
 bit-packed = ["exi/bit-packed"]
+exig = ["exi/exig"]
 
 [dependencies]
 exi = { path = "../..", default-features = false, features = ["bare-header-only"] }

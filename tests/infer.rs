@@ -367,3 +367,70 @@ fn exact_fit_skips_untrimmed_and_zero_cap_enumerations() {
     padded.document(b"<r><k> a </k><k> a </k><k>b</k><k>b</k></r>").unwrap();
     assert!(padded.schemas()[0].text.contains(r#"name="k" type="xs:string""#));
 }
+
+/// The examples in any order give the same schema, so learners fed the
+/// same documents make grammars that read each other's streams.
+#[test]
+fn example_order_does_not_change_the_schema() {
+    let sets: [&[&[u8]]; 3] = [
+        // A choice: the children's order varies.
+        &[b"<r><b/><a/></r>", b"<r><a/><c/><b/></r>"],
+        // A sequence with names it does not order: b and c never meet.
+        &[b"<r><a/><c/></r>", b"<r><a/><b/></r>"],
+        &[b"<r><z>1</z><y>x</y></r>", b"<r><y>-3</y><z>2.5</z></r>"],
+    ];
+    let corpus = corpus(&["orders-1.xml", "orders-2.xml"]);
+    let orders: Vec<&[u8]> = corpus.iter().map(Vec::as_slice).collect();
+    for docs in sets.iter().copied().chain([orders.as_slice()]) {
+        for fit in [Fit::General, Fit::Exact] {
+            let text = |rev: bool| {
+                let mut l = SchemaInference::new().fit(fit);
+                let mut d: Vec<&[u8]> = docs.to_vec();
+                if rev {
+                    d.reverse();
+                }
+                for x in d {
+                    l.document(x).unwrap();
+                }
+                (l.schemas()[0].text.clone(), l.grammars().unwrap().to_exig().unwrap())
+            };
+            let (a, b) = (text(false), text(true));
+            assert_eq!(a.0, b.0, "{fit:?}");
+            assert_eq!(a.1, b.1, "{fit:?}");
+        }
+    }
+}
+
+#[test]
+fn text_beside_children_is_mixed() {
+    let mut l = SchemaInference::new();
+    l.document(b"<p>text <b>bold</b> more</p>").unwrap();
+    let t = &l.schemas()[0].text;
+    assert!(t.contains("<xs:complexType mixed=\"true\">"), "{t}");
+}
+
+/// Strict streams under a learned schema refuse names the examples did
+/// not have, and documents missing a required attribute.
+#[test]
+fn learned_schemas_refuse_unseen_structure() {
+    let examples = [br#"<log><e level="info" code="200"/><e level="warn" code="404"/></log>"#.to_vec()];
+    let strings = GlobalStrings::new(GlobalConfig::new()).unwrap();
+    for fit in [Fit::General, Fit::Exact] {
+        let set = learn(fit, &examples);
+        let g = set.attach(&strings).unwrap();
+        for refused in [
+            &br#"<log><e code="200"/></log>"#[..],                    // level is required
+            br#"<log><e level="info" code="200" x="1"/></log>"#,     // x was never seen
+            br#"<log><f/></log>"#,                                    // nor was f
+        ] {
+            assert!(encode(&g, refused).is_err(), "{fit:?}: {}", String::from_utf8_lossy(refused));
+        }
+    }
+}
+
+#[test]
+fn nothing_learned() {
+    let l = SchemaInference::new();
+    assert!(l.schemas().is_empty());
+    assert_eq!(l.grammars().unwrap_err().kind(), exi::ErrorKind::State);
+}

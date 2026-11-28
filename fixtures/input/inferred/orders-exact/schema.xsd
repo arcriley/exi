@@ -34,8 +34,8 @@
         <xs:element ref="customer"/>
         <xs:element ref="date"/>
         <xs:element ref="line"/>
-        <xs:element ref="status"/>
         <xs:element ref="note"/>
+        <xs:element ref="status"/>
       </xs:choice>
       <xs:attribute name="id" type="order-id" use="required"/>
       <xs:attribute name="paid" type="xs:boolean" use="required"/>

@@ -65,6 +65,12 @@
 //! | An attribute on every instance | `use="required"` |
 //! | An attribute in a namespace (`xlink:href`, `xml:lang`) | a global attribute in that namespace's document |
 //!
+//! The order of the examples does not change the schema: a choice lists
+//! its members by name, and so does a sequence where the examples leave
+//! the order open. Learners given the same documents in any order make
+//! grammars that read each other's streams (EXI codes a choice's
+//! elements in schema order).
+//!
 //! Indentation between elements is not text: it is whitespace only.
 //! `xsi:nil="true"` marks the element `nillable="true"` without
 //! widening its type to `string`; comments, PIs and other `xsi:`
@@ -749,8 +755,13 @@ impl SchemaInference {
         } else {
             if children {
                 let m = &e.model;
+                // Name order, so the examples' order does not matter.
+                let mut names = m.names.clone();
+                names.sort_by_key(|&c| {
+                    (&self.elements[c].local, &self.elements[c].uri)
+                });
                 let order =
-                    if m.sequence { topo(&m.names, &m.before) } else { None };
+                    if m.sequence { topo(&names, &m.before) } else { None };
                 let (open, close, items) = match &order {
                     Some(o) => (
                         "      <xs:sequence>\n",
@@ -760,7 +771,7 @@ impl SchemaInference {
                     None => (
                         "      <xs:choice minOccurs=\"0\" maxOccurs=\"unbounded\">\n",
                         "      </xs:choice>\n",
-                        m.names.clone(),
+                        names,
                     ),
                 };
                 out.push_str(open);
@@ -1003,7 +1014,7 @@ impl SchemaInference {
 }
 
 /// The child names in an order every instance follows, ties broken by
-/// first appearance; `None` when the instances disagree.
+/// their order in `names`; `None` when the instances disagree.
 fn topo(
     names: &[usize],
     before: &BTreeSet<(usize, usize)>,

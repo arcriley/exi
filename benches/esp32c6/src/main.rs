@@ -77,6 +77,8 @@ impl Write for Console {
 }
 
 impl Console {
+    // An idle host can leave this loop polling indefinitely. Service
+    // any enabled watchdog independently of receiving a line.
     fn line(&mut self, out: &mut [u8]) -> Option<usize> {
         let mut len = 0;
         let mut overflow = false;

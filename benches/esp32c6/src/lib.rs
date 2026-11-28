@@ -495,6 +495,8 @@ mod tests {
         }
         let len = encode(&g, &opts, 21, &mut bytes)?;
         assert_eq!(&bytes[..len], [0x80, 0x05, 0x40]);
+        assert!(decode(&g, &opts, &bytes[..len - 1]).is_err());
+        assert!(decode(&g, &opts, &bytes[..len + 1]).is_err());
         Ok(())
     }
 

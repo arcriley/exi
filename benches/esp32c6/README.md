@@ -11,7 +11,7 @@ Two firmware profiles measure both minimum footprint and full device features:
 | Profile | Cargo features | Allocator heap | What it measures |
 |---|---|---:|---|
 | `minimal` | default (`bare-header-only`) | 32 KiB | Smallest flash/RAM build; `<reading>` fresh and reused codecs; byte-aligned sensor (64 B & 2 KiB binary, whole / 32 B / 1 B streaming feeds) |
-| `extended` | `--features extended` (`bit-packed`, `exig`, `xml`) | 64 KiB | All `minimal` cases plus `.exig` load/attach, bit-packed sensor coding, and UTF-8 XML text (`XmlWriter` / `XmlReader`) on the same MCU |
+| `extended` | `--features extended` (`bit-packed`, `exig`, `xml`) | 128 KiB | All `minimal` cases plus `.exig` load/attach, bit-packed sensor coding, and UTF-8 XML text (`XmlWriter` / `XmlReader`) on the same MCU |
 
 ## Running from the repository root
 
@@ -59,3 +59,7 @@ accepts LF- or CRLF-terminated commands:
 - `BENCH SUITE` — runs all benchmark cases (5 samples each) and prints `SUITE START`, one `CASE …` line per workload, and `SUITE END`.
 - `BENCH` — runs 1,000 fresh `<reading>` round trips (compatible with the original serial demo).
 - `<hex>` — decodes one bare-header byte-aligned `<reading>` document, increments its integer value, and replies `EXI <hex>`.
+
+For example, send `80000015` (21) and the console replies `EXI 80000016`
+(22). The browser suite also tests those readings with bit-packed coding,
+where they occupy three bytes each, `800540` and `800580`.

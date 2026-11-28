@@ -40,8 +40,8 @@ use rustc_hash::FxBuildHasher;
 use super::raw::*;
 use super::{Document, XmlParseOptions, append_raw};
 use crate::Limits;
-use crate::xml::scan;
 use crate::strings::{GlobalStrings, StrId, Uri};
+use crate::xml::scan;
 
 /// Stop short of the session tables' `max_names`, so a document that
 /// might reach it is left to `XmlReader`, which applies it exactly.
@@ -165,8 +165,8 @@ fn is_char(c: u32) -> bool {
     matches!(c, 0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF)
 }
 
-/// UTF-8 without characters XML forbids: C0 controls but tab, LF and CR,
-/// U+FFFE and U+FFFF. (UTF-8 validity already excludes surrogates.)
+/// UTF-8 without characters XML forbids: C0 controls but tab, LF and
+/// CR, U+FFFE and U+FFFF. (UTF-8 validity already excludes surrogates.)
 fn chars_ok(s: &[u8]) -> bool {
     if core::str::from_utf8(s).is_err() {
         return false;
@@ -181,7 +181,9 @@ fn chars_ok(s: &[u8]) -> bool {
             return false;
         }
         // 0xEF: U+FFFE and U+FFFF are EF BF BE and EF BF BF.
-        if s.get(i + 1) == Some(&0xBF) && matches!(s.get(i + 2), Some(&0xBE | &0xBF)) {
+        if s.get(i + 1) == Some(&0xBF)
+            && matches!(s.get(i + 2), Some(&0xBE | &0xBF))
+        {
             return false;
         }
         i += 1;
@@ -334,7 +336,9 @@ impl<'s, 'g> P<'s, 'g> {
 
     /// The whole document: prolog, root element, epilog.
     fn document(&mut self) -> Option<()> {
-        if self.rest().starts_with(b"<?xml") && self.s.get(5).is_some_and(|&b| is_space(b)) {
+        if self.rest().starts_with(b"<?xml")
+            && self.s.get(5).is_some_and(|&b| is_space(b))
+        {
             self.declaration()?;
         }
         loop {
@@ -372,7 +376,10 @@ impl<'s, 'g> P<'s, 'g> {
     /// optional parts optional.
     fn declaration(&mut self) -> Option<()> {
         self.i = 5;
-        for (n, name) in [&b"version"[..], b"encoding", b"standalone"].into_iter().enumerate() {
+        for (n, name) in [&b"version"[..], b"encoding", b"standalone"]
+            .into_iter()
+            .enumerate()
+        {
             let save = self.i;
             if !self.skip_space() || !self.eat(name) {
                 self.i = save;
@@ -418,7 +425,9 @@ impl<'s, 'g> P<'s, 'g> {
             self.i += 1;
         }
         let target = &self.s[start..self.i];
-        if target.eq_ignore_ascii_case(b"xml") || self.peek().is_some_and(|b| b >= 0x80) {
+        if target.eq_ignore_ascii_case(b"xml")
+            || self.peek().is_some_and(|b| b >= 0x80)
+        {
             return None;
         }
         let data = if self.eat(b"?>") {
@@ -438,7 +447,10 @@ impl<'s, 'g> P<'s, 'g> {
         self.flush()?;
         // SAFETY: the input is valid UTF-8 and both ends are ASCII.
         let (target, data) = unsafe {
-            (core::str::from_utf8_unchecked(target), core::str::from_utf8_unchecked(data))
+            (
+                core::str::from_utf8_unchecked(target),
+                core::str::from_utf8_unchecked(data),
+            )
         };
         let n = self.doc.new_pi(target, data);
         self.place(n);
@@ -458,30 +470,39 @@ impl<'s, 'g> P<'s, 'g> {
         }
         self.flush()?;
         // SAFETY: valid UTF-8 between ASCII delimiters.
-        let text = unsafe { core::str::from_utf8_unchecked(&self.s[start..end]) };
+        let text =
+            unsafe { core::str::from_utf8_unchecked(&self.s[start..end]) };
         let n = self.doc.new_comment(text);
         self.place(n);
         Some(())
     }
 
-    /// Puts a new comment or PI under the open element, or the document.
+    /// Puts a new comment or PI under the open element, or the
+    /// document.
     fn place(&mut self, n: super::NodeId) {
         let parent = match self.stack.last() {
             Some(o) => o.el as *mut RawCommon,
             None => self.doc.doc_ptr() as *mut RawCommon,
         };
         let p = self.doc.p(n);
-        // SAFETY: a new node appended to a live element or the document.
+        // SAFETY: a new node appended to a live element or the
+        // document.
         unsafe { append_raw(parent, p) };
     }
 
     /// The prefix id for `prefix`, interned and held once.
     fn prefix_id(&mut self, prefix: &'s [u8]) -> Option<u32> {
-        if let Some(&(_, id)) = self.prefixes.iter().find(|(p, _)| *p == prefix) {
+        if let Some(&(_, id)) =
+            self.prefixes.iter().find(|(p, _)| *p == prefix)
+        {
             return Some(id);
         }
         // SAFETY: ASCII.
-        let id = self.doc.intern_prefix(unsafe { core::str::from_utf8_unchecked(prefix) }).ok()?.index();
+        let id = self
+            .doc
+            .intern_prefix(unsafe { core::str::from_utf8_unchecked(prefix) })
+            .ok()?
+            .index();
         self.prefixes.push((prefix, id));
         Some(id)
     }
@@ -499,8 +520,12 @@ impl<'s, 'g> P<'s, 'g> {
             None => (&q[..0], q),
         };
         // SAFETY: ASCII.
-        let id = self.doc.intern_local(unsafe { core::str::from_utf8_unchecked(local) }).ok()?;
-        let prefix_id = if prefix.is_empty() { NO_ID } else { self.prefix_id(prefix)? };
+        let id = self
+            .doc
+            .intern_local(unsafe { core::str::from_utf8_unchecked(local) })
+            .ok()?;
+        let prefix_id =
+            if prefix.is_empty() { NO_ID } else { self.prefix_id(prefix)? };
         let at = q.as_ptr() as usize - self.s.as_ptr() as usize;
         let n = Qname {
             prefix: (at as u32, (at + prefix.len()) as u32),
@@ -550,7 +575,9 @@ impl<'s, 'g> P<'s, 'g> {
                     }
                     self.skip_space();
                     let value = self.attr_value()?;
-                    if self.attrs.len() as u32 >= self.limits.get_max_attributes() {
+                    if self.attrs.len() as u32
+                        >= self.limits.get_max_attributes()
+                    {
                         return None;
                     }
                     self.attrs.push(Attr { name: an, value });
@@ -601,7 +628,11 @@ impl<'s, 'g> P<'s, 'g> {
                 continue;
             };
             let uri = value_of(&self.attrs, &self.values, k);
-            if prefix == b"xml" || prefix == b"xmlns" || uri == XML_NS.as_bytes() || uri == XMLNS_NS.as_bytes() {
+            if prefix == b"xml"
+                || prefix == b"xmlns"
+                || uri == XML_NS.as_bytes()
+                || uri == XMLNS_NS.as_bytes()
+            {
                 return None;
             }
             if !prefix.is_empty() && uri.is_empty() {
@@ -609,14 +640,25 @@ impl<'s, 'g> P<'s, 'g> {
             }
             // SAFETY: the input is UTF-8; the prefix is ASCII.
             let (pre, u) = unsafe {
-                (core::str::from_utf8_unchecked(prefix), core::str::from_utf8_unchecked(uri))
+                (
+                    core::str::from_utf8_unchecked(prefix),
+                    core::str::from_utf8_unchecked(uri),
+                )
             };
-            let ns = self.doc.declare_raw(el, (!prefix.is_empty()).then_some(pre), u).ok()?;
+            let ns = self
+                .doc
+                .declare_raw(el, (!prefix.is_empty()).then_some(pre), u)
+                .ok()?;
             // SAFETY: a new declaration.
             let uri_id = unsafe { (*ns).uriId };
             // Held once here for every element and attribute in it.
             self.doc.hold_uri(StrId::<Uri>::from_raw(uri_id));
-            self.scopes.push(Scope { prefix, ns, uri: uri_id, empty: uri.is_empty() });
+            self.scopes.push(Scope {
+                prefix,
+                ns,
+                uri: uri_id,
+                empty: uri.is_empty(),
+            });
         }
         // The element's namespace.
         let prefix = &self.s[name.prefix.0 as usize..name.prefix.1 as usize];
@@ -625,7 +667,9 @@ impl<'s, 'g> P<'s, 'g> {
         }
         let (uri, ns) = match self.scope(prefix) {
             Some(d) if !d.empty => (d.uri, d.ns),
-            Some(_) | None if prefix.is_empty() => (self.no_uri, ptr::null_mut()),
+            Some(_) | None if prefix.is_empty() => {
+                (self.no_uri, ptr::null_mut())
+            }
             _ => return None, // an undeclared prefix
         };
         // SAFETY: the new element.
@@ -643,7 +687,8 @@ impl<'s, 'g> P<'s, 'g> {
             }
             let colon = an.iter().position(|&b| b == b':');
             let aname = self.name(an, colon)?;
-            let prefix = &self.s[aname.prefix.0 as usize..aname.prefix.1 as usize];
+            let prefix =
+                &self.s[aname.prefix.0 as usize..aname.prefix.1 as usize];
             let (uri, ns) = if prefix.is_empty() {
                 (self.no_uri, ptr::null_mut())
             } else if prefix == b"xml" {
@@ -705,7 +750,6 @@ impl<'s, 'g> P<'s, 'g> {
         Some(())
     }
 
-
     /// A quoted attribute value: in place when it needs no change.
     fn attr_value(&mut self) -> Option<Result<&'s [u8], (usize, usize)>> {
         let q = self.peek()?;
@@ -716,7 +760,8 @@ impl<'s, 'g> P<'s, 'g> {
         let start = self.i;
         let max = self.limits.get_max_value_chars() as usize;
         // Plain: no reference, no whitespace to normalize.
-        let j = start + scan::find5(&self.s[start..], [q, b'<', b'&', b'\t', b'\n']);
+        let j = start
+            + scan::find5(&self.s[start..], [q, b'<', b'&', b'\t', b'\n']);
         match self.s.get(j) {
             None | Some(b'<') => return None,
             Some(&b) if b == q => {
@@ -753,9 +798,11 @@ impl<'s, 'g> P<'s, 'g> {
         Some(Err((at, self.values.len())))
     }
 
-    /// After `&`: a predefined entity or a character reference, as UTF-8.
+    /// After `&`: a predefined entity or a character reference, as
+    /// UTF-8.
     fn reference<'b>(&mut self, buf: &'b mut [u8; 4]) -> Option<&'b [u8]> {
-        let end = self.i + self.rest().iter().take(12).position(|&b| b == b';')?;
+        let end =
+            self.i + self.rest().iter().take(12).position(|&b| b == b';')?;
         let r = &self.s[self.i..end];
         self.i = end + 1;
         let c = match r {
@@ -827,7 +874,8 @@ impl<'s, 'g> P<'s, 'g> {
                                 let end = start + find(self.rest(), b"]]>")?;
                                 self.i = end + 3;
                                 self.buffer_run();
-                                self.text.extend_from_slice(&self.s[start..end]);
+                                self.text
+                                    .extend_from_slice(&self.s[start..end]);
                             } else {
                                 return None;
                             }
@@ -921,7 +969,10 @@ impl<'s, 'g> P<'s, 'g> {
             return None;
         }
         self.i += name.len();
-        if self.peek().is_some_and(|b| is_name_char(b) || b == b':' || b >= 0x80) {
+        if self
+            .peek()
+            .is_some_and(|b| is_name_char(b) || b == b':' || b >= 0x80)
+        {
             return None; // a longer name
         }
         self.skip_space();
@@ -939,7 +990,11 @@ const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 const XMLNS_NS: &str = "http://www.w3.org/2000/xmlns/";
 
 /// The value of the current start tag's attribute `k`.
-fn value_of<'a>(attrs: &'a [Attr<'_>], values: &'a [u8], k: usize) -> &'a [u8] {
+fn value_of<'a>(
+    attrs: &'a [Attr<'_>],
+    values: &'a [u8],
+    k: usize,
+) -> &'a [u8] {
     match attrs[k].value {
         Ok(v) => v,
         Err((a, b)) => &values[a..b],
@@ -962,4 +1017,3 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
     }
     None
 }
-

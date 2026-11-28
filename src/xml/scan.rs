@@ -119,8 +119,14 @@ pub(crate) fn find5(s: &[u8], set: [u8; 5]) -> usize {
                 let v = _mm_loadu_si128(s.as_ptr().add(i).cast());
                 let m = _mm_or_si128(
                     _mm_or_si128(
-                        _mm_or_si128(_mm_cmpeq_epi8(v, v0), _mm_cmpeq_epi8(v, v1)),
-                        _mm_or_si128(_mm_cmpeq_epi8(v, v2), _mm_cmpeq_epi8(v, v3)),
+                        _mm_or_si128(
+                            _mm_cmpeq_epi8(v, v0),
+                            _mm_cmpeq_epi8(v, v1),
+                        ),
+                        _mm_or_si128(
+                            _mm_cmpeq_epi8(v, v2),
+                            _mm_cmpeq_epi8(v, v3),
+                        ),
                     ),
                     _mm_cmpeq_epi8(v, v4),
                 );
@@ -139,7 +145,11 @@ pub(crate) fn find5(s: &[u8], set: [u8; 5]) -> usize {
 fn find5_from(s: &[u8], mut i: usize, set: [u8; 5]) -> usize {
     while i + 8 <= s.len() {
         let w = word(s, i);
-        let m = eq(w, set[0]) | eq(w, set[1]) | eq(w, set[2]) | eq(w, set[3]) | eq(w, set[4]);
+        let m = eq(w, set[0])
+            | eq(w, set[1])
+            | eq(w, set[2])
+            | eq(w, set[3])
+            | eq(w, set[4]);
         if m != 0 {
             return i + (m.trailing_zeros() / 8) as usize;
         }
@@ -164,7 +174,8 @@ pub(crate) fn count(s: &[u8], b: u8) -> usize {
             let vb = _mm_set1_epi8(b as i8);
             while i + 16 <= s.len() {
                 let v = _mm_loadu_si128(s.as_ptr().add(i).cast());
-                n += (_mm_movemask_epi8(_mm_cmpeq_epi8(v, vb)) as u32).count_ones() as usize;
+                n += (_mm_movemask_epi8(_mm_cmpeq_epi8(v, vb)) as u32)
+                    .count_ones() as usize;
                 i += 16;
             }
         }
@@ -206,10 +217,16 @@ pub(crate) fn first_forbidden(s: &[u8]) -> usize {
                 let v = _mm_loadu_si128(s.as_ptr().add(i).cast());
                 let low = _mm_cmplt_epi8(_mm_xor_si128(v, flip), limit);
                 let ok = _mm_or_si128(
-                    _mm_or_si128(_mm_cmpeq_epi8(v, tab), _mm_cmpeq_epi8(v, lf)),
+                    _mm_or_si128(
+                        _mm_cmpeq_epi8(v, tab),
+                        _mm_cmpeq_epi8(v, lf),
+                    ),
                     _mm_cmpeq_epi8(v, cr),
                 );
-                let m = _mm_or_si128(_mm_andnot_si128(ok, low), _mm_cmpeq_epi8(v, ef));
+                let m = _mm_or_si128(
+                    _mm_andnot_si128(ok, low),
+                    _mm_cmpeq_epi8(v, ef),
+                );
                 let bits = _mm_movemask_epi8(m) as u32;
                 if bits != 0 {
                     return i + bits.trailing_zeros() as usize;
@@ -223,7 +240,8 @@ pub(crate) fn first_forbidden(s: &[u8]) -> usize {
 
 /// The portable part of [`first_forbidden`], from `i`.
 fn first_forbidden_from(s: &[u8], mut i: usize) -> usize {
-    let bad = |x: u8| (x < 0x20 && !matches!(x, b'\t' | b'\n' | b'\r')) || x == 0xEF;
+    let bad =
+        |x: u8| (x < 0x20 && !matches!(x, b'\t' | b'\n' | b'\r')) || x == 0xEF;
     while i + 8 <= s.len() {
         let w = word(s, i);
         // Bytes below 0x20: the high three bits are zero.
@@ -251,30 +269,55 @@ mod tests {
     fn match_plain_loops() {
         let mut r = 12345u64;
         let mut next = || {
-            r = r.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            r = r
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (r >> 33) as u8
         };
-        let picks = [b'<', b'&', b']', b'\n', b'\t', b'\r', 0x01, 0x1F, 0xEF, 0x80, 0xFF, b'a', b' ', b'"'];
+        let picks = [
+            b'<', b'&', b']', b'\n', b'\t', b'\r', 0x01, 0x1F, 0xEF, 0x80,
+            0xFF, b'a', b' ', b'"',
+        ];
         for len in 0..70 {
             for _ in 0..40 {
                 let s: Vec<u8> = (0..len)
-                    .map(|_| if next() % 5 == 0 { picks[next() as usize % picks.len()] } else { b'a' + next() % 26 })
+                    .map(|_| {
+                        if next() % 5 == 0 {
+                            picks[next() as usize % picks.len()]
+                        } else {
+                            b'a' + next() % 26
+                        }
+                    })
                     .collect();
-                let plain3 = s.iter().position(|&x| matches!(x, b'<' | b'&' | b']')).unwrap_or(s.len());
+                let plain3 = s
+                    .iter()
+                    .position(|&x| matches!(x, b'<' | b'&' | b']'))
+                    .unwrap_or(s.len());
                 assert_eq!(find3(&s, b'<', b'&', b']'), plain3, "{s:?}");
                 let set = *b"\"<&\t\n";
-                let plain5 = s.iter().position(|x| set.contains(x)).unwrap_or(s.len());
+                let plain5 =
+                    s.iter().position(|x| set.contains(x)).unwrap_or(s.len());
                 assert_eq!(find5(&s, set), plain5, "{s:?}");
-                assert_eq!(count(&s, b'\n'), s.iter().filter(|&&x| x == b'\n').count());
+                assert_eq!(
+                    count(&s, b'\n'),
+                    s.iter().filter(|&&x| x == b'\n').count()
+                );
                 let plainf = s
                     .iter()
-                    .position(|&x| (x < 0x20 && !matches!(x, b'\t' | b'\n' | b'\r')) || x == 0xEF)
+                    .position(|&x| {
+                        (x < 0x20 && !matches!(x, b'\t' | b'\n' | b'\r'))
+                            || x == 0xEF
+                    })
                     .unwrap_or(s.len());
                 assert_eq!(first_forbidden(&s), plainf, "{s:?}");
-                // The portable code alone, as riscv32 and wasm32 run it.
+                // The portable code alone, as riscv32 and wasm32 run
+                // it.
                 assert_eq!(find3_from(&s, 0, b'<', b'&', b']'), plain3);
                 assert_eq!(find5_from(&s, 0, set), plain5);
-                assert_eq!(count_from(&s, 0, b'\n'), s.iter().filter(|&&x| x == b'\n').count());
+                assert_eq!(
+                    count_from(&s, 0, b'\n'),
+                    s.iter().filter(|&&x| x == b'\n').count()
+                );
                 assert_eq!(first_forbidden_from(&s, 0), plainf);
             }
         }

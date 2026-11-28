@@ -66,11 +66,11 @@ works, how the code is laid out, how to build and test it, the decisions already
 | `src/grammar/` | Built-in and schema-informed grammars, `.exig` reading and writing, code-table cache |
 | `src/strings.rs`, `src/strings/hash.rs`, `src/tables.rs` | Global string pool and per-stream string tables |
 | `src/lexical.rs`, `src/value.rs` | Lexical forms and typed values |
-| `src/xml/` | The XML 1.0 text reader and writer (libexi has its own parser on purpose) |
+| `src/xml/` | The XML 1.0 text reader and writer (libexi has its own parser on purpose); `scan.rs` holds the SSE2/SWAR byte scanners |
 | `src/xsd/` | XSD compiler (feature `xsd`) |
 | `src/infer.rs` | Schemas learned from example documents (feature `infer`) |
 | `src/html/` | HTML pipeline and the XHTML5 profile (features `html`, `html5ever`, `xhtml5`) |
-| `src/dom/` | Layer 2 document tree (feature `dom`) |
+| `src/dom/` | Layer 2 document tree (feature `dom`): `mod.rs` types and node creation, `tree.rs`, `attr.rs`, `ns.rs`, `io.rs` (builder, events, `XmlParseOptions`), `parse.rs` (XML text straight into a tree), `arena.rs`, `raw.rs` (C structs) |
 | `src/capi/` | C ABI (feature `capi`); `dom.rs` is the libxml2-style C DOM |
 | `src/bin/exi.rs` | The `exi` command-line tool |
 | `include/` | Generated `exi.h` and hand-written `exi_dom.h` and `exi_libxml_compat.h` |

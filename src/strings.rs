@@ -1292,12 +1292,15 @@ impl Inner {
                 self.entries[id as usize].chunk = NO_CHUNK;
                 self.slotless.push(id);
             }
+            // A chunk a pending reservation still counts in keeps its
+            // bytes; it is released when the reservation ends.
             let cur = self.current;
             for (idx, slot) in self.chunks.iter_mut().enumerate() {
+                if slot.as_ref().is_none_or(|c| c.live > 0) {
+                    continue;
+                }
                 if idx as u32 == cur {
-                    if slot.is_some() {
-                        self.write_pos = 0;
-                    }
+                    self.write_pos = 0;
                 } else {
                     *slot = None;
                 }

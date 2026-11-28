@@ -17,6 +17,8 @@
 
 #![allow(dead_code)] // each bench uses some of this
 
+pub mod corpus;
+
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;

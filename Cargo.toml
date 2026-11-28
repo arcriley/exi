@@ -99,3 +99,9 @@ required-features = ["std", "xml", "dom"]
 name = "esp32c6"
 harness = false
 required-features = ["std"]
+
+[[bench]]
+# cargo bench --bench sax: Layer 1 XML events vs expat and libxml2 SAX2
+name = "sax"
+harness = false
+required-features = ["std", "xml"]

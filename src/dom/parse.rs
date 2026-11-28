@@ -38,7 +38,7 @@ use hashbrown::HashMap;
 use rustc_hash::FxBuildHasher;
 
 use super::raw::*;
-use super::{Document, append_raw};
+use super::{Document, XmlParseOptions, append_raw};
 use crate::Limits;
 use crate::xml::scan;
 use crate::strings::{GlobalStrings, StrId, Uri};
@@ -100,6 +100,10 @@ struct P<'s, 'g> {
     doc: Document<'g>,
     strings: &'g GlobalStrings,
     ignore_blanks: bool,
+    /// Keep comments and PIs; count lines (`XmlParseOptions`).
+    comments: bool,
+    pis: bool,
+    lines: bool,
     line: u32,
     /// Input before this offset is counted in `line`.
     counted: usize,
@@ -208,13 +212,13 @@ fn normalize_newlines(s: &[u8]) -> Vec<u8> {
 pub(super) fn parse<'g>(
     strings: &'g GlobalStrings,
     xml: &[u8],
-    ignore_blanks: bool,
+    opts: &XmlParseOptions,
 ) -> Option<Document<'g>> {
     if xml.starts_with(&[0xFF, 0xFE]) || xml.starts_with(&[0xFE, 0xFF]) {
         return None;
     }
     let xml = xml.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(xml);
-    let limits = Limits::new();
+    let limits = opts.limits;
     if xml.len() as u64 > u32::MAX as u64 || !chars_ok(xml) {
         return None;
     }
@@ -236,7 +240,10 @@ pub(super) fn parse<'g>(
         i: 0,
         doc,
         strings,
-        ignore_blanks,
+        ignore_blanks: opts.ignore_blanks,
+        comments: opts.comments,
+        pis: opts.pis,
+        lines: opts.lines,
         line: 1,
         counted: 0,
         stack: Vec::new(),
@@ -290,6 +297,9 @@ impl<'s, 'g> P<'s, 'g> {
     /// The line offset `at` is on (counting from 1). Offsets only grow,
     /// so each byte is counted once.
     fn line_at(&mut self, at: usize) -> u32 {
+        if !self.lines {
+            return 0;
+        }
         let n = scan::count(&self.s[self.counted..at], b'\n');
         self.line += n as u32;
         self.counted = at;
@@ -422,6 +432,9 @@ impl<'s, 'g> P<'s, 'g> {
             self.i = end + 2;
             &self.s[start..end]
         };
+        if !self.pis {
+            return Some(());
+        }
         self.flush()?;
         // SAFETY: the input is valid UTF-8 and both ends are ASCII.
         let (target, data) = unsafe {
@@ -440,6 +453,9 @@ impl<'s, 'g> P<'s, 'g> {
             return None; // `--` inside, or `--->`
         }
         self.i = end + 3;
+        if !self.comments {
+            return Some(()); // the text around it runs on
+        }
         self.flush()?;
         // SAFETY: valid UTF-8 between ASCII delimiters.
         let text = unsafe { core::str::from_utf8_unchecked(&self.s[start..end]) };

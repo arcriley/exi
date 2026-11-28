@@ -79,6 +79,8 @@ mod parse;
 pub mod raw;
 
 pub use io::{DocEvents, DocumentBuilder};
+#[cfg(feature = "xml")]
+pub use io::XmlParseOptions;
 #[cfg(feature = "std")]
 pub use arena::release_cache;
 

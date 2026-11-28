@@ -18,20 +18,43 @@
 use std::fmt::Write as _;
 
 use exi::dom::raw::*;
-use exi::dom::{Document, DocumentBuilder};
+use exi::dom::{Document, DocumentBuilder, XmlParseOptions};
 use exi::grammar::GrammarSet;
 use exi::strings::{GlobalConfig, GlobalStrings};
 use exi::xml::{XmlConfig, XmlReader};
 use exi::{Step, Result};
 
+/// Options for each combination number: blanks, comments, PIs, lines.
+fn opts(k: usize) -> Opts {
+    Opts { blanks: k & 1 != 0, comments: k & 2 == 0, pis: k & 4 == 0, lines: k & 8 == 0 }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Opts {
+    blanks: bool,
+    comments: bool,
+    pis: bool,
+    lines: bool,
+}
+
+impl Opts {
+    fn parse(self) -> XmlParseOptions {
+        XmlParseOptions::new()
+            .ignore_blanks(self.blanks)
+            .comments(self.comments)
+            .pis(self.pis)
+            .lines(self.lines)
+    }
+}
+
 /// The tree `XmlReader` and `DocumentBuilder` make, as `parse_xml` did
 /// before the direct parser.
-fn streamed<'g>(s: &'g GlobalStrings, xml: &[u8], blanks: bool) -> Result<Document<'g>> {
+fn streamed<'g>(s: &'g GlobalStrings, xml: &[u8], o: Opts) -> Result<Document<'g>> {
     let set = GrammarSet::schemaless();
     let g = set.attach(s)?;
-    let mut b = DocumentBuilder::new(s).ignore_blanks(blanks);
+    let mut b = DocumentBuilder::new(s).ignore_blanks(o.blanks);
     let mut x: XmlReader = XmlReader::new(
-        XmlConfig::new().report_comments(true).report_pis(true).report_doctype(true),
+        XmlConfig::new().report_comments(o.comments).report_pis(o.pis).report_doctype(true),
         &g,
     );
     let mut rest = xml;
@@ -42,7 +65,8 @@ fn streamed<'g>(s: &'g GlobalStrings, xml: &[u8], blanks: bool) -> Result<Docume
         }
         loop {
             match x.next()? {
-                Step::Event(e, meta) => b.event_at(&e, Some(&meta))?,
+                Step::Event(e, meta) if o.lines => b.event_at(&e, Some(&meta))?,
+                Step::Event(e, _) => exi::EventSink::event(&mut b, &e)?,
                 Step::NeedInput => break,
                 Step::End => return b.finish(),
             }
@@ -175,14 +199,14 @@ fn live(s: &GlobalStrings) -> (u32, u32, u32) {
 
 /// The direct parser either declines `xml` or matches the streaming
 /// parser exactly. Returns whether it took the document.
-fn check(xml: &[u8], blanks: bool) -> bool {
+fn check(xml: &[u8], o: Opts) -> bool {
     let s = GlobalStrings::new(GlobalConfig::new()).unwrap();
     let before = live(&s);
-    let slow = streamed(&s, xml, blanks);
-    let fast = Document::parse_xml_direct(&s, xml, blanks);
+    let slow = streamed(&s, xml, o);
+    let fast = Document::parse_xml_direct(&s, xml, &o.parse());
     let took = fast.is_some();
     match (&slow, &fast) {
-        (Ok(a), Some(b)) => assert_eq!(dump(b), dump(a), "input: {:?}", String::from_utf8_lossy(xml)),
+        (Ok(a), Some(b)) => assert_eq!(dump(b), dump(a), "{o:?} input: {:?}", String::from_utf8_lossy(xml)),
         (Err(e), Some(_)) => panic!("direct parser took what XmlReader refuses ({e}): {:?}", String::from_utf8_lossy(xml)),
         _ => {}
     }
@@ -282,8 +306,8 @@ const LEFT: &[&str] = &[
 #[test]
 fn takes_and_matches() {
     for xml in TAKEN {
-        for blanks in [false, true] {
-            assert!(check(xml.as_bytes(), blanks), "should be taken: {xml:?}");
+        for k in 0..16 {
+            assert!(check(xml.as_bytes(), opts(k)), "should be taken: {xml:?}");
         }
     }
 }
@@ -291,7 +315,7 @@ fn takes_and_matches() {
 #[test]
 fn leaves_the_rest_to_xmlreader() {
     for xml in LEFT {
-        assert!(!check(xml.as_bytes(), false), "should be left to XmlReader: {xml:?}");
+        assert!(!check(xml.as_bytes(), opts(0)), "should be left to XmlReader: {xml:?}");
     }
 }
 
@@ -302,7 +326,7 @@ fn errors_read_the_same() {
     let s = GlobalStrings::new(GlobalConfig::new()).unwrap();
     for xml in LEFT {
         let a = Document::parse_xml(&s, xml.as_bytes()).err().map(|e| e.to_string());
-        let b = streamed(&s, xml.as_bytes(), false).err().map(|e| e.to_string());
+        let b = streamed(&s, xml.as_bytes(), opts(0)).err().map(|e| e.to_string());
         assert_eq!(a, b, "{xml:?}");
     }
 }
@@ -319,13 +343,13 @@ fn fixtures_match() {
                 continue;
             }
             let xml = std::fs::read(&p).unwrap();
-            for blanks in [false, true] {
-                taken += check(&xml, blanks) as usize;
+            for k in [0, 1, 6, 9] {
+                taken += check(&xml, opts(k)) as usize;
                 n += 1;
             }
         }
     }
-    assert!(n > 40, "{n} documents");
+    assert!(n > 80, "{n} documents");
     // Nearly every fixture is plain enough for the direct parser.
     assert!(taken * 10 >= n * 8, "{taken} of {n} taken");
 }
@@ -372,7 +396,45 @@ fn mutations_never_diverge() {
                 }
             }
         }
-        taken += check(&d, round % 2 == 1) as usize;
+        taken += check(&d, opts(round % 16)) as usize;
     }
     assert!(taken > 500, "only {taken} mutants taken");
+}
+
+/// The limits apply the same way: a document the direct parser takes
+/// is within them, and one past them gets `XmlReader`'s error.
+#[test]
+fn limits_read_the_same() {
+    let s = GlobalStrings::new(GlobalConfig::new()).unwrap();
+    let deep = "<a>".repeat(5) + &"</a>".repeat(5);
+    let wide = format!("<a {}/>", (0..6).map(|i| format!("k{i}='v'")).collect::<Vec<_>>().join(" "));
+    let long = format!("<a k='{}'>{}</a>", "v".repeat(40), "t".repeat(40));
+    for (xml, limits) in [
+        (&deep, exi::Limits::new().max_depth(4)),
+        (&deep, exi::Limits::new().max_depth(5)),
+        (&wide, exi::Limits::new().max_attributes(5)),
+        (&wide, exi::Limits::new().max_attributes(6)),
+        (&long, exi::Limits::new().max_value_chars(39)),
+        (&long, exi::Limits::new().max_value_chars(40)),
+    ] {
+        let o = XmlParseOptions::new().limits(limits);
+        let fast = Document::parse_xml_opts(&s, xml.as_bytes(), &o).map(|d| d.to_xml().unwrap());
+        let set = GrammarSet::schemaless();
+        let g = set.attach(&s).unwrap();
+        let mut b = DocumentBuilder::new(&s);
+        let mut x: XmlReader = XmlReader::new(XmlConfig::new().limits(limits).report_doctype(true), &g);
+        x.feed(xml.as_bytes());
+        x.end_input();
+        let slow = (|| -> Result<String> {
+            while let Step::Event(e, m) = x.next()? {
+                b.event_at(&e, Some(&m))?;
+            }
+            b.finish()?.to_xml()
+        })();
+        assert_eq!(
+            fast.as_ref().map_err(|e| e.to_string()),
+            slow.as_ref().map_err(|e| e.to_string()),
+            "{xml} {limits:?}"
+        );
+    }
 }

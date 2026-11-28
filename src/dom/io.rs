@@ -450,35 +450,139 @@ impl<'g> DocumentBuilder<'g> {
         }
         Ok(())
     }
+}
 
-    /// Direct character append for sources (like `XmlReader` with comments
-    /// and PIs reported) that already coalesce contiguous text runs.
-    #[cfg(feature = "xml")]
-    fn characters_whole(&mut self, s: &str) -> Result<()> {
-        if self.ended {
-            return Err(Error::new(
-                ErrorKind::State,
-                "an event after the end of the document",
-            ));
+/// How [`Document::parse_xml_opts`] reads XML text: libxml2's parser
+/// options for a tree.
+///
+/// | Option | Default | Off or on |
+/// |---|---|---|
+/// | [`ignore_blanks`](Self::ignore_blanks) | off | leaves out whitespace-only text (`XML_PARSE_NOBLANKS`) |
+/// | [`comments`](Self::comments) | on | off: comments are read but not kept; the text around one joins |
+/// | [`pis`](Self::pis) | on | off: processing instructions likewise |
+/// | [`lines`](Self::lines) | on | off: element `line` fields are 0, and the parse does not count lines |
+/// | [`limits`](Self::limits) | `Limits::new()` | depth, attributes, value length, names |
+///
+/// ```
+/// use exi::dom::{Document, XmlParseOptions};
+/// # use exi::strings::{GlobalConfig, GlobalStrings};
+/// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+/// let doc = Document::parse_xml_opts(&strings, b"<a>x<!--c-->y</a>", &XmlParseOptions::new().comments(false))?;
+/// assert_eq!(doc.children(doc.root().unwrap()).count(), 1);
+/// assert_eq!(doc.content(doc.root().unwrap()), "xy");
+/// # Ok::<(), exi::Error>(())
+/// ```
+#[cfg(feature = "xml")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct XmlParseOptions {
+    pub(super) ignore_blanks: bool,
+    pub(super) comments: bool,
+    pub(super) pis: bool,
+    pub(super) lines: bool,
+    pub(super) limits: crate::Limits,
+}
+
+#[cfg(feature = "xml")]
+impl Default for XmlParseOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "xml")]
+impl XmlParseOptions {
+    /// The defaults: everything kept, lines counted, default limits.
+    ///
+    /// ```
+    /// use exi::dom::XmlParseOptions;
+    /// assert_eq!(XmlParseOptions::new(), XmlParseOptions::default());
+    /// ```
+    pub const fn new() -> Self {
+        XmlParseOptions {
+            ignore_blanks: false,
+            comments: true,
+            pis: true,
+            lines: true,
+            limits: crate::Limits::new(),
         }
-        let open = self.open_element()?;
-        let Some(el) = open else {
-            return Ok(());
-        };
-        self.settle_el(open)?;
-        if !self.text.is_empty() {
-            self.text.push_str(s);
-            return Ok(());
-        }
-        if self.ignore_blanks
-            && s.bytes().all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
-        {
-            return Ok(());
-        }
-        let tp = self.doc.alloc_text_raw(s);
-        // SAFETY: `tp` is a new text node appended to the live open element.
-        unsafe { append_raw(el as *mut RawCommon, tp) };
-        Ok(())
+    }
+
+    /// Leave out text that is whitespace only, such as indentation.
+    ///
+    /// ```
+    /// use exi::dom::{Document, XmlParseOptions};
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let opts = XmlParseOptions::new().ignore_blanks(true);
+    /// let doc = Document::parse_xml_opts(&strings, b"<a>\n  <b/>\n</a>", &opts)?;
+    /// assert_eq!(doc.children(doc.root().unwrap()).count(), 1);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
+    pub const fn ignore_blanks(mut self, on: bool) -> Self {
+        self.ignore_blanks = on;
+        self
+    }
+
+    /// Keep comments (on by default).
+    ///
+    /// ```
+    /// use exi::dom::{Document, NodeKind, XmlParseOptions};
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let doc = Document::parse_xml_opts(&strings, b"<!--c--><a/>", &XmlParseOptions::new().comments(false))?;
+    /// assert_eq!(doc.children(doc.document_node()).count(), 1);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
+    pub const fn comments(mut self, on: bool) -> Self {
+        self.comments = on;
+        self
+    }
+
+    /// Keep processing instructions (on by default).
+    ///
+    /// ```
+    /// use exi::dom::{Document, XmlParseOptions};
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let doc = Document::parse_xml_opts(&strings, b"<a><?p d?></a>", &XmlParseOptions::new().pis(false))?;
+    /// assert_eq!(doc.children(doc.root().unwrap()).count(), 0);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
+    pub const fn pis(mut self, on: bool) -> Self {
+        self.pis = on;
+        self
+    }
+
+    /// Record each element's line in its `line` field (on by default).
+    ///
+    /// ```
+    /// use exi::dom::{Document, XmlParseOptions, raw::RawNode};
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let doc = Document::parse_xml_opts(&strings, b"\n<a/>", &XmlParseOptions::new().lines(false))?;
+    /// // The root is a live element of a borrowed document.
+    /// assert_eq!(unsafe { (*doc.raw(doc.root().unwrap()).cast::<RawNode>()).line }, 0);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
+    pub const fn lines(mut self, on: bool) -> Self {
+        self.lines = on;
+        self
+    }
+
+    /// The limits on depth, attributes, value length and names.
+    ///
+    /// ```
+    /// use exi::dom::{Document, XmlParseOptions};
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let opts = XmlParseOptions::new().limits(exi::Limits::new().max_depth(2));
+    /// let err = Document::parse_xml_opts(&strings, b"<a><b><c/></b></a>", &opts).err().unwrap();
+    /// assert_eq!(err.kind(), exi::ErrorKind::Limit);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
+    pub const fn limits(mut self, l: crate::Limits) -> Self {
+        self.limits = l;
+        self
     }
 }
 
@@ -641,7 +745,33 @@ impl<'g> Document<'g> {
         strings: &'g GlobalStrings,
         xml: &[u8],
     ) -> Result<Document<'g>> {
-        Self::parse_xml_with(strings, xml, DocumentBuilder::new(strings))
+        Self::parse_xml_opts(strings, xml, &XmlParseOptions::new())
+    }
+
+    /// As [`parse_xml`](Self::parse_xml), with options.
+    ///
+    /// ```
+    /// use exi::dom::{Document, XmlParseOptions};
+    /// # use exi::strings::{GlobalConfig, GlobalStrings};
+    /// # let strings = GlobalStrings::new(GlobalConfig::new())?;
+    /// let opts = XmlParseOptions::new().ignore_blanks(true).comments(false);
+    /// let doc = Document::parse_xml_opts(&strings, b"<r>\n  <a/><!--x-->\n</r>", &opts)?;
+    /// assert_eq!(doc.children(doc.root().unwrap()).count(), 1);
+    /// # Ok::<(), exi::Error>(())
+    /// ```
+    #[cfg(feature = "xml")]
+    pub fn parse_xml_opts(
+        strings: &'g GlobalStrings,
+        xml: &[u8],
+        opts: &XmlParseOptions,
+    ) -> Result<Document<'g>> {
+        // Most documents go straight into a tree; the rest, and every
+        // error, take the streaming reader (`dom::parse`).
+        if let Some(doc) = super::parse::parse(strings, xml, opts) {
+            return Ok(doc);
+        }
+        let b = DocumentBuilder::new(strings).ignore_blanks(opts.ignore_blanks);
+        Self::stream_xml(strings, xml, b, opts)
     }
 
     /// As [`parse_xml`](Self::parse_xml), with a configured builder.
@@ -660,24 +790,35 @@ impl<'g> Document<'g> {
     pub fn parse_xml_with(
         strings: &'g GlobalStrings,
         xml: &[u8],
-        mut b: DocumentBuilder<'g>,
+        b: DocumentBuilder<'g>,
     ) -> Result<Document<'g>> {
-        use crate::grammar::GrammarSet;
-        use crate::xml::{XmlConfig, XmlReader};
-        // Most documents go straight into a tree; the rest, and every
-        // error, take the streaming reader (`dom::parse`).
+        let opts = XmlParseOptions::new().ignore_blanks(b.ignore_blanks);
         if b.is_fresh() {
-            if let Some(doc) = super::parse::parse(strings, xml, b.ignore_blanks) {
+            if let Some(doc) = super::parse::parse(strings, xml, &opts) {
                 return Ok(doc);
             }
         }
+        Self::stream_xml(strings, xml, b, &opts)
+    }
+
+    /// XML text through `XmlReader` into `b`.
+    #[cfg(feature = "xml")]
+    fn stream_xml(
+        strings: &'g GlobalStrings,
+        xml: &[u8],
+        mut b: DocumentBuilder<'g>,
+        opts: &XmlParseOptions,
+    ) -> Result<Document<'g>> {
+        use crate::grammar::GrammarSet;
+        use crate::xml::{XmlConfig, XmlReader};
         let set = GrammarSet::schemaless();
         let g = set.attach(strings)?;
         b.doc.reserve_nodes((xml.len() / 32).min(8192));
         let mut x: XmlReader = XmlReader::new(
             XmlConfig::new()
-                .report_comments(true)
-                .report_pis(true)
+                .limits(opts.limits)
+                .report_comments(opts.comments)
+                .report_pis(opts.pis)
                 .report_doctype(true),
             &g,
         );
@@ -688,11 +829,12 @@ impl<'g> Document<'g> {
                 x.end_input();
             }
             loop {
+                // Adjacent text events join into one text node.
                 match x.next()? {
-                    Step::Event(Event::Characters(Value::Str(s)), _) => {
-                        b.characters_whole(s)?
+                    Step::Event(e, meta) if opts.lines => {
+                        b.event_at(&e, Some(&meta))?
                     }
-                    Step::Event(e, meta) => b.event_at(&e, Some(&meta))?,
+                    Step::Event(e, _) => b.event(&e)?,
                     Step::NeedInput => break,
                     Step::End => return b.finish(),
                 }
@@ -707,9 +849,9 @@ impl<'g> Document<'g> {
     pub fn parse_xml_direct(
         strings: &'g GlobalStrings,
         xml: &[u8],
-        ignore_blanks: bool,
+        opts: &XmlParseOptions,
     ) -> Option<Document<'g>> {
-        super::parse::parse(strings, xml, ignore_blanks)
+        super::parse::parse(strings, xml, opts)
     }
 
     /// Writes the document's events to `sink` (`xmlDocDump` for any
